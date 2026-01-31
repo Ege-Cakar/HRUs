@@ -1,0 +1,36 @@
+[project]
+name = "math"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "flax>=0.12.3",
+    "jax[cuda13]>=0.9.0",
+    "matplotlib>=3.10.8",
+    "numpy>=2.2.6",
+    "pandas>=3.0.0",
+    "pytest>=9.0.2",
+    "seaborn>=0.13.2",
+    "tqdm>=4.67.1",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
+
+[tool.coverage.run]
+source = ["model", "train", "common"]
+omit = ["tests/*", "experiment/*"]
+
+[dependency-groups]
+dev = [
+    "jupyter>=1.1.1",
+    "pip>=25.3",
+]

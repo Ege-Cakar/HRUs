@@ -1,0 +1,22 @@
+__pycache__/
+*.png
+*.svg
+*.pkl
+fig/
+wandb/
+*.ipynb_checkpoints/
+.venv/
+.pytest_cache/
+.python-version
+repl/
+experiment/
+
+# ignore slurm logging outputs
+*.err
+*.out
+
+# agent files
+AGENTS.md
+journal/
+*.github
+
