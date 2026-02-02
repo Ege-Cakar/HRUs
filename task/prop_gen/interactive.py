@@ -12,13 +12,8 @@ import xml.etree.ElementTree as et
 import numpy as np
 from typing import Optional, Sequence
 
-from util.data import *
-from util.proof import prove
-from util.out import format_example, start_lean
-from util.sample import gen_batch, n_combo, gen_php
-
 from util.elem import *
-from util.env import *
+from util.proof import *
 
 
 from tqdm import tqdm

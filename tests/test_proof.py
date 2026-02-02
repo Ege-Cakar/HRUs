@@ -6,7 +6,7 @@ from task.prop_gen.util.elem import (
     Axiom, ImpliesRight, ImpliesLeft, AndRight, AndLeft,
     OrRight1, OrRight2, OrLeft, TrueRight, FalseLeft,
 )
-from task.prop_gen.util.env import (
+from task.prop_gen.util.proof import (
     ProofNode, CompletedProofNode, FailedProofNode, InternalProofNode,
     get_next_rules, build_proof_tree,
 )

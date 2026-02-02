@@ -1,508 +1,209 @@
-"""Construct a proof using the focusing + chaining method"""
+"""Defines environment for proposition proof task"""
 
-from .data import *
+from __future__ import annotations
+from dataclasses import dataclass, field
+from typing import Sequence, List, Tuple
 
-use_complete_proof_search = True
-count = 0
-
-def next_assump_name():
-    global count
-    count += 1
-    return f"assump_{count}"
-
-Ctx = List[Tuple[str, Proposition]]
-Sequent = Tuple[Set[Proposition], Proposition]
-RepCtx = List[Sequent]
-
-
-def prove(p : Proposition, keep='simplest') -> Proof:
-    polarized = negative_polarize({}, p)
-    raw_proof =  (right_inverse([], [], [], polarized))
-    proof = refine_choice(raw_proof)
-
-    if keep == 'simplest':
-        proof = keep_simplest(proof)
-    elif keep == 'until_success':
-        proof = keep_until_success(proof)
-    elif keep is None:
-        pass
-    else:
-        raise ValueError(f'unrecognized keep option: keep={keep}')
-
-    proof = rename_assumptions(proof)
-    return proof
+from .elem import (
+    Sequent, Rule,
+    And, Or, Implies,
+    Axiom, ImpliesRight, ImpliesLeft,
+    AndRight, AndLeft,
+    OrRight1, OrRight2, OrLeft,
+    TrueRight, FalseLeft,
+)
 
 
-def negative_polarize(atoms: Dict[str, Proposition], p : Proposition) -> Proposition:
-    match p:
-        case Atom(name):
-            if name in atoms:
-                if isinstance(atoms[name], NegAtom):
-                    return atoms[name]
-                else:
-                    return Upshift(atoms[name])
-            else:
-                atoms[name] = NegAtom(name)
-                return NegAtom(name)
-        case And(left, right):
-            return NegAnd(negative_polarize(atoms, left), negative_polarize(atoms, right))
-        case Or(left, right):
-            return Upshift(positive_polarize(atoms, p))
-        case Implies(left, right):
-            return Implies(positive_polarize(atoms, left), negative_polarize(atoms, right))
-        case PTrue():
-            return p
-        case PFalse():
-            return Upshift(positive_polarize(atoms, p))
-        case _:
-            raise ValueError(f"Invalid proposition: {p}")
+# =============================================================================
+# Proof Node Types
+# =============================================================================
 
-
-def positive_polarize(atoms: Dict[str, Proposition], p : Proposition) -> Proposition:
-    match p:
-        case Atom(name):
-            if name in atoms:
-                if isinstance(atoms[name], PosAtom):
-                    return atoms[name]
-                else:
-                    return Downshift(atoms[name])
-            else:
-                atoms[name] = PosAtom(name)
-                return PosAtom(name)
-        case And(left, right):
-            return PosAnd(positive_polarize(atoms, left), positive_polarize(atoms, right))
-        case Or(left, right):
-            return Or(positive_polarize(atoms, left), positive_polarize(atoms, right))
-        case Implies(left, right):
-            return Downshift(negative_polarize(atoms, p))
-        case PTrue():
-            return p
-        case PFalse():
-            return p
-        case _:
-            raise ValueError(f"Invalid proposition: {p}")
-
-
-def right_inverse(rep_ctx: RepCtx, stable_ctx : Ctx, unstable : Ctx, p : Proposition) -> Proof:
-    match p:
-        case Implies(left, right):
-            new_name = next_assump_name()
-            return ImpliesR(
-                (new_name, right_inverse(rep_ctx, stable_ctx, [(new_name, left), *unstable], right))
-                )
-        case NegAnd(left, right):
-            return NegAndR(
-                right_inverse(rep_ctx, stable_ctx, unstable, left),
-                right_inverse(rep_ctx, stable_ctx, unstable, right)
-                )
-        case PTrue():
-            return NegTrueR()
-        case NegAtom(name):
-            return NegAtomR(left_inverse(rep_ctx, stable_ctx, unstable, p))
-        case Upshift(operand):
-            return UpshiftR(left_inverse(rep_ctx, stable_ctx, unstable, operand))
-        case _:
-            raise ValueError(f"Invalid proposition in right inverse: {p}")
-
-
-def left_inverse(rep_ctx: RepCtx, stable_ctx : Ctx, unstable : Ctx, p : Proposition) -> Proof:
-    match unstable:
-        case []:
-            return StableSeq(chaining(rep_ctx, stable_ctx, p))
-        case [(name, prop), *rest]:
-            new_name_1 = next_assump_name()
-            new_name_2 = next_assump_name()
-            match prop:
-                case Or(left, right):
-                    return OrL(name,
-                        (new_name_1, left_inverse(rep_ctx, stable_ctx, [(new_name_1, left), *rest], p)),
-                        (new_name_2, left_inverse(rep_ctx, stable_ctx, [(new_name_2, right), *rest], p))
-                        )
-                case PFalse():
-                    return FalseL(name)
-                case PosAnd(left, right):
-                    return PosAndL(name,
-                        (new_name_1, new_name_2, 
-                         left_inverse(rep_ctx, stable_ctx, [(new_name_1, left), (new_name_2, right), *rest], p))
-                        )
-                case PTrue():
-                    return PosTrueL(name, left_inverse(rep_ctx, stable_ctx, rest, p))
-                case PosAtom(_):
-                    return left_inverse(rep_ctx, [(name, prop), *stable_ctx], rest, p)
-                case Downshift(operand):
-                    return DownshiftL(name, 
-                        left_inverse(rep_ctx, [(name, operand), *stable_ctx], rest, p))
-                case _:
-                    raise ValueError(f"Invalid proposition in left inverse: {p}")
-        case _:
-            raise ValueError(f"Invalid unstable context: {unstable}")
-
-
-def ctx_to_sequent(ctx: Ctx, right: Proposition) -> Sequent:
-    return (set([p for (_, p) in ctx]), right)
-
-
-def chaining(rep_ctx: RepCtx, stable_ctx: Ctx, p : Proposition) -> Proof:
-    if use_complete_proof_search:
-        this_sequent = ctx_to_sequent(stable_ctx, p)
-        if this_sequent in rep_ctx:
-            return ProofFailed()
-        rep_ctx = [*rep_ctx, this_sequent]
-    else:
-        pass
+@dataclass
+class ProofNode:
+    """Base class for proof tree nodes."""
+    sequent: Sequent
     
-    results: List[FocusL | FocusR] = []
+    @property
+    def is_provable(self) -> bool:
+        """Whether this node represents a provable sequent."""
+        raise NotImplementedError
     
-    if not isinstance(p, NegAtom):
-        proof_after_right_focus = right_focus(rep_ctx, stable_ctx, p)
-        r_1 = FocusR(proof_after_right_focus)
-        results.append(r_1)
+    @property
+    def depth(self) -> int:
+        """Maximum depth of the proof tree rooted at this node."""
+        return 1
     
-    for i,(name, prop) in enumerate(stable_ctx):
-        if isinstance(prop, PosAtom):
-            continue
+    @property
+    def size(self) -> int:
+        """Total number of nodes in the tree rooted at this node."""
+        return 1
 
-        if use_complete_proof_search:
-            new_stable_ctx = stable_ctx[:i] + stable_ctx[i:]
-        else:
-            new_stable_ctx = stable_ctx[:i] + stable_ctx[i+1:]
-        rl = FocusL(name, left_focus(rep_ctx, new_stable_ctx, name, prop, p))
-        results.append(rl)
+
+@dataclass
+class CompletedProofNode(ProofNode):
+    """A sequent proven by an axiom-like rule (no subgoals needed)."""
+    rule: Rule
     
-    return FocusChoice(results)
-
-
-def right_focus(rep_ctx: RepCtx, stable_ctx: Ctx, p : Proposition) -> Proof:
-    match p:
-        case Or(left, right):
-                return OrR_choice(
-                    OrR_left(right_focus(rep_ctx, stable_ctx, left)),
-                    OrR_right(right_focus(rep_ctx, stable_ctx, right)))
-        case PFalse():
-            return ProofFailed()
-        case PosAnd(left, right):
-            return PosAndR(right_focus(rep_ctx, stable_ctx, left), right_focus(rep_ctx, stable_ctx, right))
-        case PTrue():
-            return PosTrueR()
-        case PosAtom(name):
-            match [assump_name for (assump_name, assump) in stable_ctx if assump == p]:
-                case []:
-                    return ProofFailed()
-                case [assump_name, *rest]:
-                    return PosAtomR(assump_name)
-                case _:
-                    raise ValueError("unrecognized value")
-        case Downshift(operand):
-            return DownshiftR(right_inverse(rep_ctx, stable_ctx, [], operand))
-        case _:
-            raise ValueError(f"invalid proposition in right focus: {p}")
-
-
-def left_focus(rep_ctx: RepCtx, stable_ctx: Ctx, name: str, prop: Proposition, p : Proposition) -> Proof:
-    new_name = next_assump_name()
-    new_name_2 = next_assump_name()
-    match prop:
-        case Implies(left, right):
-            return ImpliesL(name, 
-                left,
-                right_focus(rep_ctx, stable_ctx, left),
-                (new_name, left_focus(rep_ctx, stable_ctx, new_name, right, p)), 
-                next_assump_name()
-            )
-        case NegAnd(left, right):
-            return NegAndL_choice(
-                NegAndL_left(name, (new_name, left_focus(rep_ctx, stable_ctx, new_name, left, p))),
-                NegAndL_right(name, (new_name_2, left_focus(rep_ctx, stable_ctx, new_name_2, right, p)))
-            )
-        case PTrue():
-            return ProofFailed()
-        case NegAtom(fname):
-            if p == prop:
-                return NegAtomL(name)
-            else:
-                return ProofFailed()
-        case Upshift(operand):
-            return UpshiftL(name, left_inverse(rep_ctx, stable_ctx, [(name, operand)], p))
-        case _:
-            raise ValueError(f"Invalid proposition in left focus: {prop}")
-
-
-def collect_top_level_choices(p: Proof) -> Sequence[Proof]:
-    match p:
-        case FocusChoice(choices):
-            all_choices : List[Proof] = []
-            for c in choices:
-                all_choices.extend(collect_top_level_choices(c))
-            return all_choices
-        case NegAndL_choice(l, r):
-            return [l, r]
-        case OrR_choice(l, r):
-            return [l, r]
-        case FocusR(sub):
-            return collect_top_level_choices(sub)
-        case FocusL(name, sub):
-            return collect_top_level_choices(sub)
-        case ProofFailed():
-            return []
-        case _:
-            return [p]
-
-        
-def refine_choice(proof: Proof) -> Proof:
-    def consolidate_proof_choice(proof: Proof) -> Optional[Proof]:
-        match proof:
-            case FocusChoice(choices):
-                all_choices = collect_top_level_choices(proof)
-                refined = [refine_choice(c) for c in all_choices]
-                return FocusChoice(refined)
-            case _:
-                return None
-    return map_proof(consolidate_proof_choice, proof)
-
-
-
-def keep_simplest(p: Proof) -> Proof:
-    if proof_has_failed(p):
-        return keep_until_success(p)
-
-    def make_choice(p: Proof) -> Optional[Proof]:
-        match p:
-            case FocusChoice(choices):
-                success_choices = [keep_simplest(c) for c in choices if not proof_has_failed(c)]
-                return keep_simplest(min(success_choices, key=calculate_complexity))
-            case NegAndL_choice(l, r):
-                success_choices = [keep_simplest(c) for c in [l, r] if not proof_has_failed(c)]
-                return keep_simplest(min(success_choices, key=calculate_complexity))
-            case OrR_choice(l, r):
-                success_choices = [keep_simplest(c) for c in [l, r] if not proof_has_failed(c)]
-                return keep_simplest(min(success_choices, key=calculate_complexity))
-            case _:
-                return None
-
-    return map_proof(make_choice, p)
-
-
-def keep_until_success(p: Proof) -> Proof:
-    def make_choice(p: Proof) -> Optional[Proof]:
-        match p:
-            case FocusChoice(choices):
-                new_choices = []
-                for c in choices:
-                    if not proof_has_failed(c):
-                        new_choices.append(keep_until_success(c))
-                        break
-                    else:
-                        new_choices.append(keep_until_success(c))
-                return FocusChoice(new_choices)
-            case NegAndL_choice(l, r):
-                if not proof_has_failed(l):
-                    return keep_until_success(l)
-                else:
-                    return NegAndL_choice(
-                        keep_until_success(l),
-                        keep_until_success(r)
-                    )
-            case OrR_choice(l, r):
-                if not proof_has_failed(l):
-                    return keep_until_success(l)
-                else:
-                    return OrR_choice(
-                        keep_until_success(l),
-                        keep_until_success(r)
-                    )
-            case _:
-                return None
-
-    result =  map_proof(make_choice, p)    
-    return result
-
-
-def proof_has_failed(p: Proof) -> bool:
-    class ProofHasFailed(Exception): pass
-
-    def check_failure(p: Proof) -> Optional[Proof]:
-        match p:
-            case ProofFailed():
-                raise ProofHasFailed()
-            case FocusChoice(choices):
-                if all([proof_has_failed(c) for c in choices]):
-                    raise ProofHasFailed()
-                else:
-                    return "FAIL CHECK STUB" # cut off checking here
-            case NegAndL_choice(l, r):
-                if proof_has_failed(l) and proof_has_failed(r):
-                    raise ProofHasFailed()
-                else:
-                    return "FAIL CHECK STUB"
-            case OrR_choice(l, r):
-                if proof_has_failed(l) and proof_has_failed(r):
-                    raise ProofHasFailed()
-                else:
-                    return "FAIL CHECK STUB"
-            case _:
-                return None
-    
-    try:
-        map_proof(check_failure, p)
-        return False
-
-    except ProofHasFailed:
+    @property
+    def is_provable(self) -> bool:
         return True
+    
+    def __str__(self) -> str:
+        return f"{self.sequent}  [✓ {self.rule}]"
 
 
-def calculate_complexity(p: Proof) -> int:
-    match p:
-        case ImpliesR((name, subproof)):
-            return 1 + calculate_complexity(subproof)
-        case NegAndR(left, right):
-            return 1 + calculate_complexity(left) + calculate_complexity(right)
-        case NegTrueR():
+@dataclass
+class FailedProofNode(ProofNode):
+    """A sequent that could not be proven."""
+    reason: str = ""
+    
+    @property
+    def is_provable(self) -> bool:
+        return False
+    
+    def __str__(self) -> str:
+        reason_str = f": {self.reason}" if self.reason else ""
+        return f"{self.sequent}  [✗{reason_str}]"
+
+
+@dataclass
+class InternalProofNode(ProofNode):
+    """A node with rule applications leading to child proof nodes.
+    
+    Each branch is a (rule, children) pair where children are the proof nodes
+    for each subgoal generated by that rule application.
+    """
+    branches: List[Tuple[Rule, List[ProofNode]]] = field(default_factory=list)
+    
+    @property
+    def is_provable(self) -> bool:
+        """Provable if any branch has all children provable."""
+        return any(
+            all(child.is_provable for child in children)
+            for rule, children in self.branches
+        )
+    
+    @property
+    def depth(self) -> int:
+        if not self.branches:
             return 1
-        case NegAtomR(subproof):
-            return 1 + calculate_complexity(subproof)
-        case UpshiftR(subproof):
-            return 1 + calculate_complexity(subproof)
-        case OrL(name, (left_name, left_proof), (right_name, right_proof)):
-            return 1 + calculate_complexity(left_proof) + calculate_complexity(right_proof)
-        case FalseL(name):
-            return 1
-        case PosAndL(name, (left_name, right_name, subproof)):
-            return 1 + calculate_complexity(subproof)
-        case PosTrueL(name, subproof):
-            return 1 + calculate_complexity(subproof)
-        case PosAtomL(name, subproof):
-            return 1 + calculate_complexity(subproof)
-        case DownshiftL(name, subproof):
-            return 1 + calculate_complexity(subproof)
-        case StableSeq(subproof):
-            return 1 + calculate_complexity(subproof)
-        case FocusR(subproof):
-            return 1 + calculate_complexity(subproof)
-        case FocusL(name, subproof):
-            return 1 + calculate_complexity(subproof)
-        case OrR_left(subproof):
-            return 1 + calculate_complexity(subproof)
-        case OrR_right(subproof):
-            return 1 + calculate_complexity(subproof)
-        case PosAndR(left, right):
-            return 1 + calculate_complexity(left) + calculate_complexity(right)
-        case PosTrueR():
-            return 1
-        case PosAtomR(name):
-            return 1
-        case DownshiftR(subproof):
-            return 1 + calculate_complexity(subproof)
-        case ImpliesL(name, prop, left, (right_name, right_proof), additional_name):
-            return 1 + calculate_complexity(left) + calculate_complexity(right_proof)
-        case NegAndL_left(name, (left_name, left_proof)):
-            return 1 + calculate_complexity(left_proof)
-        case NegAndL_right(name, (right_name, right_proof)):
-            return 1 + calculate_complexity(right_proof)
-        case NegAtomL(name):
-            return 1
-        case UpshiftL(name, subproof):
-            return 1 + calculate_complexity(subproof)
-        case FocusChoice(choices):
-            return 1 + sum([calculate_complexity(c) for c in choices])
-        case OrR_choice(l, r):
-            return 1 + calculate_complexity(l) + calculate_complexity(r)
-        case NegAndL_choice(l, r):
-            return 1 + calculate_complexity(l) + calculate_complexity(r)
-        case ProofFailed():
-            return 1
-        case _:
-            raise ValueError(f"Invalid proof: {p}")
+        max_child_depth = max(
+            max((child.depth for child in children), default=0)
+            for rule, children in self.branches
+        )
+        return 1 + max_child_depth
+    
+    @property
+    def size(self) -> int:
+        return 1 + sum(
+            sum(child.size for child in children)
+            for rule, children in self.branches
+        )
+    
+    def successful_branch(self) -> Tuple[Rule, List[ProofNode]] | None:
+        """Return the first branch where all children are provable, or None."""
+        for rule, children in self.branches:
+            if all(child.is_provable for child in children):
+                return (rule, children)
+        return None
+    
+    def __str__(self) -> str:
+        return self._to_string(indent=0)
+    
+    def _to_string(self, indent: int = 0) -> str:
+        prefix = "  " * indent
+        lines = [f"{prefix}{self.sequent}"]
+        for rule, children in self.branches:
+            provable = all(c.is_provable for c in children)
+            mark = "✓" if provable else "✗"
+            lines.append(f"{prefix}  [{mark} {rule}]")
+            for child in children:
+                if isinstance(child, InternalProofNode):
+                    lines.append(child._to_string(indent + 2))
+                else:
+                    lines.append(f"{prefix}    {child}")
+        return "\n".join(lines)
 
 
-def rename_assumptions(p: Proof) -> Proof:
-    return _rename(AssumptionCtx(), p)
+# =============================================================================
+# Rule Generation
+# =============================================================================
+
+def get_next_rules(sequent: Sequent) -> Sequence[Rule]:
+    """Generate applicable rules for a sequent"""
+    rules: List[Rule] = [Axiom(), TrueRight(), FalseLeft()]
+    
+    # left rules
+    for ant in sequent.ants:
+        if isinstance(ant, And):
+            rules.append(AndLeft(ant))
+        if isinstance(ant, Or):
+            rules.append(OrLeft(ant))
+        elif isinstance(ant, Implies):
+            rules.append(ImpliesLeft(ant))
+    
+    # right rules
+    if isinstance(sequent.cons, Implies):
+        rules.append(ImpliesRight())
+    elif isinstance(sequent.cons, And):
+        rules.append(AndRight())
+    elif isinstance(sequent.cons, Or):
+        rules.append(OrRight1())
+        rules.append(OrRight2())
+    
+    return rules
 
 
-class AssumptionCtx():
-    def __init__(self):
-        self.existing = {}
+# =============================================================================
+# Proof Search
+# =============================================================================
 
-    def add(self, name) -> str:
-        assert name not in self.existing
-        self.existing[name] = f"h{len(self.existing.keys()) + 1}"
-        return self.existing[name]
+def build_proof_tree(
+    sequent: Sequent,
+    max_depth: int = 10_000,
+    visited: set | None = None,
+) -> ProofNode:
+    """Build a complete proof tree exploring all rule applications.
+    
+    Returns a ProofNode representing the full search tree. Use `.is_provable`
+    to check if a successful proof exists within the tree.
+    """
+    if max_depth <= 0:
+        return FailedProofNode(sequent, reason="depth limit")
+    
+    if visited is None:
+        visited = set()
+    
+    # Cycle detection
+    seq_key = (frozenset(sequent.ants), sequent.cons)
+    if seq_key in visited:
+        return FailedProofNode(sequent, reason="cycle")
+    
+    visited.add(seq_key)
+    try:
+        branches: List[Tuple[Rule, List[ProofNode]]] = []
+        
+        for rule in get_next_rules(sequent):
+            result = rule.apply(sequent)
+            if result is None:
+                continue  # Rule not applicable
+            
+            if len(result) == 0:  # Empty list = proven immediately
+                return CompletedProofNode(sequent, rule)
+            
+            # Build proof nodes for all subgoals
+            children = [
+                build_proof_tree(subgoal, max_depth - 1, visited)
+                for subgoal in result
+            ]
+            branches.append((rule, children))
+        
+        if not branches:
+            return FailedProofNode(sequent, reason="no applicable rules")
+        
+        return InternalProofNode(sequent, branches)
+    
+    finally:
+        visited.discard(seq_key)
 
-    def get(self, name) -> str:
-        return self.existing[name]
 
-def _rename(ctx: AssumptionCtx, p: Proof) -> Proof:
-    match p:
-        case ImpliesR((name, subproof)):
-            return ImpliesR((ctx.add(name), _rename(ctx, subproof)))
-        case NegAndR(left, right):
-            return NegAndR(_rename(ctx, left), _rename(ctx, right))
-        case NegTrueR():
-            return NegTrueR()
-        case NegAtomR(subproof):
-            return NegAtomR(_rename(ctx, subproof))
-        case UpshiftR(subproof):
-            return UpshiftR(_rename(ctx, subproof))
-        case OrL(name, (left_name, left_proof), (right_name, right_proof)):
-            return OrL(ctx.get(name),
-                (ctx.add(left_name), _rename(ctx, left_proof)),
-                (ctx.add(right_name), _rename(ctx, right_proof))
-                )
-        case FalseL(name):
-            return FalseL(ctx.get(name))
-        case PosAndL(name, (left_name, right_name, subproof)):
-            return PosAndL(ctx.get(name),
-                (ctx.add(left_name), ctx.add(right_name), _rename(ctx, subproof))
-                )
-        case PosTrueL(name, subproof):
-            return PosTrueL(ctx.get(name), _rename(ctx, subproof))
-        case PosAtomL(name, subproof):
-            return PosAtomL(ctx.get(name), _rename(ctx, subproof))
-        case DownshiftL(name, subproof):
-            return DownshiftL(ctx.get(name), _rename(ctx, subproof))
-        case StableSeq(subproof):
-            return StableSeq(_rename(ctx, subproof))
-        case FocusR(subproof):
-            return FocusR(_rename(ctx, subproof))
-        case FocusL(name, subproof):
-            return FocusL(ctx.get(name), _rename(ctx, subproof))
-        case OrR_left(subproof):
-            return OrR_left(_rename(ctx, subproof))
-        case OrR_right(subproof):
-            return OrR_right(_rename(ctx, subproof))
-        case PosAndR(left, right):
-            return PosAndR(_rename(ctx, left), _rename(ctx, right))
-        case PosTrueR():
-            return PosTrueR()
-        case PosAtomR(name):
-            return PosAtomR(ctx.get(name))
-        case DownshiftR(subproof):
-            return DownshiftR(_rename(ctx, subproof))
-        case ImpliesL(name, prop, left, (right_name, right_proof), additional_name):
-            ctx.add(additional_name)
-            return ImpliesL(ctx.get(name), prop,
-                _rename(ctx, left),
-                (ctx.add(right_name), _rename(ctx, right_proof)),
-                ctx.get(additional_name)
-                )
-        case NegAndL_left(name, (left_name, left_proof)):
-            return NegAndL_left(ctx.get(name),
-                (ctx.add(left_name), _rename(ctx, left_proof))
-                )
-        case NegAndL_right(name, (right_name, right_proof)):
-            return NegAndL_right(ctx.get(name),
-                (ctx.add(right_name), _rename(ctx, right_proof))
-                )
-        case NegAtomL(name):
-            return NegAtomL(ctx.get(name))
-        case UpshiftL(name, subproof):
-            return UpshiftL(ctx.get(name), _rename(ctx, subproof))
-        case FocusChoice(choices):
-            return FocusChoice([_rename(ctx, choice) for choice in choices])
-        case NegAndL_choice(l, r):
-            return NegAndL_choice(_rename(ctx, l), _rename(ctx, r))
-        case OrR_choice(l, r):
-            return OrR_choice(_rename(ctx, l), _rename(ctx, r))
-        case ProofFailed():
-            return ProofFailed()
-        case _:
-            raise ValueError(f"Invalid proof: {p}")
