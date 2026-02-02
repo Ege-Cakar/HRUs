@@ -21,6 +21,9 @@ python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
 addopts = "-v --tb=short"
+markers = [
+    "slow: long-running tests (run only when relevant code changes)",
+]
 filterwarnings = [
     "ignore::DeprecationWarning",
 ]

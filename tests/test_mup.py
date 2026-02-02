@@ -2,6 +2,7 @@
 
 import numpy as np
 import optax
+import pytest
 import jax.numpy as jnp
 from flax import nnx
 
@@ -91,6 +92,7 @@ def _assert_width_stable(l1s, *, max_ratio: float = 2.0):
     assert ratio < max_ratio
 
 
+@pytest.mark.slow
 def test_mup_coord_check_mlp():
     widths = [32, 64]
     vocab = 32
@@ -113,6 +115,7 @@ def test_mup_coord_check_mlp():
     _assert_width_stable(l1s)
 
 
+@pytest.mark.slow
 def test_mup_coord_check_mixer():
     widths = [32, 64]
     vocab = 32
@@ -138,6 +141,7 @@ def test_mup_coord_check_mixer():
     _assert_width_stable(l1s)
 
 
+@pytest.mark.slow
 def test_mup_coord_check_transformer():
     widths = [32, 64]
     vocab = 32

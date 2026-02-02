@@ -399,15 +399,6 @@ class TestEdgeCases:
         node = build_proof_tree(seq, max_depth=2)
         assert node.is_provable
     
-    def test_cycle_detection(self):
-        """Cycles produce FailedProofNode with reason."""
-        # This sequent would lead to cycles without detection
-        seq = Sequent([Implies(A, A)], B)
-        node = build_proof_tree(seq, max_depth=10)
-        
-        # Should terminate (not hang) and be unprovable
-        assert not node.is_provable
-    
     def test_duplicate_antecedents(self):
         """Handle duplicate antecedents gracefully."""
         seq = Sequent([A, A, A], A)

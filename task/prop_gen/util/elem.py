@@ -13,6 +13,8 @@ class Atom:
     def __str__(self):
         return self.name
 
+    __repr__ = __str__
+
 @dataclass(frozen=True)
 class And:
     left: Proposition
@@ -20,6 +22,8 @@ class And:
 
     def __str__(self):
         return f"({self.left} ∧ {self.right})"
+
+    __repr__ = __str__
 
 @dataclass(frozen=True)
 class Or:
@@ -29,6 +33,8 @@ class Or:
     def __str__(self):
         return f"({self.left} ∨ {self.right})"
 
+    __repr__ = __str__
+
 @dataclass(frozen=True)
 class Implies:
     left: Proposition
@@ -37,16 +43,22 @@ class Implies:
     def __str__(self):
         return f"({self.left} → {self.right})"
 
+    __repr__ = __str__
+
 @dataclass(frozen=True)  
 class PTrue:
     def __str__(self):
         return "⊤"
 
+    __repr__ = __str__
+
 @dataclass(frozen=True)
 class PFalse:
     def __str__(self):
         return "⊥"
-    
+
+    __repr__ = __str__
+
 
 Proposition = And | Or | Implies | PTrue | PFalse | Atom
 
@@ -72,6 +84,8 @@ class Sequent:
     def __str__(self):
         ants_str = ', '.join(str(ant) for ant in self.ants)
         return f"{ants_str} ⊢ {self.cons}"
+
+    __repr__ = __str__
 
 class Rule:
     """Base class for inference rules in Gentzen's NJ system.
@@ -100,6 +114,8 @@ class Axiom(Rule):
     def __str__(self) -> str:
         return "Ax"
 
+    __repr__ = __str__
+
 
 # =============================================================================
 # Implication Rules
@@ -119,6 +135,8 @@ class ImpliesRight(Rule):
     
     def __str__(self) -> str:
         return "→R"
+
+    __repr__ = __str__
 
 
 class ImpliesLeft(Rule):
@@ -143,6 +161,8 @@ class ImpliesLeft(Rule):
     def __str__(self) -> str:
         return f"→L ({self.implication})"
 
+    __repr__ = __str__
+
 
 # =============================================================================
 # Conjunction Rules
@@ -166,6 +186,8 @@ class AndRight(Rule):
     def __str__(self) -> str:
         return "∧R"
 
+    __repr__ = __str__
+
 
 class AndLeft(Rule):
     """∧E (Conjunction Elimination): From A ∧ B in context, extract A and B.
@@ -188,6 +210,8 @@ class AndLeft(Rule):
     def __str__(self) -> str:
         return f"∧L ({self.conjunction})"
 
+    __repr__ = __str__
+
 
 # =============================================================================
 # Disjunction Rules
@@ -208,6 +232,8 @@ class OrRight1(Rule):
     def __str__(self) -> str:
         return "∨R₁"
 
+    __repr__ = __str__
+
 
 class OrRight2(Rule):
     """∨I₂ (Disjunction Introduction Right): To prove A ∨ B, prove B.
@@ -223,6 +249,8 @@ class OrRight2(Rule):
     
     def __str__(self) -> str:
         return "∨R₂"
+
+    __repr__ = __str__
 
 
 class OrLeft(Rule):
@@ -249,6 +277,8 @@ class OrLeft(Rule):
     def __str__(self) -> str:
         return f"∨L ({self.disjunction})"
 
+    __repr__ = __str__
+
 
 # =============================================================================
 # Truth Rules
@@ -265,6 +295,8 @@ class TrueRight(Rule):
     
     def __str__(self) -> str:
         return "⊤R"
+
+    __repr__ = __str__
 
 
 # =============================================================================
@@ -285,6 +317,8 @@ class FalseLeft(Rule):
     
     def __str__(self) -> str:
         return "⊥L"
+
+    __repr__ = __str__
 
 
 # =============================================================================
@@ -308,4 +342,5 @@ class NegationRight(Rule):
     def __str__(self) -> str:
         return "¬R"
 
+    __repr__ = __str__
 

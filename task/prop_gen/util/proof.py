@@ -161,7 +161,6 @@ def get_next_rules(sequent: Sequent) -> Sequence[Rule]:
 def build_proof_tree(
     sequent: Sequent,
     max_depth: int = 10_000,
-    visited: set | None = None,
 ) -> ProofNode:
     """Build a complete proof tree exploring all rule applications.
     
@@ -171,39 +170,26 @@ def build_proof_tree(
     if max_depth <= 0:
         return FailedProofNode(sequent, reason="depth limit")
     
-    if visited is None:
-        visited = set()
+    branches: List[Tuple[Rule, List[ProofNode]]] = []
     
-    # Cycle detection
-    seq_key = (frozenset(sequent.ants), sequent.cons)
-    if seq_key in visited:
-        return FailedProofNode(sequent, reason="cycle")
+    for rule in get_next_rules(sequent):
+        result = rule.apply(sequent)
+        if result is None:
+            continue  # Rule not applicable
+        
+        if len(result) == 0:  # Empty list = proven immediately
+            return CompletedProofNode(sequent, rule)
+        
+        # Build proof nodes for all subgoals
+        children = [
+            build_proof_tree(subgoal, max_depth - 1)
+            for subgoal in result
+        ]
+        branches.append((rule, children))
     
-    visited.add(seq_key)
-    try:
-        branches: List[Tuple[Rule, List[ProofNode]]] = []
-        
-        for rule in get_next_rules(sequent):
-            result = rule.apply(sequent)
-            if result is None:
-                continue  # Rule not applicable
-            
-            if len(result) == 0:  # Empty list = proven immediately
-                return CompletedProofNode(sequent, rule)
-            
-            # Build proof nodes for all subgoals
-            children = [
-                build_proof_tree(subgoal, max_depth - 1, visited)
-                for subgoal in result
-            ]
-            branches.append((rule, children))
-        
-        if not branches:
-            return FailedProofNode(sequent, reason="no applicable rules")
-        
-        return InternalProofNode(sequent, branches)
+    if not branches:
+        return FailedProofNode(sequent, reason="no applicable rules")
     
-    finally:
-        visited.discard(seq_key)
+    return InternalProofNode(sequent, branches)
 
 

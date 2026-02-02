@@ -14,6 +14,7 @@ from typing import Optional, Sequence
 
 from util.elem import *
 from util.proof import *
+from util.sample import *
 
 
 from tqdm import tqdm
@@ -43,7 +44,11 @@ print(t)
 print(f"\nTree size: {t.size}, depth: {t.depth}, provable: {t.is_provable}")
 
 # <codecell>
-t.branches
+p = Implies(conj, Implies(prop1, prop2))
+l = list_sequents(p)
+
+# <codecell>
+l
 
 
 ### OLD CODE BELOW
