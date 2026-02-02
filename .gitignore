@@ -10,6 +10,7 @@ wandb/
 .python-version
 repl/
 *.array_record
+data/
 experiment/
 
 # ignore slurm logging outputs

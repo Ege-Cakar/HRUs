@@ -44,40 +44,24 @@ def test_tokenize_decode_roundtrip_with_left_rules():
     ant2 = And(p3, p4)
     ant3 = Or(p2, PTrue())
     sequent = Sequent([ant1, ant2, ant3, p5], Implies(p1, PFalse()))
-    rules = [
-        Axiom(),
-        ImpliesRight(),
-        AndRight(),
-        OrRight1(),
-        OrRight2(),
-        TrueRight(),
-        FalseLeft(),
-        NegationRight(),
-        ImpliesLeft(ant1),
-        AndLeft(ant2),
-        OrLeft(ant3),
-    ]
+    rule = ImpliesLeft(ant1)
 
-    tokens = tokenize_util.tokenize((sequent, rules))
-    assert tokens[1][-3:] == [(3, 1), (5, 2), (8, 3)]
+    tokens = tokenize_util.tokenize((sequent, rule))
+    assert tokens[1] == (3, 1)
 
-    decoded_sequent, decoded_rules = tokenize_util.decode(tokens)
+    decoded_sequent, decoded_rule = tokenize_util.decode(tokens)
     assert decoded_sequent == sequent
-    assert [_rule_sig(rule) for rule in decoded_rules] == [
-        _rule_sig(rule) for rule in rules
-    ]
+    assert _rule_sig(decoded_rule) == _rule_sig(rule)
 
 
 def test_tokenize_decode_roundtrip_empty_ants():
     p1 = Atom("p1")
     p2 = Atom("p2")
     sequent = Sequent([], Or(p1, p2))
-    rules = [OrRight1(), OrRight2()]
+    rule = OrRight1()
 
-    decoded_sequent, decoded_rules = tokenize_util.decode(
-        tokenize_util.tokenize((sequent, rules))
+    decoded_sequent, decoded_rule = tokenize_util.decode(
+        tokenize_util.tokenize((sequent, rule))
     )
     assert decoded_sequent == sequent
-    assert [_rule_sig(rule) for rule in decoded_rules] == [
-        _rule_sig(rule) for rule in rules
-    ]
+    assert _rule_sig(decoded_rule) == _rule_sig(rule)

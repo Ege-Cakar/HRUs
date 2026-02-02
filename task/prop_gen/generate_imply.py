@@ -13,14 +13,15 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
 
 import numpy as np
+from tqdm import tqdm
 
 from array_record.python import array_record_module
 
-from util.sample import sample_imply, list_sequents
-from util.tokenize import tokenize, TokenizedExample
+from util.sample import sample_imply, list_sequents_uniform
+from util.tokenize import tokenize
+from util.elem import TokenizedExample
 
 
 @dataclass(frozen=True)
@@ -75,16 +76,13 @@ class ArrayRecordShardWriter:
     def write(self, example: TokenizedExample) -> None:
         if self._examples_in_shard >= self.examples_per_shard:
             self._rollover()
-        sequent_tokens, rule_tokens = example
+        sequent_tokens, rule_token = example
         sequent = np.asarray(sequent_tokens, dtype=np.int32)
-        if rule_tokens:
-            rules = np.asarray(rule_tokens, dtype=np.int32)
-        else:
-            rules = np.zeros((0, 2), dtype=np.int32)
+        rule = np.asarray(rule_token, dtype=np.int32)
         payload = pickle.dumps(
             {
                 "sequent": sequent,
-                "rules": rules,
+                "rule": rule,
             },
             protocol=5,
         )
@@ -106,6 +104,10 @@ def _size_seed(base_seed: int, size: int) -> int:
     return base_seed + size * 1_000_003
 
 
+def _default_seed() -> int:
+    return int(np.random.randint(0, np.iinfo(np.int32).max))
+
+
 def _generate_for_size(
     size: int,
     n_vars: int,
@@ -114,7 +116,9 @@ def _generate_for_size(
     examples_per_shard: int,
     arrayrecord_options: str,
     seed: int,
-    log_every: int,
+    progress_bar: tqdm | None,
+    overall_bar: tqdm | None,
+    progress_step: int,
 ) -> GenerationStats:
     start = time.time()
     rng = random.Random(_size_seed(seed, size))
@@ -126,17 +130,26 @@ def _generate_for_size(
         writer_options=arrayrecord_options,
     )
     total = 0
-    last_log = 0
+    pending = 0
     while total < n_exs:
         prop = sample_imply(n_vars, size, rng=rng)
-        for ex in list_sequents(prop):
-            writer.write(tokenize(ex))
+        for example in list_sequents_uniform(prop, rng=rng):
+            writer.write(tokenize(example))
             total += 1
-            if log_every > 0 and total - last_log >= log_every:
-                print(f"[size {size}] generated {total}/{n_exs}")
-                last_log = total
+            pending += 1
+            if pending >= progress_step:
+                if progress_bar is not None:
+                    progress_bar.update(pending)
+                if overall_bar is not None:
+                    overall_bar.update(pending)
+                pending = 0
             if total >= n_exs:
                 break
+    if pending:
+        if progress_bar is not None:
+            progress_bar.update(pending)
+        if overall_bar is not None:
+            overall_bar.update(pending)
     writer.close()
     elapsed = time.time() - start
     return GenerationStats(
@@ -158,11 +171,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--examples-per-size", type=int, default=10_000)
     parser.add_argument("--examples-per-shard", type=int, default=50_000)
     parser.add_argument("--workers", type=int, default=min(32, os.cpu_count() or 4))
-    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--seed", type=int, default=None)
     parser.add_argument(
         "--arrayrecord-options",
         type=str,
-        default="group_size:1024",
+        default="group_size:1",
         help="ArrayRecord writer options string.",
     )
     parser.add_argument("--log-every", type=int, default=5_000)
@@ -171,6 +184,8 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = _parse_args()
+    if args.seed is None:
+        args.seed = _default_seed()
     sizes = list(range(args.min_size, args.max_size + 1))
     if not sizes:
         raise ValueError("No sizes to generate. Check --min-size/--max-size.")
@@ -179,28 +194,54 @@ def main() -> None:
     max_workers = max(1, min(args.workers, len(sizes)))
     stats: list[GenerationStats] = []
 
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {
-            executor.submit(
-                _generate_for_size,
-                size,
-                args.n_vars,
-                args.examples_per_size,
-                args.out_dir,
-                args.examples_per_shard,
-                args.arrayrecord_options,
-                args.seed,
-                args.log_every,
-            ): size
-            for size in sizes
-        }
-        for future in as_completed(futures):
-            stats.append(future.result())
+    progress_step = max(1, args.log_every) if args.log_every > 0 else 1
+    total_examples = args.examples_per_size * len(sizes)
+
+    bars: dict[int, tqdm] = {}
+    for idx, size in enumerate(sizes):
+        bars[size] = tqdm(
+            total=args.examples_per_size,
+            position=idx,
+            desc=f"size {size:02d}",
+            leave=True,
+        )
+    overall_bar = tqdm(
+        total=total_examples,
+        position=len(sizes),
+        desc="overall",
+        leave=True,
+    )
+
+    try:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(
+                    _generate_for_size,
+                    size,
+                    args.n_vars,
+                    args.examples_per_size,
+                    args.out_dir,
+                    args.examples_per_shard,
+                    args.arrayrecord_options,
+                    args.seed,
+                    bars[size],
+                    overall_bar,
+                    progress_step,
+                ): size
+                for size in sizes
+            }
+            for future in as_completed(futures):
+                stats.append(future.result())
+    finally:
+        for bar in bars.values():
+            bar.close()
+        overall_bar.close()
 
     stats_sorted = sorted(stats, key=lambda s: s.size)
     metadata = {
         "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "format": "arrayrecord",
+        "seed": args.seed,
         "n_vars": args.n_vars,
         "min_size": args.min_size,
         "max_size": args.max_size,

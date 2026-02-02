@@ -51,9 +51,8 @@ def test_generate_imply_arrayrecord(tmp_path: Path) -> None:
         for record in records:
             payload = pickle.loads(record)
             sequent = payload["sequent"]
-            rules = payload["rules"]
+            rule = payload["rule"]
             assert sequent.ndim == 1
-            assert rules.ndim == 2
-            assert rules.shape[1] == 2
+            assert rule.shape == (2,)
 
     assert total == 5

@@ -4,11 +4,6 @@ Generate propositional logic dataset
 
 # <codecell>
 from .elem import *
-from .sample import sample_imply, list_sequents
-
-type Example = tuple[Sequent, list[Rule]]
-type RuleToken = tuple[int, int]
-type TokenizedExample = tuple[list[int], list[RuleToken]]
 
 pad_idx = 0
 
@@ -92,28 +87,25 @@ def _find_assumption_position(ants: tuple[Proposition, ...], target: Proposition
 
 
 def tokenize(example: Example) -> TokenizedExample:
-    """Tokenizes the sequent and inference rules into ids. Inference rules are tokenized as
+    """Tokenizes the sequent and inference rule into ids. Inference rules are tokenized as
     two indices: rule type and (if relevant) position of the target assumption in the
     antecedent (with position starting at 1). If the rule does not require an assumption,
     then the second index is 0.
     """
-    sequent, rules = example
+    sequent, rule = example
     sequent_tokens = _tokenize_sequent(sequent)
-    rule_tokens: list[RuleToken] = []
-    for rule in rules:
-        rule_type = type(rule)
-        if rule_type not in rule_type_to_id:
-            raise ValueError(f"Unknown rule type: {rule_type}")
-        rule_id = rule_type_to_id[rule_type]
-        pos = 0
-        if isinstance(rule, ImpliesLeft):
-            pos = _find_assumption_position(sequent.ants, rule.implication)
-        elif isinstance(rule, AndLeft):
-            pos = _find_assumption_position(sequent.ants, rule.conjunction)
-        elif isinstance(rule, OrLeft):
-            pos = _find_assumption_position(sequent.ants, rule.disjunction)
-        rule_tokens.append((rule_id, pos))
-    return sequent_tokens, rule_tokens
+    rule_type = type(rule)
+    if rule_type not in rule_type_to_id:
+        raise ValueError(f"Unknown rule type: {rule_type}")
+    rule_id = rule_type_to_id[rule_type]
+    pos = 0
+    if isinstance(rule, ImpliesLeft):
+        pos = _find_assumption_position(sequent.ants, rule.implication)
+    elif isinstance(rule, AndLeft):
+        pos = _find_assumption_position(sequent.ants, rule.conjunction)
+    elif isinstance(rule, OrLeft):
+        pos = _find_assumption_position(sequent.ants, rule.disjunction)
+    return sequent_tokens, (rule_id, pos)
 
 
 def _parse_prop(tokens: list[str], start: int) -> tuple[Proposition, int]:
@@ -163,8 +155,8 @@ def _parse_prop_list(tokens: list[str]) -> list[Proposition]:
 
 
 def decode(tokens: TokenizedExample) -> Example:
-    """Decodes the tokenized sequent and inference rules back into their original forms."""
-    sequent_tokens, rule_tokens = tokens
+    """Decodes the tokenized sequent and inference rule back into their original forms."""
+    sequent_tokens, rule_token = tokens
     symbols = [id_to_char(tok) for tok in sequent_tokens]
     if '⊢' not in symbols:
         raise ValueError("Tokenized sequent missing turnstile '⊢'.")
@@ -179,29 +171,28 @@ def decode(tokens: TokenizedExample) -> Example:
         raise ValueError("Extra tokens after parsing consequent.")
     sequent = Sequent(ants, cons)
 
-    rules: list[Rule] = []
-    for rule_id, pos in rule_tokens:
-        if rule_id not in id_to_rule_type:
-            raise ValueError(f"Unknown rule id: {rule_id}")
-        rule_type = id_to_rule_type[rule_id]
-        if rule_type in (ImpliesLeft, AndLeft, OrLeft):
-            if pos <= 0 or pos > len(sequent.ants):
-                raise ValueError(f"Invalid antecedent position {pos} for {rule_type}.")
-            target = sequent.ants[pos - 1]
-            if rule_type is ImpliesLeft:
-                if not isinstance(target, Implies):
-                    raise ValueError("ImpliesLeft requires an implication antecedent.")
-                rules.append(ImpliesLeft(target))
-            elif rule_type is AndLeft:
-                if not isinstance(target, And):
-                    raise ValueError("AndLeft requires a conjunction antecedent.")
-                rules.append(AndLeft(target))
-            else:
-                if not isinstance(target, Or):
-                    raise ValueError("OrLeft requires a disjunction antecedent.")
-                rules.append(OrLeft(target))
+    rule_id, pos = rule_token
+    if rule_id not in id_to_rule_type:
+        raise ValueError(f"Unknown rule id: {rule_id}")
+    rule_type = id_to_rule_type[rule_id]
+    if rule_type in (ImpliesLeft, AndLeft, OrLeft):
+        if pos <= 0 or pos > len(sequent.ants):
+            raise ValueError(f"Invalid antecedent position {pos} for {rule_type}.")
+        target = sequent.ants[pos - 1]
+        if rule_type is ImpliesLeft:
+            if not isinstance(target, Implies):
+                raise ValueError("ImpliesLeft requires an implication antecedent.")
+            rule = ImpliesLeft(target)
+        elif rule_type is AndLeft:
+            if not isinstance(target, And):
+                raise ValueError("AndLeft requires a conjunction antecedent.")
+            rule = AndLeft(target)
         else:
-            if pos != 0:
-                raise ValueError(f"Rule {rule_type} should not have antecedent position.")
-            rules.append(rule_type())
-    return sequent, rules
+            if not isinstance(target, Or):
+                raise ValueError("OrLeft requires a disjunction antecedent.")
+            rule = OrLeft(target)
+    else:
+        if pos != 0:
+            raise ValueError(f"Rule {rule_type} should not have antecedent position.")
+        rule = rule_type()
+    return sequent, rule

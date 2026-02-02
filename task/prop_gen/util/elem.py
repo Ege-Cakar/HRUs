@@ -99,6 +99,11 @@ class Rule:
         raise NotImplementedError
 
 
+Example = tuple[Sequent, Rule]
+RuleToken = tuple[int, int]
+TokenizedExample = tuple[list[int], RuleToken]
+
+
 # =============================================================================
 # Axiom (Identity)
 # =============================================================================
@@ -343,4 +348,3 @@ class NegationRight(Rule):
         return "¬R"
 
     __repr__ = __str__
-

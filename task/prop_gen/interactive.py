@@ -45,7 +45,7 @@ print(f"\nTree size: {t.size}, depth: {t.depth}, provable: {t.is_provable}")
 
 # <codecell>
 p = Implies(conj, Implies(prop1, prop2))
-l = list_sequents(p)
+l = list_sequents_uniform(p)
 
 # <codecell>
 l
