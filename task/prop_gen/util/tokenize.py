@@ -3,24 +3,12 @@ Generate propositional logic dataset
 """
 
 # <codecell>
-from .util.elem import *
-from .util.sample import sample_imply, list_sequents
+from .elem import *
+from .sample import sample_imply, list_sequents
 
 type Example = tuple[Sequent, list[Rule]]
 type RuleToken = tuple[int, int]
 type TokenizedExample = tuple[list[int], list[RuleToken]]
-
-p = sample_imply(3, 5)
-list_sequents(p)
-
-def gen_imply_exs(n_exs, n_vars, n_size):
-    total = 0
-    while total < n_exs:
-        p = sample_imply(n_vars, n_size)
-        exs = list_sequents(p)
-        for ex in exs:
-            yield ex
-            total += 1
 
 pad_idx = 0
 

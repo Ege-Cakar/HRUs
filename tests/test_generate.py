@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from task.prop_gen import generate
+from task.prop_gen.util import tokenize as tokenize_util
 
 from task.prop_gen.util.elem import (
     And,
@@ -58,10 +58,10 @@ def test_tokenize_decode_roundtrip_with_left_rules():
         OrLeft(ant3),
     ]
 
-    tokens = generate.tokenize((sequent, rules))
+    tokens = tokenize_util.tokenize((sequent, rules))
     assert tokens[1][-3:] == [(3, 1), (5, 2), (8, 3)]
 
-    decoded_sequent, decoded_rules = generate.decode(tokens)
+    decoded_sequent, decoded_rules = tokenize_util.decode(tokens)
     assert decoded_sequent == sequent
     assert [_rule_sig(rule) for rule in decoded_rules] == [
         _rule_sig(rule) for rule in rules
@@ -74,7 +74,9 @@ def test_tokenize_decode_roundtrip_empty_ants():
     sequent = Sequent([], Or(p1, p2))
     rules = [OrRight1(), OrRight2()]
 
-    decoded_sequent, decoded_rules = generate.decode(generate.tokenize((sequent, rules)))
+    decoded_sequent, decoded_rules = tokenize_util.decode(
+        tokenize_util.tokenize((sequent, rules))
+    )
     assert decoded_sequent == sequent
     assert [_rule_sig(rule) for rule in decoded_rules] == [
         _rule_sig(rule) for rule in rules

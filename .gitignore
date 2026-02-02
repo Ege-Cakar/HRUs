@@ -9,6 +9,7 @@ wandb/
 .pytest_cache/
 .python-version
 repl/
+*.array_record
 experiment/
 
 # ignore slurm logging outputs

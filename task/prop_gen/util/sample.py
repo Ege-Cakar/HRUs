@@ -29,10 +29,11 @@ def _count_dyck_suffixes(n_pairs: int, open_used: int, close_used: int) -> int:
     return total
 
 
-def _sample_dyck_word(n_pairs: int) -> str:
+def _sample_dyck_word(n_pairs: int, rng: random.Random | None = None) -> str:
     if n_pairs <= 0:
         return ""
 
+    rng = rng or random
     word = []
     open_used = 0
     close_used = 0
@@ -49,7 +50,7 @@ def _sample_dyck_word(n_pairs: int) -> str:
 
         total = n_left + n_right
         p_left = n_left / total if total else 0.0
-        if random.random() < p_left:
+        if rng.random() < p_left:
             word.append("(")
             open_used += 1
         else:
@@ -123,15 +124,16 @@ def _group_by_dyck(op, leaves: list[Proposition], word: str) -> Proposition:
     raise ValueError("Unused atoms remain after constructing the tree")
 
 
-def _random_group(op, leaves: list[Proposition]) -> Proposition:
+def _random_group(op, leaves: list[Proposition], rng: random.Random | None = None) -> Proposition:
     if len(leaves) == 1:
         return leaves[0]
-    dyck_word = _sample_dyck_word(len(leaves) - 1)
+    dyck_word = _sample_dyck_word(len(leaves) - 1, rng=rng)
     return _group_by_dyck(op, leaves, dyck_word)
 
 
-def _sample_atom(n_vars: int) -> Proposition:
-    pick = random.randrange(n_vars + 2)
+def _sample_atom(n_vars: int, rng: random.Random | None = None) -> Proposition:
+    rng = rng or random
+    pick = rng.randrange(n_vars + 2)
     if pick < n_vars:
         return Atom(f"p{pick + 1}")
     if pick == n_vars:
@@ -139,7 +141,11 @@ def _sample_atom(n_vars: int) -> Proposition:
     return PFalse()
 
 
-def sample_imply(n_vars: int, size: int) -> Proposition:
+def sample_imply(
+    n_vars: int,
+    size: int,
+    rng: random.Random | None = None,
+) -> Proposition:
     """Sample a random proposition using only implications and atoms.
 
     Args:
@@ -147,8 +153,8 @@ def sample_imply(n_vars: int, size: int) -> Proposition:
         size: Number of atoms (variables or constants) in the proposition.
     """
     _validate_imply_args(n_vars, size)
-    leaves = [_sample_atom(n_vars) for _ in range(size)]
-    return _random_group(Implies, leaves)
+    leaves = [_sample_atom(n_vars, rng=rng) for _ in range(size)]
+    return _random_group(Implies, leaves, rng=rng)
 
 
 def list_sequents(prop: Proposition) -> list[Tuple[Sequent, list[Rule]]]:
