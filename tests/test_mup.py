@@ -61,6 +61,7 @@ def _mixer_features(model, x):
 
 def _transformer_features(model, x):
     config = model.config
+    tokens = x
     if model.embed is not None:
         x = model.embed(x)
 
@@ -74,8 +75,14 @@ def _transformer_features(model, x):
     if model.final_ln is not None:
         x = model.final_ln(x)
 
-    if config.last_token_only:
+    if config.output_mode == "last_token":
         x = x[:, -1, :]
+    elif config.output_mode == "last_nonpad":
+        is_nonpad = tokens != config.pad_token_id
+        lengths = jnp.sum(is_nonpad, axis=1)
+        last_index = jnp.maximum(lengths - 1, 0)
+        batch_idx = jnp.arange(x.shape[0])
+        x = x[batch_idx, last_index, :]
 
     return x
 

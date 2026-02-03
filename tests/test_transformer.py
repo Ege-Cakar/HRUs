@@ -49,11 +49,13 @@ class TestTransformerConfig:
         assert config.n_heads == 4
         assert config.n_mlp_hidden is None
         assert config.n_out == 1
-        assert config.pos_emb is True
+        assert config.n_pred_tokens == 1
+        assert config.pos_encoding == "none"
         assert config.layer_norm is True
         assert config.use_bias is True
         assert config.dropout_rate == 0.0
-        assert config.last_token_only is True
+        assert config.output_mode == "last_token"
+        assert config.pad_token_id == 0
         assert config.use_mup is False
 
     def test_custom_values(self):
@@ -65,11 +67,13 @@ class TestTransformerConfig:
             n_heads=8,
             n_mlp_hidden=1024,
             n_out=10,
-            pos_emb=False,
+            n_pred_tokens=2,
+            pos_encoding="none",
             layer_norm=False,
             use_bias=False,
             dropout_rate=0.1,
-            last_token_only=False,
+            output_mode="full_sequence",
+            pad_token_id=3,
             use_mup=True
         )
         assert config.n_vocab == 512
@@ -79,11 +83,13 @@ class TestTransformerConfig:
         assert config.n_heads == 8
         assert config.n_mlp_hidden == 1024
         assert config.n_out == 10
-        assert config.pos_emb is False
+        assert config.n_pred_tokens == 2
+        assert config.pos_encoding == "none"
         assert config.layer_norm is False
         assert config.use_bias is False
         assert config.dropout_rate == 0.1
-        assert config.last_token_only is False
+        assert config.output_mode == "full_sequence"
+        assert config.pad_token_id == 3
         assert config.use_mup is True
 
     def test_to_model(self):
@@ -181,7 +187,7 @@ class TestTransformer:
         
         assert model.embed is not None
         assert len(model.blocks) == 2
-        assert model.pos_embedding is not None
+        assert model.pos_embedding is None
 
     def test_init_without_embedding(self):
         config = TransformerConfig(n_vocab=None, n_hidden=64, n_seq=16, n_layers=2, n_heads=4)
@@ -191,11 +197,24 @@ class TestTransformer:
         assert model.embed is None
 
     def test_init_without_pos_emb(self):
-        config = TransformerConfig(n_vocab=100, n_hidden=64, n_seq=16, n_layers=2, n_heads=4, pos_emb=False)
+        config = TransformerConfig(
+            n_vocab=100, n_hidden=64, n_seq=16, n_layers=2, n_heads=4, pos_encoding="none"
+        )
         rngs = nnx.Rngs(42)
         model = Transformer(config, rngs=rngs)
         
         assert model.pos_embedding is None
+
+    def test_init_with_rope(self):
+        config = TransformerConfig(
+            n_vocab=100, n_hidden=64, n_seq=16, n_layers=2, n_heads=4, pos_encoding="rope"
+        )
+        rngs = nnx.Rngs(42)
+        model = Transformer(config, rngs=rngs)
+
+        assert model.pos_embedding is None
+        assert model.rotary_cos is not None
+        assert model.rotary_sin is not None
 
     def test_init_without_layer_norm(self):
         config = TransformerConfig(n_vocab=100, n_hidden=64, n_seq=16, n_layers=2, n_heads=4, layer_norm=False)
@@ -214,7 +233,7 @@ class TestTransformer:
         x = jnp.ones((4, 10), dtype=jnp.int32)
         output = model(x)
         
-        # With last_token_only=True and n_out=5, output should be (4, 5)
+        # With output_mode='last_token' and n_out=5, output should be (4, 5)
         assert output.shape == (4, 5)
 
     def test_forward_without_embedding(self):
@@ -230,10 +249,10 @@ class TestTransformer:
         assert output.shape == (4, 3)
 
     def test_forward_last_token_only_false(self):
-        """Test forward pass with last_token_only=False (full sequence output)."""
+        """Test forward pass with output_mode='full_sequence' (full sequence output)."""
         config = TransformerConfig(
             n_vocab=100, n_hidden=64, n_seq=16, n_layers=2, n_heads=4,
-            n_out=5, last_token_only=False
+            n_out=5, output_mode="full_sequence"
         )
         rngs = nnx.Rngs(42)
         model = Transformer(config, rngs=rngs)
@@ -253,14 +272,14 @@ class TestTransformer:
         x = jnp.ones((4, 10), dtype=jnp.int32)
         output = model(x)
         
-        # With n_out=1 and last_token_only=True, output should be (4,)
+        # With n_out=1 and output_mode='last_token', output should be (4,)
         assert output.shape == (4,)
 
     def test_forward_single_output_full_sequence(self):
-        """Test forward pass with n_out=1 and last_token_only=False."""
+        """Test forward pass with n_out=1 and output_mode='full_sequence'."""
         config = TransformerConfig(
             n_vocab=100, n_hidden=64, n_seq=16, n_layers=2, n_heads=4,
-            n_out=1, last_token_only=False
+            n_out=1, output_mode="full_sequence"
         )
         rngs = nnx.Rngs(42)
         model = Transformer(config, rngs=rngs)
@@ -268,8 +287,64 @@ class TestTransformer:
         x = jnp.ones((4, 10), dtype=jnp.int32)
         output = model(x)
         
-        # With n_out=1 and last_token_only=False, output should be (4, 10)
+        # With n_out=1 and output_mode='full_sequence', output should be (4, 10)
         assert output.shape == (4, 10)
+
+    def test_forward_multi_token_output(self):
+        """Test forward pass with multiple predicted tokens."""
+        config = TransformerConfig(
+            n_vocab=100, n_hidden=64, n_seq=16, n_layers=2, n_heads=4,
+            n_out=7, n_pred_tokens=2
+        )
+        rngs = nnx.Rngs(42)
+        model = Transformer(config, rngs=rngs)
+
+        x = jnp.ones((4, 10), dtype=jnp.int32)
+        output = model(x)
+
+        assert output.shape == (4, 2, 7)
+
+    def test_forward_last_nonpad(self):
+        """Test forward pass with output_mode='last_nonpad'."""
+        config_full = TransformerConfig(
+            n_vocab=100, n_hidden=32, n_seq=8, n_layers=2, n_heads=4,
+            n_out=3, output_mode="full_sequence"
+        )
+        config_last = TransformerConfig(
+            n_vocab=100, n_hidden=32, n_seq=8, n_layers=2, n_heads=4,
+            n_out=3, output_mode="last_nonpad"
+        )
+        rngs1 = nnx.Rngs(42)
+        model_full = Transformer(config_full, rngs=rngs1)
+        rngs2 = nnx.Rngs(42)
+        model_last = Transformer(config_last, rngs=rngs2)
+
+        x = jnp.array([
+            [5, 6, 7, 0, 0, 0, 0, 0],
+            [9, 3, 0, 0, 0, 0, 0, 0],
+            [4, 2, 1, 8, 0, 0, 0, 0],
+        ], dtype=jnp.int32)
+
+        output_full = model_full(x)
+        output_last = model_last(x)
+
+        lengths = jnp.sum(x != 0, axis=1)
+        last_index = jnp.maximum(lengths - 1, 0)
+        batch_idx = jnp.arange(x.shape[0])
+        expected = output_full[batch_idx, last_index, :]
+
+        np.testing.assert_array_almost_equal(output_last, expected)
+
+    def test_last_nonpad_requires_tokens(self):
+        config = TransformerConfig(
+            n_vocab=None, n_hidden=64, n_seq=16, n_layers=2, n_heads=4, output_mode="last_nonpad"
+        )
+        rngs = nnx.Rngs(42)
+        model = Transformer(config, rngs=rngs)
+
+        x = jnp.ones((4, 10, 64))
+        with pytest.raises(ValueError, match="requires token indices"):
+            model(x)
 
     def test_forward_deterministic(self):
         """Test that same seed produces same results."""
