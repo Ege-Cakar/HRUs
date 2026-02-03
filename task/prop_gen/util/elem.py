@@ -99,9 +99,10 @@ class Rule:
         raise NotImplementedError
 
 
-Example = tuple[Sequent, Rule]
+Example = tuple[Sequent, list[Rule]]
 RuleToken = tuple[int, int]
-TokenizedExample = tuple[list[int], RuleToken]
+RuleTokens = list[RuleToken]
+TokenizedExample = tuple[list[int], RuleTokens]
 
 
 # =============================================================================

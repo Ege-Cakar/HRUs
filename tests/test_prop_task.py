@@ -23,11 +23,11 @@ def test_imply_size_task_batching(tmp_path: Path) -> None:
 
     rec1 = {
         "sequent": np.array([1, 2, 3], dtype=np.int32),
-        "rule": np.array([1, 0], dtype=np.int32),
+        "rule": np.array([[1, 0]], dtype=np.int32),
     }
     rec2 = {
         "sequent": np.array([4, 5], dtype=np.int32),
-        "rule": np.array([3, 0], dtype=np.int32),
+        "rule": np.array([[3, 0]], dtype=np.int32),
     }
     _write_array_record(shard_path, [rec1, rec2])
 

@@ -12,7 +12,6 @@ from train import (
     ce_mask,
     create_optimizer,
     loss_and_acc,
-    mse_mask,
     parse_loss_name,
     train,
     train_step,
@@ -37,10 +36,6 @@ class TestParseLossName:
     def test_mse(self):
         loss_func = parse_loss_name('mse')
         assert loss_func == optax.squared_error
-
-    def test_mse_mask(self):
-        loss_func = parse_loss_name('mse_mask')
-        assert loss_func == mse_mask
 
     def test_callable(self):
         """Test that callable loss functions are passed through."""
@@ -77,18 +72,6 @@ class TestCeMask:
         # All padding - should be inf or nan (division by zero)
         loss = ce_mask(logits, labels)
         assert jnp.isnan(loss) or jnp.isinf(loss)
-
-
-class TestMseMask:
-    """Tests for mse_mask loss function."""
-
-    def test_basic(self):
-        logits = jnp.ones((2, 3, 4))
-        labels = jnp.array([[1, 2, 0], [1, 3, 0]])
-        
-        loss = mse_mask(logits, labels)
-        assert loss.shape == ()
-        assert float(loss) >= 0
 
 
 class TestCreateOptimizer:
@@ -305,4 +288,3 @@ class TestCase:
         case.eval(test_iter, [loss_and_acc], prefix='test')
         
         assert 'test' in case.info
-

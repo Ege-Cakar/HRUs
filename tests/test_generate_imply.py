@@ -53,6 +53,7 @@ def test_generate_imply_arrayrecord(tmp_path: Path) -> None:
             sequent = payload["sequent"]
             rule = payload["rule"]
             assert sequent.ndim == 1
-            assert rule.shape == (2,)
+            assert rule.ndim == 2
+            assert rule.shape[1] == 2
 
     assert total == 5

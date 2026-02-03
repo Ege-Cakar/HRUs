@@ -19,7 +19,7 @@ from tqdm import tqdm
 
 from array_record.python import array_record_module
 
-from util.sample import sample_imply, list_sequents_uniform
+from util.sample import sample_imply, list_sequents
 from util.tokenize import tokenize
 from util.elem import TokenizedExample
 
@@ -76,9 +76,12 @@ class ArrayRecordShardWriter:
     def write(self, example: TokenizedExample) -> None:
         if self._examples_in_shard >= self.examples_per_shard:
             self._rollover()
-        sequent_tokens, rule_token = example
+        sequent_tokens, rule_tokens = example
         sequent = np.asarray(sequent_tokens, dtype=np.int32)
-        rule = np.asarray(rule_token, dtype=np.int32)
+        if rule_tokens:
+            rule = np.asarray(rule_tokens, dtype=np.int32)
+        else:
+            rule = np.zeros((0, 2), dtype=np.int32)
         payload = pickle.dumps(
             {
                 "sequent": sequent,
@@ -133,7 +136,7 @@ def _generate_for_size(
     pending = 0
     while total < n_exs:
         prop = sample_imply(n_vars, size, rng=rng)
-        for example in list_sequents_uniform(prop, rng=rng):
+        for example in list_sequents(prop, rng=rng):
             writer.write(tokenize(example))
             total += 1
             pending += 1

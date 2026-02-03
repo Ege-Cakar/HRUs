@@ -157,12 +157,12 @@ def sample_imply(
     return _random_group(Implies, leaves, rng=rng)
 
 
-def list_sequents_uniform(
+def list_sequents(
     prop: Proposition,
     rng: random.Random | None = None,
 ) -> list[Example]:
-    """List sequents in the proof tree for `prop` with a single uniformly
-    sampled applicable rule per sequent. If `prop` cannot be proved, return [].
+    """List sequents in the proof tree for `prop` with all applicable rules
+    per sequent. If `prop` cannot be proved, return [].
     """
 
     tree = build_proof_tree(Sequent(ants=[], cons=prop))
@@ -208,10 +208,10 @@ def list_sequents_uniform(
 
     traverse(tree)
 
-    rng = rng or random
-    sampled: list[Tuple[Sequent, Rule]] = []
+    _ = rng
+    collected: list[Example] = []
     for sequent, rules in entries.items():
         if not rules:
             continue
-        sampled.append((sequent, rng.choice(rules)))
-    return sampled
+        collected.append((sequent, list(rules)))
+    return collected

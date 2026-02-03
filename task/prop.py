@@ -120,20 +120,39 @@ class _DecodeRecord(transforms.MapTransform):
         return pickle.loads(element)
 
 
+def _normalize_rule_array(rule):
+    rule = np.asarray(rule, dtype=np.int32)
+    if rule.ndim == 1:
+        if rule.size == 0:
+            return np.zeros((0, 2), dtype=np.int32)
+        if rule.shape[0] != 2:
+            raise ValueError(f"Rule token must have length 2, got {rule.shape}")
+        return rule.reshape(1, 2)
+    if rule.ndim == 2:
+        if rule.shape[1] != 2:
+            raise ValueError(f"Rule token must have shape (n, 2), got {rule.shape}")
+        return rule
+    raise ValueError(f"Rule token must be 1D or 2D, got {rule.shape}")
+
+
 def _batch_records(records):
     if not records:
         return (
             np.zeros((0, 0), dtype=np.int32),
             np.zeros((0, 2), dtype=np.int32),
         )
+
     batch_size = len(records)
     max_seq = max(rec["sequent"].shape[0] for rec in records)
+    normalized_rules = [_normalize_rule_array(rec["rule"]) for rec in records]
     seq_batch = np.zeros((batch_size, max_seq), dtype=np.int32)
     rules_batch = np.zeros((batch_size, 2), dtype=np.int32)
     for idx, rec in enumerate(records):
         sequent = rec["sequent"]
         seq_batch[idx, : sequent.shape[0]] = sequent
-        rule = rec["rule"]
-        rules_batch[idx, :] = rule
+        rule = normalized_rules[idx]
+        if rule.shape[0] == 0:
+            raise ValueError("Cannot sample rule from empty rule list.")
+        pick = np.random.randint(rule.shape[0])
+        rules_batch[idx, :] = rule[pick]
     return seq_batch, rules_batch
-
