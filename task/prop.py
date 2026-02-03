@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from pathlib import Path
 import pickle
 from typing import Iterable
@@ -16,6 +17,7 @@ from grain._src.python import data_sources, samplers
 
 
 class ImplySizeTask:
+    STATS_KEYS = ("max_token", "max_pos", "max_seq")
 
     def __init__(
         self,
@@ -31,6 +33,7 @@ class ImplySizeTask:
     ) -> None:
         self.ds_path = Path(ds_path)
         self.size_range = size_range
+        self._sizes = self._normalize_sizes(size_range)
         self.batch_size = batch_size
         self.shuffle = shuffle
         self.seed = seed if seed is not None else int(
@@ -39,6 +42,7 @@ class ImplySizeTask:
         self.worker_count = worker_count
         self.reader_options = reader_options
         self.drop_remainder = drop_remainder
+        self.stats = self._stats_from_metadata(self.ds_path, self._sizes)
 
         self._epoch = 0
         self._data_source = self._build_data_source()
@@ -57,15 +61,47 @@ class ImplySizeTask:
     def __iter__(self):
         return self
 
-    def _normalize_sizes(self) -> list[int]:
-        if isinstance(self.size_range, int):
-            return [self.size_range]
-        if isinstance(self.size_range, tuple) and len(self.size_range) == 2:
-            start, end = self.size_range
+    @staticmethod
+    def _normalize_sizes(size_range) -> list[int]:
+        if isinstance(size_range, int):
+            return [size_range]
+        if isinstance(size_range, tuple) and len(size_range) == 2:
+            start, end = size_range
             if start > end:
                 start, end = end, start
             return list(range(start, end + 1))
-        return list(self.size_range)
+        return list(size_range)
+
+    @classmethod
+    def stats_from_metadata(cls, ds_path, size_range) -> dict:
+        sizes = cls._normalize_sizes(size_range)
+        return cls._stats_from_metadata(Path(ds_path), sizes)
+
+    @classmethod
+    def _stats_from_metadata(cls, ds_path: Path, sizes: Iterable[int]) -> dict:
+        metadata_path = ds_path / "metadata.json"
+        if not metadata_path.exists():
+            raise FileNotFoundError(
+                f"Missing metadata at {metadata_path}. Regenerate the dataset."
+            )
+        metadata = json.loads(metadata_path.read_text())
+        sizes_meta = metadata.get("sizes", {})
+        stats_list = []
+        missing = []
+        for size in sizes:
+            size_meta = sizes_meta.get(str(size))
+            if not size_meta or "stats" not in size_meta:
+                missing.append(size)
+                continue
+            stats_list.append(size_meta["stats"])
+        if missing:
+            raise ValueError(
+                f"Missing stats for sizes {missing} in {metadata_path}."
+            )
+        return {
+            key: max(int(stats[key]) for stats in stats_list)
+            for key in cls.STATS_KEYS
+        }
 
     def _collect_shards(self, sizes: Iterable[int]) -> list[str]:
         shards: list[str] = []
@@ -80,8 +116,7 @@ class ImplySizeTask:
         return shards
 
     def _build_data_source(self):
-        sizes = self._normalize_sizes()
-        shards = self._collect_shards(sizes)
+        shards = self._collect_shards(self._sizes)
         return data_sources.ArrayRecordDataSource(
             shards,
             reader_options=self.reader_options,

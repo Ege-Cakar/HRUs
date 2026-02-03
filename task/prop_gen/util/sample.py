@@ -17,16 +17,30 @@ def _validate_imply_args(n_vars: int, size: int) -> None:
 
 
 @lru_cache(maxsize=None)
-def _count_dyck_suffixes(n_pairs: int, open_used: int, close_used: int) -> int:
-    if open_used == n_pairs:
-        return 1
+def _dyck_count_table(n_pairs: int) -> tuple[tuple[int, ...], ...]:
+    if n_pairs <= 0:
+        return ((1,),)
 
-    total = 0
-    if open_used < n_pairs:
-        total += _count_dyck_suffixes(n_pairs, open_used + 1, close_used)
-    if close_used < open_used:
-        total += _count_dyck_suffixes(n_pairs, open_used, close_used + 1)
-    return total
+    size = n_pairs + 1
+    table = [[0] * size for _ in range(size)]
+    for open_used in range(n_pairs, -1, -1):
+        for close_used in range(n_pairs, -1, -1):
+            if close_used > open_used:
+                continue
+            if open_used == n_pairs:
+                table[open_used][close_used] = 1
+                continue
+            total = 0
+            if open_used < n_pairs:
+                total += table[open_used + 1][close_used]
+            if close_used < open_used:
+                total += table[open_used][close_used + 1]
+            table[open_used][close_used] = total
+    return tuple(tuple(row) for row in table)
+
+
+def _count_dyck_suffixes(n_pairs: int, open_used: int, close_used: int) -> int:
+    return _dyck_count_table(n_pairs)[open_used][close_used]
 
 
 def _sample_dyck_word(n_pairs: int, rng: random.Random | None = None) -> str:
@@ -34,6 +48,7 @@ def _sample_dyck_word(n_pairs: int, rng: random.Random | None = None) -> str:
         return ""
 
     rng = rng or random
+    counts = _dyck_count_table(n_pairs)
     word = []
     open_used = 0
     close_used = 0
@@ -42,11 +57,10 @@ def _sample_dyck_word(n_pairs: int, rng: random.Random | None = None) -> str:
     while len(word) < total_len:
         n_left = 0
         n_right = 0
-
         if open_used < n_pairs:
-            n_left = _count_dyck_suffixes(n_pairs, open_used + 1, close_used)
+            n_left = counts[open_used + 1][close_used]
         if close_used < open_used:
-            n_right = _count_dyck_suffixes(n_pairs, open_used, close_used + 1)
+            n_right = counts[open_used][close_used + 1]
 
         total = n_left + n_right
         p_left = n_left / total if total else 0.0
@@ -93,13 +107,18 @@ def _group_by_dyck(op, leaves: list[Proposition], word: str) -> Proposition:
 
     matches = _match_parentheses(word)
     leaf_iter = iter(leaves)
+    stack: list[tuple[int, int, int]] = [(0, len(word), 0)]
+    built: list[Proposition] = []
 
-    def consume(start: int, end: int) -> Proposition:
+    # Iterative post-order traversal avoids recursion depth limits for long props.
+    while stack:
+        start, end, state = stack.pop()
         if start >= end:
             try:
-                return next(leaf_iter)
+                built.append(next(leaf_iter))
             except StopIteration as exc:
                 raise ValueError("Dyck word consumed more atoms than provided") from exc
+            continue
 
         if word[start] != "(":
             raise ValueError("Invalid Dyck word structure")
@@ -112,11 +131,21 @@ def _group_by_dyck(op, leaves: list[Proposition], word: str) -> Proposition:
         if split >= end:
             raise ValueError("Invalid Dyck word segmentation")
 
-        left = consume(start + 1, split)
-        right = consume(split + 1, end)
-        return op(left, right)
+        if state == 0:
+            stack.append((start, end, 1))
+            stack.append((split + 1, end, 0))
+            stack.append((start + 1, split, 0))
+        else:
+            try:
+                right = built.pop()
+                left = built.pop()
+            except IndexError as exc:
+                raise ValueError("Invalid Dyck word structure") from exc
+            built.append(op(left, right))
 
-    tree = consume(0, len(word))
+    if len(built) != 1:
+        raise ValueError("Invalid Dyck word structure")
+    tree = built[0]
     try:
         next(leaf_iter)
     except StopIteration:

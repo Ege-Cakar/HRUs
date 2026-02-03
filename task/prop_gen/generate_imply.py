@@ -30,6 +30,9 @@ class GenerationStats:
     examples: int
     shards: int
     seconds: float
+    max_token: int
+    max_pos: int
+    max_seq: int
 
 
 class ArrayRecordShardWriter:
@@ -134,10 +137,20 @@ def _generate_for_size(
     )
     total = 0
     pending = 0
+    max_token = 0
+    max_pos = 0
+    max_seq = 0
     while total < n_exs:
         prop = sample_imply(n_vars, size, rng=rng)
         for example in list_sequents(prop, rng=rng):
-            writer.write(tokenize(example))
+            tokens = tokenize(example)
+            sequent_tokens, rule_tokens = tokens
+            if sequent_tokens:
+                max_token = max(max_token, max(sequent_tokens))
+                max_seq = max(max_seq, len(sequent_tokens))
+            if rule_tokens:
+                max_pos = max(max_pos, max(pos for _, pos in rule_tokens))
+            writer.write(tokens)
             total += 1
             pending += 1
             if pending >= progress_step:
@@ -160,6 +173,9 @@ def _generate_for_size(
         examples=writer.total_examples,
         shards=writer.shard_count,
         seconds=elapsed,
+        max_token=max_token,
+        max_pos=max_pos,
+        max_seq=max_seq,
     )
 
 
@@ -241,6 +257,11 @@ def main() -> None:
         overall_bar.close()
 
     stats_sorted = sorted(stats, key=lambda s: s.size)
+    overall_stats = {
+        "max_token": max(stat.max_token for stat in stats_sorted),
+        "max_pos": max(stat.max_pos for stat in stats_sorted),
+        "max_seq": max(stat.max_seq for stat in stats_sorted),
+    }
     metadata = {
         "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "format": "arrayrecord",
@@ -251,11 +272,17 @@ def main() -> None:
         "examples_per_size": args.examples_per_size,
         "examples_per_shard": args.examples_per_shard,
         "arrayrecord_options": args.arrayrecord_options,
+        "stats": overall_stats,
         "sizes": {
             str(stat.size): {
                 "examples": stat.examples,
                 "shards": stat.shards,
                 "seconds": round(stat.seconds, 3),
+                "stats": {
+                    "max_token": stat.max_token,
+                    "max_pos": stat.max_pos,
+                    "max_seq": stat.max_seq,
+                },
             }
             for stat in stats_sorted
         },

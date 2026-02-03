@@ -167,29 +167,38 @@ def build_proof_tree(
     Returns a ProofNode representing the full search tree. Use `.is_provable`
     to check if a successful proof exists within the tree.
     """
-    if max_depth <= 0:
-        return FailedProofNode(sequent, reason="depth limit")
-    
-    branches: List[Tuple[Rule, List[ProofNode]]] = []
-    
-    for rule in get_next_rules(sequent):
-        result = rule.apply(sequent)
-        if result is None:
-            continue  # Rule not applicable
-        
-        if len(result) == 0:  # Empty list = proven immediately
-            return CompletedProofNode(sequent, rule)
-        
-        # Build proof nodes for all subgoals
-        children = [
-            build_proof_tree(subgoal, max_depth - 1)
-            for subgoal in result
-        ]
-        branches.append((rule, children))
-    
-    if not branches:
-        return FailedProofNode(sequent, reason="no applicable rules")
-    
-    return InternalProofNode(sequent, branches)
+    # Memoize per (sequent, depth) to reuse identical subtrees across branches.
+    cache: dict[tuple[Sequent, int], ProofNode] = {}
 
+    def build(seq: Sequent, depth: int) -> ProofNode:
+        if depth <= 0:
+            return FailedProofNode(seq, reason="depth limit")
+        key = (seq, depth)
+        if key in cache:
+            return cache[key]
 
+        branches: List[Tuple[Rule, List[ProofNode]]] = []
+
+        for rule in get_next_rules(seq):
+            result = rule.apply(seq)
+            if result is None:
+                continue  # Rule not applicable
+
+            if len(result) == 0:  # Empty list = proven immediately
+                node = CompletedProofNode(seq, rule)
+                cache[key] = node
+                return node
+
+            # Build proof nodes for all subgoals
+            children = [build(subgoal, depth - 1) for subgoal in result]
+            branches.append((rule, children))
+
+        if not branches:
+            node = FailedProofNode(seq, reason="no applicable rules")
+        else:
+            node = InternalProofNode(seq, branches)
+
+        cache[key] = node
+        return node
+
+    return build(sequent, max_depth)

@@ -52,6 +52,7 @@ class TestTransformerConfig:
         assert config.n_pred_tokens == 1
         assert config.pos_encoding == "none"
         assert config.layer_norm is True
+        assert config.use_swiglu is False
         assert config.use_bias is True
         assert config.dropout_rate == 0.0
         assert config.output_mode == "last_token"
@@ -70,6 +71,7 @@ class TestTransformerConfig:
             n_pred_tokens=2,
             pos_encoding="none",
             layer_norm=False,
+            use_swiglu=True,
             use_bias=False,
             dropout_rate=0.1,
             output_mode="full_sequence",
@@ -86,6 +88,7 @@ class TestTransformerConfig:
         assert config.n_pred_tokens == 2
         assert config.pos_encoding == "none"
         assert config.layer_norm is False
+        assert config.use_swiglu is True
         assert config.use_bias is False
         assert config.dropout_rate == 0.1
         assert config.output_mode == "full_sequence"
@@ -413,3 +416,17 @@ class TestTransformer:
         x = jnp.ones((1, 10, 64))
         after_fc1 = block.mlp_fc1(x)
         assert after_fc1.shape == (1, 10, 256)
+
+    def test_mlp_hidden_default_swiglu(self):
+        """Test that n_mlp_hidden defaults to 8/3 * n_hidden for SwiGLU."""
+        config = TransformerConfig(
+            n_vocab=100, n_hidden=64, n_seq=16, n_layers=2, n_heads=4, use_swiglu=True
+        )
+        rngs = nnx.Rngs(42)
+        model = Transformer(config, rngs=rngs)
+
+        block = model.blocks[0]
+        x = jnp.ones((1, 10, 64))
+        expected_hidden = int(4 * config.n_hidden * 2 / 3)
+        after_gate = block.mlp_gate(x)
+        assert after_gate.shape == (1, 10, expected_hidden)

@@ -93,11 +93,12 @@ class TransformerConfig:
     n_layers: int = 2
     n_hidden: int = 128
     n_heads: int = 4
-    n_mlp_hidden: int | None = None  # MLP hidden dim, defaults to 4 * n_hidden
+    n_mlp_hidden: int | None = None  # MLP hidden dim, defaults to 4 * n_hidden (GELU) or 8/3 * n_hidden (SwiGLU)
     n_out: int = 1
     n_pred_tokens: int = 1
     pos_encoding: str = "none"
-    layer_norm: bool = True
+    layer_norm: bool = True  # Uses RMSNorm when enabled
+    use_swiglu: bool = False
     use_bias: bool = True
     dropout_rate: float = 0.0
     output_mode: str = "last_token"
@@ -186,7 +187,7 @@ class MultiHeadAttention(nnx.Module):
 
 
 class TransformerBlock(nnx.Module):
-    """Single transformer block with pre-norm architecture."""
+    """Single transformer block with pre-norm RMSNorm architecture."""
 
     def __init__(
         self, 
@@ -195,6 +196,7 @@ class TransformerBlock(nnx.Module):
         n_mlp_hidden: int,
         use_bias: bool = True,
         layer_norm: bool = True,
+        use_swiglu: bool = False,
         dropout_rate: float = 0.0,
         use_mup: bool = False,
         rotary_cos: jnp.ndarray | None = None,
@@ -203,6 +205,7 @@ class TransformerBlock(nnx.Module):
         rngs: nnx.Rngs
     ):
         self.layer_norm = layer_norm
+        self.use_swiglu = use_swiglu
         
         # Attention
         self.attn = MultiHeadAttention(
@@ -217,13 +220,18 @@ class TransformerBlock(nnx.Module):
         )
         
         # MLP
-        self.mlp_fc1 = nnx.Linear(n_hidden, n_mlp_hidden, use_bias=use_bias, rngs=rngs)
-        self.mlp_fc2 = nnx.Linear(n_mlp_hidden, n_hidden, use_bias=use_bias, rngs=rngs)
+        if use_swiglu:
+            self.mlp_gate = nnx.Linear(n_hidden, n_mlp_hidden, use_bias=use_bias, rngs=rngs)
+            self.mlp_up = nnx.Linear(n_hidden, n_mlp_hidden, use_bias=use_bias, rngs=rngs)
+            self.mlp_down = nnx.Linear(n_mlp_hidden, n_hidden, use_bias=use_bias, rngs=rngs)
+        else:
+            self.mlp_fc1 = nnx.Linear(n_hidden, n_mlp_hidden, use_bias=use_bias, rngs=rngs)
+            self.mlp_fc2 = nnx.Linear(n_mlp_hidden, n_hidden, use_bias=use_bias, rngs=rngs)
         
-        # Layer norms (pre-norm architecture)
+        # RMS norms (pre-norm architecture)
         if layer_norm:
-            self.ln1 = nnx.LayerNorm(n_hidden, rngs=rngs)
-            self.ln2 = nnx.LayerNorm(n_hidden, rngs=rngs)
+            self.ln1 = nnx.RMSNorm(n_hidden, rngs=rngs)
+            self.ln2 = nnx.RMSNorm(n_hidden, rngs=rngs)
         
         if dropout_rate > 0:
             self.dropout = nnx.Dropout(rate=dropout_rate, rngs=rngs)
@@ -244,9 +252,15 @@ class TransformerBlock(nnx.Module):
         residual = x
         if self.layer_norm:
             x = self.ln2(x)
-        x = self.mlp_fc1(x)
-        x = jax.nn.gelu(x)
-        x = self.mlp_fc2(x)
+        if self.use_swiglu:
+            gate = self.mlp_gate(x)
+            up = self.mlp_up(x)
+            x = jax.nn.silu(gate) * up
+            x = self.mlp_down(x)
+        else:
+            x = self.mlp_fc1(x)
+            x = jax.nn.gelu(x)
+            x = self.mlp_fc2(x)
         if self.dropout is not None:
             x = self.dropout(x)
         x = x + residual
@@ -259,7 +273,13 @@ class Transformer(nnx.Module):
 
     def __init__(self, config: TransformerConfig, *, rngs: nnx.Rngs):
         self.config = config
-        n_mlp_hidden = config.n_mlp_hidden or (4 * config.n_hidden)
+        if config.n_mlp_hidden is None:
+            if config.use_swiglu:
+                n_mlp_hidden = int(4 * config.n_hidden * 2 / 3)
+            else:
+                n_mlp_hidden = 4 * config.n_hidden
+        else:
+            n_mlp_hidden = config.n_mlp_hidden
 
         if config.pos_encoding not in {"absolute", "rope", "none"}:
             raise ValueError(
@@ -305,6 +325,7 @@ class Transformer(nnx.Module):
                 n_mlp_hidden=n_mlp_hidden,
                 use_bias=config.use_bias,
                 layer_norm=config.layer_norm,
+                use_swiglu=config.use_swiglu,
                 dropout_rate=config.dropout_rate,
                 use_mup=config.use_mup,
                 rotary_cos=self.rotary_cos,
@@ -314,9 +335,9 @@ class Transformer(nnx.Module):
             for _ in range(config.n_layers)
         ])
         
-        # Final layer norm (if using layer norm)
+        # Final RMS norm (if using normalization)
         if config.layer_norm:
-            self.final_ln = nnx.LayerNorm(config.n_hidden, rngs=rngs)
+            self.final_ln = nnx.RMSNorm(config.n_hidden, rngs=rngs)
         else:
             self.final_ln = None
         
@@ -379,7 +400,7 @@ class Transformer(nnx.Module):
         for block in self.blocks:
             x = block(x, mask=mask)
         
-        # Final layer norm
+        # Final RMS norm
         if self.final_ln is not None:
             x = self.final_ln(x)
         
