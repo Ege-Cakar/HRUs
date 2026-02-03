@@ -116,6 +116,16 @@ def merge_dicts(dicts):
     return all_dicts
 
 
+def rule_membership_accuracy(pred_rules, rule_set_batch, rule_set_mask):
+    """Compute accuracy where a prediction is correct if it appears in the rule set."""
+    preds = jnp.asarray(pred_rules)
+    rule_set = jnp.asarray(rule_set_batch)
+    mask = jnp.asarray(rule_set_mask).astype(bool)
+    matches = jnp.all(preds[:, None, :] == rule_set, axis=-1)
+    matches = jnp.where(mask, matches, False)
+    return jnp.mean(jnp.any(matches, axis=-1))
+
+
 def gen1(optimizer, xs, **kwargs):
     return generate(optimizer, xs, idx=1, **kwargs)
 
@@ -143,4 +153,3 @@ def _gen_pass(key, optimizer, xs, idx, beta):
     preds = jax.random.categorical(key, beta * logits)
     xs = xs.at[:,idx+1].set(preds[:,idx])
     return xs
-

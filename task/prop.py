@@ -30,6 +30,7 @@ class ImplySizeTask:
         worker_count=0,
         reader_options=None,
         drop_remainder=False,
+        return_rule_sets=False,
     ) -> None:
         self.ds_path = Path(ds_path)
         self.size_range = size_range
@@ -42,6 +43,7 @@ class ImplySizeTask:
         self.worker_count = worker_count
         self.reader_options = reader_options
         self.drop_remainder = drop_remainder
+        self.return_rule_sets = return_rule_sets
         self.stats = self._stats_from_metadata(self.ds_path, self._sizes)
 
         self._epoch = 0
@@ -137,7 +139,9 @@ class ImplySizeTask:
             transforms.Batch(
                 batch_size=self.batch_size,
                 drop_remainder=self.drop_remainder,
-                batch_fn=_batch_records,
+                batch_fn=_batch_records_with_rule_sets
+                if self.return_rule_sets
+                else _batch_records,
             ),
         ]
         return grain.DataLoader(
@@ -191,3 +195,36 @@ def _batch_records(records):
         pick = np.random.randint(rule.shape[0])
         rules_batch[idx, :] = rule[pick]
     return seq_batch, rules_batch
+
+
+def _batch_records_with_rule_sets(records):
+    if not records:
+        return (
+            np.zeros((0, 0), dtype=np.int32),
+            np.zeros((0, 2), dtype=np.int32),
+            np.zeros((0, 0, 2), dtype=np.int32),
+            np.zeros((0, 0), dtype=bool),
+        )
+
+    batch_size = len(records)
+    max_seq = max(rec["sequent"].shape[0] for rec in records)
+    normalized_rules = [_normalize_rule_array(rec["rule"]) for rec in records]
+    max_rules = max(rule.shape[0] for rule in normalized_rules)
+
+    seq_batch = np.zeros((batch_size, max_seq), dtype=np.int32)
+    rules_batch = np.zeros((batch_size, 2), dtype=np.int32)
+    rule_set_batch = np.zeros((batch_size, max_rules, 2), dtype=np.int32)
+    rule_set_mask = np.zeros((batch_size, max_rules), dtype=bool)
+
+    for idx, rec in enumerate(records):
+        sequent = rec["sequent"]
+        seq_batch[idx, : sequent.shape[0]] = sequent
+        rule = normalized_rules[idx]
+        if rule.shape[0] == 0:
+            raise ValueError("Cannot sample rule from empty rule list.")
+        rule_set_batch[idx, : rule.shape[0], :] = rule
+        rule_set_mask[idx, : rule.shape[0]] = True
+        pick = np.random.randint(rule.shape[0])
+        rules_batch[idx, :] = rule[pick]
+
+    return seq_batch, rules_batch, rule_set_batch, rule_set_mask
