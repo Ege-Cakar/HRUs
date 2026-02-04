@@ -31,26 +31,6 @@ def t(xs):
     return np.swapaxes(xs, -2, -1)
 
 
-class Finite:
-    def __init__(self, task, data_size, seed=None) -> None:
-        self.task = task
-        self.data_size = data_size
-        self.batch_size = self.task.batch_size
-        self.task.batch_size = data_size   # dirty trick (we're all adults here)
-
-        self.data = next(self.task)
-        del self.task                      # task is consumed
-
-        self.rng = np.random.default_rng(seed)
-    
-    def __next__(self):
-        idxs = self.rng.choice(self.data_size, self.batch_size, replace=True)
-        return self.data[0][idxs], self.data[1][idxs]
-
-    def __iter__(self):
-        return self
-
-
 def split_batch(batch_size, max_size):
     fac = np.ceil(batch_size / max_size)
     batch_size = np.round(batch_size / fac)

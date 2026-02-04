@@ -104,6 +104,7 @@ class TransformerConfig:
     output_mode: str = "last_token"
     pad_token_id: int = 0
     use_mup: bool = False
+    use_sow: bool = False
 
     def to_model(self, *, rngs: nnx.Rngs) -> 'Transformer':
         return Transformer(self, rngs=rngs)
@@ -121,6 +122,7 @@ class MultiHeadAttention(nnx.Module):
         use_mup: bool = False,
         rotary_cos: jnp.ndarray | None = None,
         rotary_sin: jnp.ndarray | None = None,
+        use_sow=False,
         *, 
         rngs: nnx.Rngs
     ):
@@ -131,6 +133,7 @@ class MultiHeadAttention(nnx.Module):
         self.head_dim = n_hidden // n_heads
         self.rotary_cos = rotary_cos
         self.rotary_sin = rotary_sin
+        self.use_sow = use_sow
         if use_mup:
             self.scale = mup_attention_scale(self.head_dim)
         else:
@@ -174,6 +177,9 @@ class MultiHeadAttention(nnx.Module):
             attn_weights = jnp.where(mask, attn_weights, -1e9)
         
         attn_weights = jax.nn.softmax(attn_weights, axis=-1)
+
+        if self.use_sow:
+            self.sow(nnx.Intermediate, 'attn_weights', attn_weights)
         
         if self.dropout is not None:
             attn_weights = self.dropout(attn_weights)
@@ -201,11 +207,13 @@ class TransformerBlock(nnx.Module):
         use_mup: bool = False,
         rotary_cos: jnp.ndarray | None = None,
         rotary_sin: jnp.ndarray | None = None,
+        use_sow: bool = False,
         *, 
         rngs: nnx.Rngs
     ):
         self.layer_norm = layer_norm
         self.use_swiglu = use_swiglu
+        self.use_sow = use_sow
         
         # Attention
         self.attn = MultiHeadAttention(
@@ -216,6 +224,7 @@ class TransformerBlock(nnx.Module):
             use_mup=use_mup,
             rotary_cos=rotary_cos,
             rotary_sin=rotary_sin,
+            use_sow=self.use_sow,
             rngs=rngs
         )
         
@@ -330,6 +339,7 @@ class Transformer(nnx.Module):
                 use_mup=config.use_mup,
                 rotary_cos=self.rotary_cos,
                 rotary_sin=self.rotary_sin,
+                use_sow=config.use_sow,
                 rngs=rngs,
             )
             for _ in range(config.n_layers)

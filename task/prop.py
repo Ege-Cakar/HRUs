@@ -153,6 +153,119 @@ class ImplySizeTask:
         )
 
 
+class Finite:
+    """Cache up to k examples from a task and recycle them forever."""
+
+    def __init__(self, task, k, seed=None) -> None:
+        if k <= 0:
+            raise ValueError(f"k must be positive, got {k}.")
+        if not hasattr(task, "batch_size"):
+            raise ValueError("Task must define batch_size.")
+
+        self.task = task
+        self.k = int(k)
+        self.batch_size = task.batch_size
+        self._rng = np.random.default_rng(seed)
+
+        self.data, self._return_single = self._collect_k_examples()
+        self._n_cached = self.data[0].shape[0]
+        if self._n_cached == 0:
+            raise ValueError("Finite cache is empty.")
+
+        self._order = self._rng.permutation(self._n_cached)
+        self._pos = 0
+
+    def __next__(self):
+        idxs = self._next_indices(self.batch_size)
+        batch = tuple(arr[idxs] for arr in self.data)
+        if self._return_single:
+            return batch[0]
+        return batch
+
+    def __iter__(self):
+        return self
+
+    def _normalize_batch(self, batch):
+        if isinstance(batch, (tuple, list)):
+            return tuple(np.asarray(arr) for arr in batch), False
+        return (np.asarray(batch),), True
+
+    def _collect_k_examples(self):
+        chunks = None
+        n_collected = 0
+        return_single = False
+        while n_collected < self.k:
+            try:
+                batch = next(self.task)
+            except StopIteration:
+                break
+
+            arrays, is_single = self._normalize_batch(batch)
+            if chunks is None:
+                chunks = [[] for _ in arrays]
+                return_single = is_single
+            elif is_single != return_single:
+                raise ValueError("Task batch output type changed across iterations.")
+            elif len(arrays) != len(chunks):
+                raise ValueError("Task batch structure changed across iterations.")
+
+            batch_size = arrays[0].shape[0]
+            for arr in arrays:
+                if arr.shape[0] != batch_size:
+                    raise ValueError("Task batch has inconsistent leading dimensions.")
+
+            take = min(self.k - n_collected, batch_size)
+            for idx, arr in enumerate(arrays):
+                chunks[idx].append(arr[:take])
+            n_collected += take
+
+        if chunks is None:
+            raise ValueError("Task produced no data.")
+
+        data = tuple(self._pad_and_concat(parts) for parts in chunks)
+        return data, return_single
+
+    def _next_indices(self, n):
+        idxs = np.empty(n, dtype=np.int64)
+        filled = 0
+        while filled < n:
+            remaining = self._order.size - self._pos
+            if remaining == 0:
+                self._order = self._rng.permutation(self._n_cached)
+                self._pos = 0
+                remaining = self._order.size
+            take = min(n - filled, remaining)
+            idxs[filled : filled + take] = self._order[self._pos : self._pos + take]
+            self._pos += take
+            filled += take
+        return idxs
+
+    def _pad_and_concat(self, parts):
+        if len(parts) == 1:
+            return parts[0]
+
+        ndim = parts[0].ndim
+        max_shape = list(parts[0].shape)
+        for arr in parts[1:]:
+            if arr.ndim != ndim:
+                raise ValueError("Task batch dimensionality changed across iterations.")
+            for axis in range(1, ndim):
+                if arr.shape[axis] > max_shape[axis]:
+                    max_shape[axis] = arr.shape[axis]
+
+        padded = []
+        for arr in parts:
+            pad_width = [(0, 0)]
+            for axis in range(1, ndim):
+                pad_amt = max_shape[axis] - arr.shape[axis]
+                pad_width.append((0, pad_amt))
+            if any(pad > 0 for _, pad in pad_width[1:]):
+                arr = np.pad(arr, pad_width, mode="constant")
+            padded.append(arr)
+
+        return np.concatenate(padded, axis=0)
+
+
 @dataclass(frozen=True)
 class _DecodeRecord(transforms.MapTransform):
     def map(self, element):

@@ -23,6 +23,7 @@ from util.sample import sample_imply, list_sequents
 from util.tokenize import tokenize
 from util.elem import TokenizedExample
 
+# TODO: need to sort sequents by length of sequent, not length of root proposition
 
 @dataclass(frozen=True)
 class GenerationStats:
