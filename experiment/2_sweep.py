@@ -22,7 +22,7 @@ OUT_DIR = Path("fig/2_sweep")
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 # <codecell>
-df = collate_dfs("remote/2_sweep", show_progress=True)
+df = collate_dfs("remote/2_sweep/set", show_progress=True)
 df
 
 

@@ -282,5 +282,10 @@ for case in all_cases:
     case.train_args["print_fn"] = None
 
 df = pd.DataFrame(all_cases)
-df.to_pickle(f"res.{RUN_ID}.pkl")
+
+save_dir = Path('set')
+if not save_dir.exists():
+    save_dir.mkdir(parents=True)
+
+df.to_pickle(save_dir / f"res.{RUN_ID}.pkl")
 print("done!")
