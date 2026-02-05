@@ -126,7 +126,7 @@ TRAIN_SIZES = (2, 5)
 TEST_SIZES = (6, 12)
 
 BATCH_SIZE = 64
-TRAIN_ITERS = 500
+TRAIN_ITERS = 1000
 TEST_EVERY = 200
 TEST_ITERS = 1
 
@@ -168,7 +168,7 @@ print(
 )
 
 # NOTE: testing with finite dataset
-train_task = Finite(train_task, k=1_000)
+train_task = Finite(train_task, k=1000)
 
 
 config = TransformerConfig(
@@ -234,7 +234,7 @@ custom_ex = '( p2 → p1 ) , ⊥ , p3 , ( p1 → p2 ) ⊢ p3'
 ids = [char_to_id(c) for c in custom_ex.split(' ')]
 xs_pred = jnp.array([ids])
 
-def pred_single(xs_pred):
+def pred_single(xs_pred, readable=True):
     xs_train, ys_train = train_task.data
     model = optimizer.model
 
@@ -260,7 +260,10 @@ def pred_single(xs_pred):
             res[opt.item()] = opt_weight
 
         if cat == 0:
-            res = {id_to_rule_type[k].__name__: v for k, v in res.items()}
+            if readable:
+                res = {id_to_rule_type[k].__name__: v for k, v in res.items()}
+            else:
+                res = {k: v for k, v in res.items()}
 
         all_res[cat] = res
 
@@ -281,7 +284,7 @@ optimizer.model.blocks[1].attn.use_sow = True
 # custom_ex = '( p1 → p2 ) , p3 , ( p1 → p3 ) ⊢ ( p1 → p3 )'
 # custom_ex = 'p1 , ( p1 → p2 ) , ( p1 → p3 ) ⊢ p3'
 # custom_ex = '( p2 → p1 ) , ⊥ , p3 , ( p1 → p2 ) ⊢ p3'
-custom_ex = 'p1 , p2 ⊢ ( p2 → ( ( ( ⊥ → p1 ) → ⊤ ) → ⊥ ) )'
+custom_ex = 'p1 , ( p1 → ⊤ ) , ⊥ ⊢ ( p2 → ( ( ( ⊥ → p1 ) → ⊤ ) → ⊥ ) ) → p1 )'
 ids = [char_to_id(c) for c in custom_ex.split(' ')]
 xs = jnp.array([ids])
 xs.shape
@@ -290,7 +293,7 @@ xs.shape
 logits = optimizer.model(xs)
 
 # <codecell>
-ex_idx = 26
+ex_idx = 0
 ex = xs[ex_idx]
 ex_len = int(jnp.sum(ex != 0))
 ex = ex[:ex_len]
@@ -335,6 +338,39 @@ xs_single = xs[ex_idx]
 xs_single = xs_single[None, xs_single != 0]
 pred_single(xs_single)
 
+
+# <codecell>
+### ESTIMATE ACCURACY OF SIMPLE PREDICTOR
+xs, _, ys, ys_mask = next(test_task)
+logits = optimizer.model(xs)
+preds = logits.argmax(axis=-1)
+preds
+
+# <codecell>
+all_simple_preds = []
+
+for x in xs:
+    x = x[x != 0]
+    simple_pred = pred_single(x[None, :], readable=False)
+    simple_rule = jnp.array([list(simple_pred[0].keys())[jnp.argmax(jnp.array(list(simple_pred[0].values())))],
+                            list(simple_pred[1].keys())[jnp.argmax(jnp.array(list(simple_pred[1].values())))]])
+
+    all_simple_preds.append(simple_rule)
+
+all_simple_preds = np.array(all_simple_preds)
+all_simple_preds
+
+# <codecell>
+rules = np.unique(preds[:,0])
+rule = rules[2]
+
+sel = preds[:,0] == rule
+acc = jnp.mean(preds[sel,0] == all_simple_preds[sel,0])
+acc
+
+
+# <codecell>
+all_simple_preds[sel,0]
 
 
 # %%
