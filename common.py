@@ -106,6 +106,43 @@ def rule_membership_accuracy(pred_rules, rule_set_batch, rule_set_mask):
     return jnp.mean(jnp.any(matches, axis=-1))
 
 
+def multiclass_nll_from_logits(logits, labels):
+    """Mean negative log-likelihood for integer labels."""
+    logits = jnp.asarray(logits)
+    labels = jnp.asarray(labels).astype(jnp.int32)
+    log_probs = jax.nn.log_softmax(logits, axis=-1)
+    gathered = jnp.take_along_axis(log_probs, labels[..., None], axis=-1)[..., 0]
+    return -jnp.mean(gathered)
+
+
+def expected_calibration_error_from_logits(logits, labels, n_bins=10):
+    """Expected calibration error (ECE) for multiclass logits."""
+    logits = jnp.asarray(logits)
+    labels = jnp.asarray(labels).astype(jnp.int32)
+    probs = jax.nn.softmax(logits, axis=-1)
+    conf = jnp.max(probs, axis=-1)
+    preds = jnp.argmax(probs, axis=-1)
+    correct = preds == labels
+
+    bins = jnp.linspace(0.0, 1.0, n_bins + 1)
+    ece = 0.0
+    total = conf.size
+    for idx in range(n_bins):
+        low = bins[idx]
+        high = bins[idx + 1]
+        if idx == 0:
+            mask = (conf >= low) & (conf <= high)
+        else:
+            mask = (conf > low) & (conf <= high)
+        count = jnp.sum(mask)
+        if count == 0:
+            continue
+        bin_acc = jnp.mean(correct[mask])
+        bin_conf = jnp.mean(conf[mask])
+        ece += jnp.abs(bin_acc - bin_conf) * (count / total)
+    return ece
+
+
 def gen1(optimizer, xs, **kwargs):
     return generate(optimizer, xs, idx=1, **kwargs)
 
