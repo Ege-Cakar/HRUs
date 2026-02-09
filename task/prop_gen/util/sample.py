@@ -170,6 +170,14 @@ def _sample_atom(n_vars: int, rng: random.Random | None = None) -> Proposition:
     return PFalse()
 
 
+def _sample_atom_no_true(n_vars: int, rng: random.Random | None = None) -> Proposition:
+    rng = rng or random
+    pick = rng.randrange(n_vars + 1)
+    if pick < n_vars:
+        return Atom(f"p{pick + 1}")
+    return PFalse()
+
+
 def sample_imply(
     n_vars: int,
     size: int,
@@ -186,15 +194,35 @@ def sample_imply(
     return _random_group(Implies, leaves, rng=rng)
 
 
-def list_sequents(
-    prop: Proposition,
+def sample_imply_no_true(
+    n_vars: int,
+    size: int,
     rng: random.Random | None = None,
-) -> list[Example]:
-    """List sequents in the proof tree for `prop` with all applicable rules
-    per sequent. If `prop` cannot be proved, return [].
-    """
+) -> Proposition:
+    """Sample implications with atoms and falsity only (no truth constant)."""
+    _validate_imply_args(n_vars, size)
+    leaves = [_sample_atom_no_true(n_vars, rng=rng) for _ in range(size)]
+    return _random_group(Implies, leaves, rng=rng)
 
-    tree = build_proof_tree(Sequent(ants=[], cons=prop))
+
+def count_prop_symbols(prop: Proposition) -> int:
+    """Count leaf symbols (variables, truth, falsity) in a proposition tree."""
+    if isinstance(prop, (Atom, PTrue, PFalse)):
+        return 1
+    if isinstance(prop, (Implies, And, Or)):
+        return count_prop_symbols(prop.left) + count_prop_symbols(prop.right)
+    raise TypeError(f"Unsupported proposition type: {type(prop)}")
+
+
+def count_sequent_symbols(sequent: Sequent) -> int:
+    """Count leaf symbols across the entire sequent (antecedents + consequent)."""
+    total = count_prop_symbols(sequent.cons)
+    for ant in sequent.ants:
+        total += count_prop_symbols(ant)
+    return total
+
+
+def _collect_provable_entries(tree) -> list[Example]:
     if not tree.is_provable:
         return []
 
@@ -236,11 +264,33 @@ def list_sequents(
                     traverse(child)
 
     traverse(tree)
+    return [(sequent, list(rules)) for sequent, rules in entries.items() if rules]
 
+
+def list_sequents(
+    prop: Proposition,
+    rng: random.Random | None = None,
+) -> list[Example]:
+    """List sequents in the proof tree for `prop` with all applicable rules
+    per sequent. If `prop` cannot be proved, return [].
+    """
+
+    tree = build_proof_tree(Sequent(ants=[], cons=prop))
     _ = rng
-    collected: list[Example] = []
-    for sequent, rules in entries.items():
-        if not rules:
-            continue
-        collected.append((sequent, list(rules)))
-    return collected
+    return _collect_provable_entries(tree)
+
+
+def list_sequents_allow_false(
+    prop: Proposition,
+    allow_false: bool = False,
+    rng: random.Random | None = None,
+) -> list[Example]:
+    """List sequents and rule labels, optionally including unprovable roots."""
+    tree = build_proof_tree(Sequent(ants=[], cons=prop))
+    if tree.is_provable:
+        _ = rng
+        return _collect_provable_entries(tree)
+    if not allow_false:
+        return []
+    _ = rng
+    return [(Sequent(ants=[], cons=prop), [Unprovable()])]
