@@ -1,5 +1,6 @@
 """Analysis script for Transformer + normative OOD sweep."""
 
+# <codecell>
 from __future__ import annotations
 
 import sys
@@ -129,6 +130,7 @@ sns.move_legend(g, "upper left", bbox_to_anchor=(1.0, 1.0), frameon=True)
 g.figure.subplots_adjust(right=0.84)
 plt.savefig(OUT_DIR / "ood_joint_by_family.svg", bbox_inches="tight")
 
+# <codecell>
 # Calibration and NLL comparison.
 melt = flat.melt(
     id_vars=["model_family", "train_max"],
@@ -153,6 +155,7 @@ for ax in g2.axes.flat:
     ax.tick_params(axis="x", rotation=20)
 plt.savefig(OUT_DIR / "calibration_nll_by_family.svg", bbox_inches="tight")
 
+# <codecell>
 # Build predictive dataset: one row per architecture/split with normative + transformer metrics.
 pivot = (
     flat.pivot_table(

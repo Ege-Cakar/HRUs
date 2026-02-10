@@ -349,3 +349,19 @@ class NegationRight(Rule):
         return "¬R"
 
     __repr__ = __str__
+
+
+class Unprovable(Rule):
+    """Marker rule for sequents that are not provable in NJ.
+
+    This is used for data-labeling only (it is not part of proof search).
+    """
+
+    def apply(self, sequent: Sequent) -> Optional[List[Sequent]]:
+        _ = sequent
+        return None
+
+    def __str__(self) -> str:
+        return "∅"
+
+    __repr__ = __str__
