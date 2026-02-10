@@ -5,7 +5,7 @@ __pycache__/
 fig/
 wandb/
 *.ipynb_checkpoints/
-.venv/
+.venv
 .pytest_cache/
 .python-version
 repl/
