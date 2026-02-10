@@ -24,6 +24,7 @@ from task.prop_gen.util.tokenize_ar import eot_token_id, sep_token_id
 from train import Case, ce_mask
 
 from data_utils import build_completion_targets, build_prompt_only_inputs
+from metrics_utils import final_token_accuracy
 
 
 RUN_ID = new_seed()
@@ -31,9 +32,8 @@ print("RUN ID", RUN_ID)
 
 DS_PATH = Path("/n/netscratch/pehlevan_lab/Lab/wlt/data/math/toy_imply_ar")
 
-TRAIN_SIZES = [5, 10, 15]
+TRAIN_MAX_SIZES = [5, 10, 15]
 EVAL_SIZES = list(range(5, 26))
-OOD_SIZES = list(range(16, 26))
 
 BATCH_SIZE = 64
 TRAIN_ITERS = 5_000
@@ -62,9 +62,8 @@ MIXER_LRS = [3e-4, 1e-3, 3e-3]
 
 ### START TEST CONFIGS
 # DS_PATH = Path(ROOT / "task" / "prop_gen" / "data" / "test")
-# TRAIN_SIZES = [5, 10, 15]
+# TRAIN_MAX_SIZES = [5, 10, 15]
 # EVAL_SIZES = list(range(5, 21))
-# OOD_SIZES = list(range(16, 21))
 
 # BATCH_SIZE = 32
 # TRAIN_ITERS = 100
@@ -97,7 +96,17 @@ def _stats_for_sizes(size_range):
     return ImplyAutoregSizeTask.stats_from_metadata(DS_PATH, size_range)
 
 
-def _compute_dims(train_sizes, eval_sizes):
+def _train_sizes_for_max(train_max_size: int) -> list[int]:
+    return [int(size) for size in EVAL_SIZES if int(size) <= int(train_max_size)]
+
+
+def _ood_sizes_for_max(train_max_size: int) -> list[int]:
+    return [int(size) for size in EVAL_SIZES if int(size) > int(train_max_size)]
+
+
+def _compute_dims(train_max_sizes, eval_sizes):
+    max_train = int(max(train_max_sizes))
+    train_sizes = [int(size) for size in eval_sizes if int(size) <= max_train]
     train_stats = _stats_for_sizes(train_sizes)
     eval_stats = _stats_for_sizes(eval_sizes)
     max_token = max(train_stats["max_token"], eval_stats["max_token"])
@@ -170,10 +179,7 @@ def make_ar_metrics_fn():
         total = jnp.maximum(jnp.sum(mask), 1)
         token_acc = jnp.sum((preds == labels) & mask) / total
 
-        lengths = jnp.sum(mask, axis=1)
-        last_idx = jnp.maximum(lengths - 1, 0)
-        batch_idx = jnp.arange(labels.shape[0])
-        final_acc = jnp.mean(preds[batch_idx, last_idx] == labels[batch_idx, last_idx])
+        final_acc = final_token_accuracy(preds, labels)
 
         seq_correct = (preds == labels) | (~mask)
         seq_exact_acc = jnp.mean(jnp.all(seq_correct, axis=1))
@@ -263,9 +269,9 @@ def _evaluate_by_size(optimizer, *, family: str, n_seq: int, max_out_len: int, n
     return size_metrics
 
 
-def _avg_ood_metric(size_metrics, metric_name):
+def _avg_ood_metric(size_metrics, metric_name, ood_sizes):
     vals = []
-    for size in OOD_SIZES:
+    for size in ood_sizes:
         metrics = size_metrics.get(int(size), {})
         val = metrics.get(metric_name)
         if val is not None:
@@ -273,7 +279,7 @@ def _avg_ood_metric(size_metrics, metric_name):
     return float(np.mean(vals)) if vals else float("nan")
 
 
-n_vocab, n_seq, max_out_len = _compute_dims(TRAIN_SIZES, EVAL_SIZES)
+n_vocab, n_seq, max_out_len = _compute_dims(TRAIN_MAX_SIZES, EVAL_SIZES)
 print("DATA DIMS", {"n_vocab": n_vocab, "n_seq": n_seq, "max_out_len": max_out_len})
 
 all_cases = []
@@ -281,194 +287,211 @@ all_cases = []
 ar_metrics_fn = make_ar_metrics_fn()
 mixer_metrics_fn = make_mixer_metrics_fn()
 
-# Transformer cases.
-for n_layers, (n_hidden, n_heads), lr, pos_encoding, use_swiglu in itertools.product(
-    TRANSFORMER_LAYERS,
-    TRANSFORMER_WIDTH_HEADS,
-    TRANSFORMER_LRS,
-    TRANSFORMER_POS,
-    TRANSFORMER_SWIGLU,
-):
-    config = TransformerConfig(
-        n_vocab=n_vocab,
-        n_seq=n_seq,
-        n_layers=n_layers,
-        n_hidden=n_hidden,
-        n_heads=n_heads,
-        n_out=n_vocab,
-        n_pred_tokens=1,
-        pos_encoding=pos_encoding,
-        layer_norm=True,
-        use_swiglu=use_swiglu,
-        use_bias=True,
-        dropout_rate=0.0,
-        output_mode="full_sequence",
-        pad_token_id=0,
-    )
-
-    train_task = _make_task(TRAIN_SIZES, drop_remainder=True, shuffle=True)
-    test_task = _make_task(EVAL_SIZES, drop_remainder=False, shuffle=True)
-
-    train_args = {
-        "loss": "ce_mask",
-        "eval_fns": [ar_metrics_fn],
-        "print_fn": make_print_fn("final_token_acc"),
-        "train_iters": TRAIN_ITERS,
-        "test_iters": TEST_ITERS,
-        "test_every": TEST_EVERY,
-        "lr": lr,
-    }
-
-    info = {
-        "model_family": "transformer",
-        "target_format": "next_token_full_sequence",
-        "train_sizes": TRAIN_SIZES,
-        "eval_sizes": EVAL_SIZES,
-        "n_layers": n_layers,
-        "n_hidden": n_hidden,
-        "n_heads": n_heads,
-        "pos_encoding": pos_encoding,
-        "use_swiglu": use_swiglu,
-        "lr": lr,
-        "n_vocab": n_vocab,
-        "n_seq": n_seq,
-    }
-
-    all_cases.append(
-        Case(
-            "5_arch_sweep_transformer",
-            config,
-            train_task=train_task,
-            test_task=test_task,
-            train_args=train_args,
-            info=info,
+for train_max_size in TRAIN_MAX_SIZES:
+    train_sizes = _train_sizes_for_max(train_max_size)
+    ood_sizes = _ood_sizes_for_max(train_max_size)
+    if not train_sizes:
+        raise ValueError(f"No train sizes found for train_max_size={train_max_size}")
+    if not ood_sizes:
+        raise ValueError(
+            f"No OOD sizes found for train_max_size={train_max_size}; "
+            "ensure train_max_size is smaller than max(EVAL_SIZES)."
         )
-    )
 
-# Mamba-1 cases.
-for n_layers, n_hidden, d_state, d_conv, lr in itertools.product(
-    MAMBA_LAYERS,
-    MAMBA_HIDDEN,
-    MAMBA_D_STATE,
-    MAMBA_D_CONV,
-    MAMBA_LRS,
-):
-    config = MambaConfig(
-        n_vocab=n_vocab,
-        n_seq=n_seq,
-        n_layers=n_layers,
-        n_hidden=n_hidden,
-        n_out=n_vocab,
-        n_pred_tokens=1,
-        output_mode="full_sequence",
-        pad_token_id=0,
-        layer_norm=True,
-        use_bias=True,
-        dropout_rate=0.0,
-        d_state=d_state,
-        d_conv=d_conv,
-        expand=2,
-        dt_rank="auto",
-    )
-
-    train_task = _make_task(TRAIN_SIZES, drop_remainder=True, shuffle=True)
-    test_task = _make_task(EVAL_SIZES, drop_remainder=False, shuffle=True)
-
-    train_args = {
-        "loss": "ce_mask",
-        "eval_fns": [ar_metrics_fn],
-        "print_fn": make_print_fn("final_token_acc"),
-        "train_iters": TRAIN_ITERS,
-        "test_iters": TEST_ITERS,
-        "test_every": TEST_EVERY,
-        "lr": lr,
-    }
-
-    info = {
-        "model_family": "mamba1",
-        "target_format": "next_token_full_sequence",
-        "train_sizes": TRAIN_SIZES,
-        "eval_sizes": EVAL_SIZES,
-        "n_layers": n_layers,
-        "n_hidden": n_hidden,
-        "d_state": d_state,
-        "d_conv": d_conv,
-        "lr": lr,
-        "n_vocab": n_vocab,
-        "n_seq": n_seq,
-    }
-
-    all_cases.append(
-        Case(
-            "5_arch_sweep_mamba1",
-            config,
-            train_task=train_task,
-            test_task=test_task,
-            train_args=train_args,
-            info=info,
+    # Transformer cases.
+    for n_layers, (n_hidden, n_heads), lr, pos_encoding, use_swiglu in itertools.product(
+        TRANSFORMER_LAYERS,
+        TRANSFORMER_WIDTH_HEADS,
+        TRANSFORMER_LRS,
+        TRANSFORMER_POS,
+        TRANSFORMER_SWIGLU,
+    ):
+        config = TransformerConfig(
+            n_vocab=n_vocab,
+            n_seq=n_seq,
+            n_layers=n_layers,
+            n_hidden=n_hidden,
+            n_heads=n_heads,
+            n_out=n_vocab,
+            n_pred_tokens=1,
+            pos_encoding=pos_encoding,
+            layer_norm=True,
+            use_swiglu=use_swiglu,
+            use_bias=True,
+            dropout_rate=0.0,
+            output_mode="full_sequence",
+            pad_token_id=0,
         )
-    )
 
-# Mixer completion-at-once cases.
-for n_layers, n_hidden, n_channels, lr in itertools.product(
-    MIXER_LAYERS,
-    MIXER_HIDDEN,
-    MIXER_CHANNELS,
-    MIXER_LRS,
-):
-    config = CompletionMixerConfig(
-        n_vocab=n_vocab,
-        n_seq=n_seq,
-        n_layers=n_layers,
-        n_hidden=n_hidden,
-        n_channels=n_channels,
-        n_out_seq=max_out_len,
-        n_out_vocab=n_vocab,
-        act_fn="gelu",
-        layer_norm=True,
-        use_bias=True,
-    )
+        train_task = _make_task(train_sizes, drop_remainder=True, shuffle=True)
+        test_task = _make_task(ood_sizes, drop_remainder=False, shuffle=True)
 
-    train_base = _make_task(TRAIN_SIZES, drop_remainder=True, shuffle=True)
-    test_base = _make_task(EVAL_SIZES, drop_remainder=False, shuffle=True)
+        train_args = {
+            "loss": "ce_mask",
+            "eval_fns": [ar_metrics_fn],
+            "print_fn": make_print_fn("final_token_acc"),
+            "train_iters": TRAIN_ITERS,
+            "test_iters": TEST_ITERS,
+            "test_every": TEST_EVERY,
+            "lr": lr,
+        }
 
-    train_task = MixerBatchAdapter(train_base, n_seq=n_seq, max_out_len=max_out_len)
-    test_task = MixerBatchAdapter(test_base, n_seq=n_seq, max_out_len=max_out_len)
+        info = {
+            "model_family": "transformer",
+            "target_format": "next_token_full_sequence",
+            "train_max_size": int(train_max_size),
+            "train_sizes": train_sizes,
+            "eval_sizes": EVAL_SIZES,
+            "ood_sizes": ood_sizes,
+            "n_layers": n_layers,
+            "n_hidden": n_hidden,
+            "n_heads": n_heads,
+            "pos_encoding": pos_encoding,
+            "use_swiglu": use_swiglu,
+            "lr": lr,
+            "n_vocab": n_vocab,
+            "n_seq": n_seq,
+        }
 
-    train_args = {
-        "loss": "ce",
-        "eval_fns": [mixer_metrics_fn],
-        "print_fn": make_print_fn("eot_pos_acc"),
-        "train_iters": TRAIN_ITERS,
-        "test_iters": TEST_ITERS,
-        "test_every": TEST_EVERY,
-        "lr": lr,
-    }
-
-    info = {
-        "model_family": "mixer_completion",
-        "target_format": "completion_left_aligned_eot_padded",
-        "train_sizes": TRAIN_SIZES,
-        "eval_sizes": EVAL_SIZES,
-        "n_layers": n_layers,
-        "n_hidden": n_hidden,
-        "n_channels": n_channels,
-        "lr": lr,
-        "n_vocab": n_vocab,
-        "n_seq": n_seq,
-        "max_out_len": max_out_len,
-    }
-
-    all_cases.append(
-        Case(
-            "5_arch_sweep_mixer_completion",
-            config,
-            train_task=train_task,
-            test_task=test_task,
-            train_args=train_args,
-            info=info,
+        all_cases.append(
+            Case(
+                f"5_arch_sweep_transformer_tmax{int(train_max_size):02d}",
+                config,
+                train_task=train_task,
+                test_task=test_task,
+                train_args=train_args,
+                info=info,
+            )
         )
-    )
+
+    # Mamba-1 cases.
+    for n_layers, n_hidden, d_state, d_conv, lr in itertools.product(
+        MAMBA_LAYERS,
+        MAMBA_HIDDEN,
+        MAMBA_D_STATE,
+        MAMBA_D_CONV,
+        MAMBA_LRS,
+    ):
+        config = MambaConfig(
+            n_vocab=n_vocab,
+            n_seq=n_seq,
+            n_layers=n_layers,
+            n_hidden=n_hidden,
+            n_out=n_vocab,
+            n_pred_tokens=1,
+            output_mode="full_sequence",
+            pad_token_id=0,
+            layer_norm=True,
+            use_bias=True,
+            dropout_rate=0.0,
+            d_state=d_state,
+            d_conv=d_conv,
+            expand=2,
+            dt_rank="auto",
+        )
+
+        train_task = _make_task(train_sizes, drop_remainder=True, shuffle=True)
+        test_task = _make_task(ood_sizes, drop_remainder=False, shuffle=True)
+
+        train_args = {
+            "loss": "ce_mask",
+            "eval_fns": [ar_metrics_fn],
+            "print_fn": make_print_fn("final_token_acc"),
+            "train_iters": TRAIN_ITERS,
+            "test_iters": TEST_ITERS,
+            "test_every": TEST_EVERY,
+            "lr": lr,
+        }
+
+        info = {
+            "model_family": "mamba1",
+            "target_format": "next_token_full_sequence",
+            "train_max_size": int(train_max_size),
+            "train_sizes": train_sizes,
+            "eval_sizes": EVAL_SIZES,
+            "ood_sizes": ood_sizes,
+            "n_layers": n_layers,
+            "n_hidden": n_hidden,
+            "d_state": d_state,
+            "d_conv": d_conv,
+            "lr": lr,
+            "n_vocab": n_vocab,
+            "n_seq": n_seq,
+        }
+
+        all_cases.append(
+            Case(
+                f"5_arch_sweep_mamba1_tmax{int(train_max_size):02d}",
+                config,
+                train_task=train_task,
+                test_task=test_task,
+                train_args=train_args,
+                info=info,
+            )
+        )
+
+    # Mixer completion-at-once cases.
+    for n_layers, n_hidden, n_channels, lr in itertools.product(
+        MIXER_LAYERS,
+        MIXER_HIDDEN,
+        MIXER_CHANNELS,
+        MIXER_LRS,
+    ):
+        config = CompletionMixerConfig(
+            n_vocab=n_vocab,
+            n_seq=n_seq,
+            n_layers=n_layers,
+            n_hidden=n_hidden,
+            n_channels=n_channels,
+            n_out_seq=max_out_len,
+            n_out_vocab=n_vocab,
+            act_fn="gelu",
+            layer_norm=True,
+            use_bias=True,
+        )
+
+        train_base = _make_task(train_sizes, drop_remainder=True, shuffle=True)
+        test_base = _make_task(ood_sizes, drop_remainder=False, shuffle=True)
+
+        train_task = MixerBatchAdapter(train_base, n_seq=n_seq, max_out_len=max_out_len)
+        test_task = MixerBatchAdapter(test_base, n_seq=n_seq, max_out_len=max_out_len)
+
+        train_args = {
+            "loss": "ce",
+            "eval_fns": [mixer_metrics_fn],
+            "print_fn": make_print_fn("eot_pos_acc"),
+            "train_iters": TRAIN_ITERS,
+            "test_iters": TEST_ITERS,
+            "test_every": TEST_EVERY,
+            "lr": lr,
+        }
+
+        info = {
+            "model_family": "mixer_completion",
+            "target_format": "completion_left_aligned_eot_padded",
+            "train_max_size": int(train_max_size),
+            "train_sizes": train_sizes,
+            "eval_sizes": EVAL_SIZES,
+            "ood_sizes": ood_sizes,
+            "n_layers": n_layers,
+            "n_hidden": n_hidden,
+            "n_channels": n_channels,
+            "lr": lr,
+            "n_vocab": n_vocab,
+            "n_seq": n_seq,
+            "max_out_len": max_out_len,
+        }
+
+        all_cases.append(
+            Case(
+                f"5_arch_sweep_mixer_completion_tmax{int(train_max_size):02d}",
+                config,
+                train_task=train_task,
+                test_task=test_task,
+                train_args=train_args,
+                info=info,
+            )
+        )
 
 print("TOTAL CASES:", len(all_cases))
 all_cases = split_cases(all_cases, RUN_SPLIT, shuffle_seed=200)
@@ -508,7 +531,11 @@ for case in all_cases:
         "metrics_final": final_test,
         "metrics_by_size": size_metrics,
         "ood_metric_name": key_metric,
-        "ood_metric_avg": _avg_ood_metric(size_metrics, key_metric),
+        "ood_metric_avg": _avg_ood_metric(
+            size_metrics,
+            key_metric,
+            ood_sizes=case.info.get("ood_sizes", []),
+        ),
         "hist": case.hist,
     }
     rows.append(row)
