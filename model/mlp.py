@@ -192,3 +192,113 @@ class Mixer(nnx.Module):
             out = out.flatten()
 
         return out
+
+
+@dataclass
+class CompletionMixerConfig:
+    """Hyperparameters for prompt-to-completion Mixer."""
+    n_vocab: int | None = None
+    n_seq: int = 128
+    n_layers: int = 4
+    n_hidden: int = 128
+    n_channels: int = 128
+    n_out_seq: int = 64
+    n_out_vocab: int = 128
+    act_fn: str = 'gelu'
+    layer_norm: bool = True
+    use_bias: bool = True
+    use_mup: bool = False
+
+    def to_model(self, *, rngs: nnx.Rngs) -> 'CompletionMixer':
+        return CompletionMixer(self, rngs=rngs)
+
+
+class CompletionMixer(nnx.Module):
+    """Mixer that maps a full prompt sequence to a full completion sequence."""
+
+    def __init__(self, config: CompletionMixerConfig, *, rngs: nnx.Rngs):
+        if config.n_out_seq > config.n_seq:
+            raise ValueError(
+                f"n_out_seq ({config.n_out_seq}) must be <= n_seq ({config.n_seq})"
+            )
+
+        self.config = config
+        self.act_fn = parse_act_fn(config.act_fn)
+
+        if config.n_vocab is not None:
+            self.embed = nnx.Embed(
+                num_embeddings=config.n_vocab,
+                features=config.n_hidden,
+                rngs=rngs,
+            )
+        else:
+            self.embed = None
+
+        self.token_mixing_layers = nnx.List()
+        self.channel_up_layers = nnx.List()
+        self.channel_down_layers = nnx.List()
+        self.token_norms = nnx.List()
+        self.channel_norms = nnx.List()
+
+        for _ in range(config.n_layers):
+            self.token_mixing_layers.append(
+                nnx.Linear(config.n_hidden, config.n_hidden, use_bias=config.use_bias, rngs=rngs)
+            )
+            self.channel_up_layers.append(
+                nnx.Linear(config.n_seq, config.n_channels, use_bias=config.use_bias, rngs=rngs)
+            )
+            self.channel_down_layers.append(
+                nnx.Linear(config.n_channels, config.n_seq, use_bias=config.use_bias, rngs=rngs)
+            )
+            if config.layer_norm:
+                self.token_norms.append(nnx.LayerNorm(config.n_hidden, rngs=rngs))
+                self.channel_norms.append(nnx.LayerNorm(config.n_hidden, rngs=rngs))
+
+        if config.use_mup:
+            self.output = MuReadout(
+                config.n_hidden,
+                config.n_out_vocab,
+                use_bias=config.use_bias,
+                rngs=rngs,
+            )
+        else:
+            self.output = nnx.Linear(
+                config.n_hidden,
+                config.n_out_vocab,
+                use_bias=config.use_bias,
+                rngs=rngs,
+            )
+
+    def __call__(self, x):
+        config = self.config
+        if self.embed is not None:
+            assert x.ndim == 2, f"Expected 2D token ids (batch, seq), got {x.shape}"
+            x = self.embed(x)
+        else:
+            assert x.ndim == 3, f"Expected 3D input (batch, seq, features), got {x.shape}"
+
+        if x.shape[1] != config.n_seq:
+            raise ValueError(
+                f"Expected sequence length {config.n_seq}, got {x.shape[1]}"
+            )
+
+        for i in range(config.n_layers):
+            residual = x
+            if config.layer_norm:
+                x = self.token_norms[i](x)
+            x = self.token_mixing_layers[i](x)
+            x = self.act_fn(x)
+            x = x + residual
+
+            residual = x
+            if config.layer_norm:
+                x = self.channel_norms[i](x)
+            x_t = jnp.transpose(x, (0, 2, 1))
+            x_t = self.channel_up_layers[i](x_t)
+            x_t = self.act_fn(x_t)
+            x_t = self.channel_down_layers[i](x_t)
+            x = jnp.transpose(x_t, (0, 2, 1))
+            x = x + residual
+
+        x = x[:, :config.n_out_seq, :]
+        return self.output(x)

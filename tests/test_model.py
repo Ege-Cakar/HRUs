@@ -5,7 +5,15 @@ import numpy as np
 import pytest
 from flax import nnx
 
-from model.mlp import Mlp, MlpConfig, Mixer, MixerConfig, parse_act_fn
+from model.mlp import (
+    CompletionMixer,
+    CompletionMixerConfig,
+    Mlp,
+    MlpConfig,
+    Mixer,
+    MixerConfig,
+    parse_act_fn,
+)
 
 
 class TestParseActFn:
@@ -293,4 +301,79 @@ class TestMixer:
         # 2D input without embedding should fail
         x = jnp.ones((4, 64))
         with pytest.raises(AssertionError, match="Expected 3D input"):
+            model(x)
+
+
+class TestCompletionMixerConfig:
+    def test_default_values(self):
+        config = CompletionMixerConfig()
+        assert config.n_vocab is None
+        assert config.n_seq == 128
+        assert config.n_layers == 4
+        assert config.n_hidden == 128
+        assert config.n_channels == 128
+        assert config.n_out_seq == 64
+        assert config.n_out_vocab == 128
+        assert config.act_fn == "gelu"
+        assert config.layer_norm is True
+        assert config.use_bias is True
+        assert config.use_mup is False
+
+    def test_to_model(self):
+        config = CompletionMixerConfig(n_vocab=100, n_seq=16, n_out_seq=8, n_out_vocab=100)
+        model = config.to_model(rngs=nnx.Rngs(42))
+        assert isinstance(model, CompletionMixer)
+
+
+class TestCompletionMixer:
+    def test_forward_with_embedding(self):
+        config = CompletionMixerConfig(
+            n_vocab=100,
+            n_seq=16,
+            n_layers=2,
+            n_hidden=32,
+            n_channels=8,
+            n_out_seq=6,
+            n_out_vocab=100,
+        )
+        model = CompletionMixer(config, rngs=nnx.Rngs(42))
+
+        x = jnp.ones((4, 16), dtype=jnp.int32)
+        out = model(x)
+        assert out.shape == (4, 6, 100)
+
+    def test_forward_without_embedding(self):
+        config = CompletionMixerConfig(
+            n_vocab=None,
+            n_seq=16,
+            n_layers=2,
+            n_hidden=32,
+            n_channels=8,
+            n_out_seq=10,
+            n_out_vocab=50,
+        )
+        model = CompletionMixer(config, rngs=nnx.Rngs(42))
+
+        x = jnp.ones((4, 16, 32), dtype=jnp.float32)
+        out = model(x)
+        assert out.shape == (4, 10, 50)
+
+    def test_invalid_output_seq(self):
+        with pytest.raises(ValueError, match="must be <= n_seq"):
+            CompletionMixerConfig(n_seq=8, n_out_seq=12).to_model(rngs=nnx.Rngs(42))
+
+    def test_invalid_runtime_seq_len(self):
+        config = CompletionMixerConfig(
+            n_vocab=100,
+            n_seq=12,
+            n_layers=1,
+            n_hidden=16,
+            n_channels=6,
+            n_out_seq=4,
+            n_out_vocab=100,
+        )
+        model = CompletionMixer(config, rngs=nnx.Rngs(42))
+
+        x = jnp.ones((2, 10), dtype=jnp.int32)
+        with pytest.raises(ValueError, match="Expected sequence length"):
             model(x)
