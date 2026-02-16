@@ -1,5 +1,6 @@
 """Analysis script for the 5_arch_sweep architecture comparison."""
 
+# <codecell>
 from __future__ import annotations
 
 import ast
@@ -203,35 +204,31 @@ def _save_plots_for_train_max(
     plt.savefig(out_dir / "ood_best_bar.svg", bbox_inches="tight")
 
 
-def main() -> None:
-    df = collate_dfs("remote/5_arch_sweep/set", show_progress=True)
-    if len(df) == 0:
-        raise ValueError("No results found in remote/5_arch_sweep/set")
+df = collate_dfs("remote/5_arch_sweep/set", show_progress=True)
+if len(df) == 0:
+    raise ValueError("No results found in remote/5_arch_sweep/set")
 
-    df = df.reset_index(drop=True).copy()
-    df["__row_id"] = np.arange(len(df), dtype=np.int64)
+df = df.reset_index(drop=True).copy()
+df["__row_id"] = np.arange(len(df), dtype=np.int64)
 
-    final_df = df.apply(_extract_final_row, axis=1).reset_index(drop=True)
-    size_df = _explode_size_rows(df)
-    best_df = select_best_by_family_and_train_max(final_df)
+final_df = df.apply(_extract_final_row, axis=1).reset_index(drop=True)
+size_df = _explode_size_rows(df)
+best_df = select_best_by_family_and_train_max(final_df)
 
-    final_df.to_csv(OUT_DIR / "summary_final.csv", index=False)
-    size_df.to_csv(OUT_DIR / "summary_by_size.csv", index=False)
-    best_df.to_csv(OUT_DIR / "best_by_family_and_train_max.csv", index=False)
+final_df.to_csv(OUT_DIR / "summary_final.csv", index=False)
+size_df.to_csv(OUT_DIR / "summary_by_size.csv", index=False)
+best_df.to_csv(OUT_DIR / "best_by_family_and_train_max.csv", index=False)
 
-    train_max_values = sorted(
-        int(v) for v in best_df["train_max_size"].dropna().astype(int).unique()
+train_max_values = sorted(
+    int(v) for v in best_df["train_max_size"].dropna().astype(int).unique()
+)
+for train_max_size in train_max_values:
+    _save_plots_for_train_max(
+        train_max_size=train_max_size,
+        best_df=best_df,
+        size_df=size_df,
+        out_root=OUT_DIR,
     )
-    for train_max_size in train_max_values:
-        _save_plots_for_train_max(
-            train_max_size=train_max_size,
-            best_df=best_df,
-            size_df=size_df,
-            out_root=OUT_DIR,
-        )
 
-    print("Saved:", OUT_DIR)
+print("Saved:", OUT_DIR)
 
-
-if __name__ == "__main__":
-    main()
