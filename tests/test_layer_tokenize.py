@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import numpy as np
 
-from task.layer_gen.util import tokenize_layer_axiom as tok
+from task.layer_gen.util import tokenize_layer as tok
 from task.prop_gen.util.elem import Atom, Sequent
 
 
-def test_layer_axiom_tokenize_roundtrip_prompt_and_completion() -> None:
+def test_layer_tokenize_roundtrip_prompt_and_completion() -> None:
     tokenizer = tok.build_tokenizer_from_atoms(
         ["p1_2", "p1_4", "p2_1", "p2_3", "p3_1"]
     )

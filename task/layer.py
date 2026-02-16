@@ -1,4 +1,4 @@
-"""Task loader/sampler for layered axiom-sequence reasoning."""
+"""Task loader/sampler for layered sequence reasoning."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from grain._src.core import sharding, transforms
 from grain._src.python import data_sources, samplers
 import numpy as np
 
-from task.layer_gen.util import tokenize_layer_axiom
+from task.layer_gen.util import tokenize_layer
 from task.layer_gen.util.rule_bank import (
     RuleBank,
     build_random_rule_bank,
@@ -23,11 +23,8 @@ from task.layer_gen.util.rule_bank import (
 from task.prop_gen.util.elem import Atom, Sequent
 
 
-class LayerAxiomTask:
-    STATS_KEYS_BY_OBJECTIVE = {
-        "autoreg": ("max_token", "max_seq", "max_prompt_seq", "max_completion_seq"),
-        "first_step": ("max_token", "max_seq", "max_prompt_seq", "max_target_seq"),
-    }
+class LayerTask:
+    STATS_KEYS = ("max_token", "max_seq", "max_prompt_seq", "max_completion_seq")
 
     def __init__(
         self,
@@ -36,7 +33,6 @@ class LayerAxiomTask:
         batch_size=128,
         *,
         mode="offline",
-        objective="autoreg",
         shuffle=True,
         seed=None,
         worker_count=0,
@@ -52,13 +48,8 @@ class LayerAxiomTask:
         initial_ant_max=3,
     ) -> None:
         self.mode = str(mode)
-        self.objective = str(objective)
         if self.mode not in {"offline", "online"}:
             raise ValueError(f"mode must be 'offline' or 'online', got {self.mode!r}")
-        if self.objective not in self.STATS_KEYS_BY_OBJECTIVE:
-            raise ValueError(
-                f"objective must be one of {tuple(self.STATS_KEYS_BY_OBJECTIVE)}, got {self.objective!r}"
-            )
         if rule_bank_path is None:
             if ds_path is not None:
                 rule_bank_path = Path(ds_path) / "rule_bank.json"
@@ -86,10 +77,9 @@ class LayerAxiomTask:
         self._iterator = None
 
         self.ds_path = Path(ds_path) if ds_path is not None else None
-        self._objective_ds_path: Path | None = None
 
         self._rule_bank: RuleBank | None = None
-        self._tokenizer: tokenize_layer_axiom.LayerAxiomTokenizer | None = None
+        self._tokenizer: tokenize_layer.LayerTokenizer | None = None
         if self.mode == "online" or rule_bank_path is not None:
             if rule_bank_path is not None:
                 self._rule_bank = load_rule_bank(Path(rule_bank_path))
@@ -102,19 +92,17 @@ class LayerAxiomTask:
                     k_out_max=int(k_out_max),
                     rng=self._rng,
                 )
-            self._tokenizer = tokenize_layer_axiom.build_tokenizer_from_rule_bank(self._rule_bank)
+            self._tokenizer = tokenize_layer.build_tokenizer_from_rule_bank(self._rule_bank)
 
         if self.mode == "offline":
             if self.ds_path is None:
                 raise ValueError("ds_path is required when mode='offline'.")
-            self._objective_ds_path = self._resolve_objective_path(self.ds_path, self.objective)
-            metadata_path = self._objective_ds_path / "metadata.json"
+            metadata_path = self.ds_path / "metadata.json"
             metadata = json.loads(metadata_path.read_text())
-            self._tokenizer = tokenize_layer_axiom.tokenizer_from_metadata(metadata)
+            self._tokenizer = tokenize_layer.tokenizer_from_metadata(metadata)
             self.stats = self._stats_from_metadata(
-                self._objective_ds_path,
+                self.ds_path,
                 self._distances,
-                self.objective,
             )
 
             self._data_source = self._build_data_source()
@@ -134,9 +122,7 @@ class LayerAxiomTask:
                 return next(self._iterator)
 
         records = [self._sample_online_record() for _ in range(self.batch_size)]
-        if self.objective == "autoreg":
-            return _batch_records_autoreg(records)
-        return _batch_records_first_step(records)
+        return _batch_records_autoreg(records)
 
     def __iter__(self):
         return self
@@ -152,25 +138,16 @@ class LayerAxiomTask:
             return list(range(int(start), int(end) + 1))
         return [int(distance) for distance in distance_range]
 
-    @staticmethod
-    def _resolve_objective_path(ds_path: Path, objective: str) -> Path:
-        objective_path = ds_path / objective
-        if (objective_path / "metadata.json").exists():
-            return objective_path
-        return ds_path
-
     @classmethod
-    def stats_from_metadata(cls, ds_path, distance_range, *, objective="autoreg") -> dict:
+    def stats_from_metadata(cls, ds_path, distance_range) -> dict:
         distances = cls._normalize_distances(distance_range)
-        root = cls._resolve_objective_path(Path(ds_path), objective)
-        return cls._stats_from_metadata(root, distances, objective)
+        return cls._stats_from_metadata(Path(ds_path), distances)
 
     @classmethod
     def _stats_from_metadata(
         cls,
         ds_path: Path,
         distances: Iterable[int],
-        objective: str,
     ) -> dict:
         metadata_path = ds_path / "metadata.json"
         if not metadata_path.exists():
@@ -193,19 +170,18 @@ class LayerAxiomTask:
         if missing:
             raise ValueError(f"Missing stats for distances {missing} in {metadata_path}.")
 
-        keys = cls.STATS_KEYS_BY_OBJECTIVE[objective]
         return {
             key: max(int(stats.get(key, 0)) for stats in stats_list)
-            for key in keys
+            for key in cls.STATS_KEYS
         }
 
     def _collect_shards(self, distances: Iterable[int]) -> list[str]:
-        if self._objective_ds_path is None:
-            raise RuntimeError("Offline shard collection requires objective dataset path.")
+        if self.ds_path is None:
+            raise RuntimeError("Offline shard collection requires dataset path.")
 
         shards: list[str] = []
         for distance in distances:
-            distance_dir = self._objective_ds_path / f"distance_{distance:03d}"
+            distance_dir = self.ds_path / f"distance_{distance:03d}"
             if not distance_dir.exists():
                 raise FileNotFoundError(f"Missing distance directory: {distance_dir}")
             distance_shards = sorted(distance_dir.glob("shard_*.array_record"))
@@ -231,17 +207,12 @@ class LayerAxiomTask:
             seed=self.seed + self._epoch if self.shuffle else None,
         )
 
-        if self.objective == "autoreg":
-            batch_fn = _batch_records_autoreg
-        else:
-            batch_fn = _batch_records_first_step
-
         operations = [
             _DecodeRecord(),
             transforms.Batch(
                 batch_size=self.batch_size,
                 drop_remainder=self.drop_remainder,
-                batch_fn=batch_fn,
+                batch_fn=_batch_records_autoreg,
             ),
         ]
 
@@ -267,30 +238,17 @@ class LayerAxiomTask:
             rng=self._rng,
         )
 
-        if self.objective == "autoreg":
-            step_idx = int(self._rng.integers(0, len(sampled.step_rules)))
-            src_layer = sampled.step_layers[step_idx]
-            ants = sampled.step_ants[step_idx]
-            rule = sampled.step_rules[step_idx]
-            sequent = Sequent([Atom(atom) for atom in ants], Atom(sampled.goal_atom))
-            prompt, completion = self._tokenizer.tokenize_example(sequent, rule.statement_text)
-            return {
-                "distance": distance,
-                "src_layer": int(src_layer),
-                "prompt": np.asarray(prompt, dtype=np.int32),
-                "completions": [np.asarray(completion, dtype=np.int32)],
-            }
-
-        src_layer = sampled.step_layers[0]
-        ants = sampled.step_ants[0]
-        rule = sampled.step_rules[0]
+        step_idx = int(self._rng.integers(0, len(sampled.step_rules)))
+        src_layer = sampled.step_layers[step_idx]
+        ants = sampled.step_ants[step_idx]
+        rule = sampled.step_rules[step_idx]
         sequent = Sequent([Atom(atom) for atom in ants], Atom(sampled.goal_atom))
-        prompt, target = self._tokenizer.tokenize_example(sequent, rule.statement_text)
+        prompt, completion = self._tokenizer.tokenize_example(sequent, rule.statement_text)
         return {
             "distance": distance,
             "src_layer": int(src_layer),
             "prompt": np.asarray(prompt, dtype=np.int32),
-            "target_first": np.asarray(target, dtype=np.int32),
+            "completions": [np.asarray(completion, dtype=np.int32)],
         }
 
     @property
@@ -298,7 +256,7 @@ class LayerAxiomTask:
         return self._rule_bank
 
     @property
-    def tokenizer(self) -> tokenize_layer_axiom.LayerAxiomTokenizer | None:
+    def tokenizer(self) -> tokenize_layer.LayerTokenizer | None:
         return self._tokenizer
 
 
@@ -369,42 +327,19 @@ def _batch_records_autoreg(records):
     return _pad_sequences(xs), _pad_sequences(ys)
 
 
-def _batch_records_first_step(records):
-    if not records:
-        return np.zeros((0, 0), dtype=np.int32), np.zeros((0, 0), dtype=np.int32)
-
-    prompts: list[np.ndarray] = []
-    targets: list[np.ndarray] = []
-
-    for rec in records:
-        prompt = np.asarray(rec["prompt"], dtype=np.int32)
-        if prompt.ndim != 1:
-            raise ValueError(f"Prompt must be 1D, got {prompt.shape}")
-
-        key = "target_first" if "target_first" in rec else "target"
-        target = np.asarray(rec[key], dtype=np.int32)
-        if target.ndim != 1:
-            raise ValueError(f"Target must be 1D, got {target.shape}")
-
-        prompts.append(prompt)
-        targets.append(target)
-
-    return _pad_sequences(prompts), _pad_sequences(targets)
-
-
 def completion_is_valid_for_layer(
     *,
     rule_bank: RuleBank,
     src_layer: int,
     completion_tokens: list[int] | np.ndarray,
-    tokenizer: tokenize_layer_axiom.LayerAxiomTokenizer | None = None,
+    tokenizer: tokenize_layer.LayerTokenizer | None = None,
 ) -> bool:
     try:
         completion = [int(tok) for tok in completion_tokens]
         tokenizer = (
             tokenizer
             if tokenizer is not None
-            else tokenize_layer_axiom.build_tokenizer_from_rule_bank(rule_bank)
+            else tokenize_layer.build_tokenizer_from_rule_bank(rule_bank)
         )
         statement = tokenizer.decode_completion_text(completion)
     except (ValueError, TypeError):

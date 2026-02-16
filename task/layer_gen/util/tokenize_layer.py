@@ -1,4 +1,4 @@
-"""Tokenization utilities for layered axiom-sequence tasks."""
+"""Tokenization utilities for layered tasks."""
 
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ if TYPE_CHECKING:
     from task.layer_gen.util.rule_bank import RuleBank
 
 pad_idx = 0
-TOKENIZER_VERSION = "layer_axiom_v2_compact"
+TOKENIZER_VERSION = "layer_v1_compact"
 
 _LOGIC_TOKENS = ("⊢", "∧", "→", "(", ")", ",")
 _atom_re = re.compile(r"p(\d+)_(\d+)$")
@@ -56,7 +56,7 @@ def _build_logic_maps() -> tuple[dict[str, int], dict[int, str]]:
 
 
 @dataclass(frozen=True)
-class LayerAxiomTokenizer:
+class LayerTokenizer:
     logic_char_to_id: dict[str, int]
     id_to_logic_char: dict[int, str]
     atom_to_token: dict[str, int]
@@ -66,7 +66,7 @@ class LayerAxiomTokenizer:
     version: str = TOKENIZER_VERSION
 
     @classmethod
-    def from_atoms(cls, atoms: Iterable[str]) -> "LayerAxiomTokenizer":
+    def from_atoms(cls, atoms: Iterable[str]) -> "LayerTokenizer":
         logic_to_id, id_to_logic = _build_logic_maps()
         sep = len(logic_to_id) + 1
         eot = sep + 1
@@ -90,7 +90,7 @@ class LayerAxiomTokenizer:
         )
 
     @classmethod
-    def from_rule_bank(cls, rule_bank: "RuleBank") -> "LayerAxiomTokenizer":
+    def from_rule_bank(cls, rule_bank: "RuleBank") -> "LayerTokenizer":
         atoms = [
             f"p{layer}_{idx}"
             for layer in range(int(rule_bank.n_layers))
@@ -99,7 +99,7 @@ class LayerAxiomTokenizer:
         return cls.from_atoms(atoms)
 
     @classmethod
-    def from_dict(cls, payload: dict) -> "LayerAxiomTokenizer":
+    def from_dict(cls, payload: dict) -> "LayerTokenizer":
         version = str(payload.get("version", ""))
         if version != TOKENIZER_VERSION:
             raise ValueError(
@@ -283,22 +283,22 @@ class LayerAxiomTokenizer:
         return decoded
 
 
-def build_tokenizer_from_atoms(atoms: Iterable[str]) -> LayerAxiomTokenizer:
-    return LayerAxiomTokenizer.from_atoms(atoms)
+def build_tokenizer_from_atoms(atoms: Iterable[str]) -> LayerTokenizer:
+    return LayerTokenizer.from_atoms(atoms)
 
 
-def build_tokenizer_from_rule_bank(rule_bank: "RuleBank") -> LayerAxiomTokenizer:
-    return LayerAxiomTokenizer.from_rule_bank(rule_bank)
+def build_tokenizer_from_rule_bank(rule_bank: "RuleBank") -> LayerTokenizer:
+    return LayerTokenizer.from_rule_bank(rule_bank)
 
 
-def tokenizer_from_metadata(metadata: dict) -> LayerAxiomTokenizer:
+def tokenizer_from_metadata(metadata: dict) -> LayerTokenizer:
     payload = metadata.get("tokenizer")
     if payload is None:
         raise ValueError("Missing tokenizer metadata. Regenerate the dataset.")
-    return LayerAxiomTokenizer.from_dict(payload)
+    return LayerTokenizer.from_dict(payload)
 
 
-_default_tokenizer = LayerAxiomTokenizer.from_atoms(())
+_default_tokenizer = LayerTokenizer.from_atoms(())
 
 logic_char_to_id = dict(_default_tokenizer.logic_char_to_id)
 id_to_logic_char = dict(_default_tokenizer.id_to_logic_char)
@@ -437,7 +437,7 @@ def decode_completion_text(completion_tokens: list[int]) -> str:
 
 
 def decode_batch_ids(
-    tokenizer: LayerAxiomTokenizer,
+    tokenizer: LayerTokenizer,
     batch_ids,
     *,
     skip_pad: bool = True,

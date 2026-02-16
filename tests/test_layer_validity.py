@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from task.layer_axiom import completion_is_valid_for_layer
-from task.layer_gen.util import tokenize_layer_axiom as tok
+from task.layer import completion_is_valid_for_layer
+from task.layer_gen.util import tokenize_layer as tok
 from task.layer_gen.util.rule_bank import build_random_rule_bank
 
 

@@ -8,12 +8,12 @@ from pathlib import Path
 
 from array_record.python import array_record_module
 
-from task.layer_gen.util import tokenize_layer_axiom as tok
+from task.layer_gen.util import tokenize_layer as tok
 
 
 def _run_generate(tmp_path: Path, *, examples: int = 4) -> Path:
-    script = Path(__file__).parents[1] / "task" / "layer_gen" / "generate_layer_axiom.py"
-    out_dir = tmp_path / "layer_axiom_out"
+    script = Path(__file__).parents[1] / "task" / "layer_gen" / "generate_layer.py"
+    out_dir = tmp_path / "layer_out"
 
     cmd = [
         sys.executable,
@@ -42,8 +42,6 @@ def _run_generate(tmp_path: Path, *, examples: int = 4) -> Path:
         "2",
         "--seed",
         "13",
-        "--objective",
-        "both",
         "--log-every",
         "0",
     ]
@@ -71,50 +69,33 @@ def _read_one(distance_dir: Path):
     return pickle.loads(records[0])
 
 
-def test_generate_layer_axiom_outputs_and_metadata(tmp_path: Path) -> None:
+def test_generate_layer_outputs_and_metadata(tmp_path: Path) -> None:
     examples = 5
     out_dir = _run_generate(tmp_path, examples=examples)
 
     assert (out_dir / "rule_bank.json").exists()
     assert (out_dir / "metadata.json").exists()
 
-    ar_root = out_dir / "autoreg"
-    fs_root = out_dir / "first_step"
     root_meta = json.loads((out_dir / "metadata.json").read_text())
-    ar_meta = json.loads((ar_root / "metadata.json").read_text())
-    fs_meta = json.loads((fs_root / "metadata.json").read_text())
-    ar_tokenizer = tok.LayerAxiomTokenizer.from_dict(ar_meta["tokenizer"])
-    fs_tokenizer = tok.LayerAxiomTokenizer.from_dict(fs_meta["tokenizer"])
+    tokenizer = tok.LayerTokenizer.from_dict(root_meta["tokenizer"])
 
     assert root_meta["tokenizer"]["version"] == tok.TOKENIZER_VERSION
-    assert ar_meta["stats"]["max_token"] + 1 <= ar_meta["tokenizer"]["vocab_size"]
-    assert fs_meta["stats"]["max_token"] + 1 <= fs_meta["tokenizer"]["vocab_size"]
-    assert ar_meta["tokenizer"]["vocab_size"] < 256
+    assert root_meta["stats"]["max_token"] + 1 <= root_meta["tokenizer"]["vocab_size"]
+    assert root_meta["tokenizer"]["vocab_size"] < 256
 
     for distance in (1, 2):
-        ar_count = _count_records(ar_root / f"distance_{distance:03d}")
-        fs_count = _count_records(fs_root / f"distance_{distance:03d}")
+        count = _count_records(out_dir / f"distance_{distance:03d}")
 
-        assert ar_count == examples * distance
-        assert fs_count == examples
+        assert count == examples * distance
 
-        assert ar_meta["distances"][str(distance)]["examples"] == examples
-        assert fs_meta["distances"][str(distance)]["examples"] == examples
+        assert root_meta["distances"][str(distance)]["examples"] == examples
 
-    ar_rec = _read_one(ar_root / "distance_001")
-    fs_rec = _read_one(fs_root / "distance_001")
+    rec = _read_one(out_dir / "distance_001")
 
     # Decode checks ensure tokenization is consistent and parseable.
-    sequent = ar_tokenizer.decode_prompt(ar_rec["prompt"].tolist())
-    statement = ar_tokenizer.decode_completion_text(ar_rec["completions"][0].tolist())
+    sequent = tokenizer.decode_prompt(rec["prompt"].tolist())
+    statement = tokenizer.decode_completion_text(rec["completions"][0].tolist())
     assert str(sequent.cons).startswith("p")
     assert "→" in statement
     assert "(" not in statement
     assert ")" not in statement
-
-    fs_seq = fs_tokenizer.decode_prompt(fs_rec["prompt"].tolist())
-    fs_stmt = fs_tokenizer.decode_completion_text(fs_rec["target_first"].tolist())
-    assert str(fs_seq.cons).startswith("p")
-    assert "→" in fs_stmt
-    assert "(" not in fs_stmt
-    assert ")" not in fs_stmt
