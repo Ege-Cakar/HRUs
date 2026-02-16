@@ -35,6 +35,12 @@ def _atoms_to_prop(atoms: tuple[str, ...]) -> Proposition:
     return out
 
 
+def _format_conjunction(atoms: tuple[str, ...]) -> str:
+    if not atoms:
+        raise ValueError("Conjunction must contain at least one atom.")
+    return " ∧ ".join(atoms)
+
+
 @dataclass(frozen=True)
 class LayerRule:
     src_layer: int
@@ -47,7 +53,7 @@ class LayerRule:
 
     @property
     def statement_text(self) -> str:
-        return str(self.statement_prop())
+        return f"{_format_conjunction(self.lhs)} → {_format_conjunction(self.rhs)}"
 
     def to_dict(self) -> dict:
         return {

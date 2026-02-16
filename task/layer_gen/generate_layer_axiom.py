@@ -22,7 +22,7 @@ if __package__ in (None, ""):
         sample_problem,
         save_rule_bank,
     )
-    from util.tokenize_layer_axiom import tokenize_example  # type: ignore
+    from util import tokenize_layer_axiom  # type: ignore
 else:
     from .util.rule_bank import (
         RuleBank,
@@ -31,7 +31,7 @@ else:
         sample_problem,
         save_rule_bank,
     )
-    from .util.tokenize_layer_axiom import tokenize_example
+    from .util import tokenize_layer_axiom
 
 from task.prop_gen.util.elem import Atom, Sequent
 
@@ -210,6 +210,7 @@ def _write_objective_metadata_autoreg(
     *,
     root: Path,
     states: dict[int, _DistanceStateAutoreg],
+    tokenizer: tokenize_layer_axiom.LayerAxiomTokenizer,
     created_at: str,
     seed: int,
     examples_per_distance: int,
@@ -251,6 +252,7 @@ def _write_objective_metadata_autoreg(
         "distance_range": [int(min_distance), int(max_distance)],
         "rule_bank": rule_bank_path,
         "config": config,
+        "tokenizer": tokenizer.to_dict(),
         "stats": overall,
         "distances": distances,
     }
@@ -261,6 +263,7 @@ def _write_objective_metadata_first_step(
     *,
     root: Path,
     states: dict[int, _DistanceStateFirstStep],
+    tokenizer: tokenize_layer_axiom.LayerAxiomTokenizer,
     created_at: str,
     seed: int,
     examples_per_distance: int,
@@ -302,6 +305,7 @@ def _write_objective_metadata_first_step(
         "distance_range": [int(min_distance), int(max_distance)],
         "rule_bank": rule_bank_path,
         "config": config,
+        "tokenizer": tokenizer.to_dict(),
         "stats": overall,
         "distances": distances,
     }
@@ -324,6 +328,7 @@ def main() -> None:
     rng = np.random.default_rng(args.seed)
 
     bank = _build_or_load_rule_bank(args, rng)
+    tokenizer = tokenize_layer_axiom.build_tokenizer_from_rule_bank(bank)
     rule_bank_out = args.out_dir / "rule_bank.json"
     save_rule_bank(rule_bank_out, bank)
 
@@ -382,7 +387,7 @@ def main() -> None:
                         zip(sampled.step_layers, sampled.step_ants, sampled.step_rules)
                     ):
                         sequent = Sequent([Atom(atom) for atom in ants], Atom(sampled.goal_atom))
-                        prompt, completion = tokenize_example(sequent, rule.statement_text)
+                        prompt, completion = tokenizer.tokenize_example(sequent, rule.statement_text)
                         payload = pickle.dumps(
                             {
                                 "distance": int(sampled.distance),
@@ -406,7 +411,7 @@ def main() -> None:
                     ants0 = sampled.step_ants[0]
                     src_layer0 = sampled.step_layers[0]
                     sequent0 = Sequent([Atom(atom) for atom in ants0], Atom(sampled.goal_atom))
-                    prompt0, target0 = tokenize_example(sequent0, rule0.statement_text)
+                    prompt0, target0 = tokenizer.tokenize_example(sequent0, rule0.statement_text)
                     payload = pickle.dumps(
                         {
                             "distance": int(sampled.distance),
@@ -442,6 +447,7 @@ def main() -> None:
         _write_objective_metadata_autoreg(
             root=roots["autoreg"],
             states=autoreg_states,
+            tokenizer=tokenizer,
             created_at=created_at,
             seed=args.seed,
             examples_per_distance=args.examples_per_distance,
@@ -455,6 +461,7 @@ def main() -> None:
         _write_objective_metadata_first_step(
             root=roots["first_step"],
             states=first_step_states,
+            tokenizer=tokenizer,
             created_at=created_at,
             seed=args.seed,
             examples_per_distance=args.examples_per_distance,
@@ -474,6 +481,7 @@ def main() -> None:
         "examples_per_distance": int(args.examples_per_distance),
         "rule_bank": str(rule_bank_out.resolve()),
         "config": config,
+        "tokenizer": tokenizer.to_dict(),
     }
     (args.out_dir / "metadata.json").write_text(json.dumps(root_meta, indent=2))
 

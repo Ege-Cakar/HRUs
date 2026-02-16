@@ -83,6 +83,7 @@ class LayerAxiomTask:
         self._objective_ds_path: Path | None = None
 
         self._rule_bank: RuleBank | None = None
+        self._tokenizer: tokenize_layer_axiom.LayerAxiomTokenizer | None = None
         if self.mode == "online" or rule_bank_path is not None:
             if rule_bank_path is not None:
                 self._rule_bank = load_rule_bank(Path(rule_bank_path))
@@ -95,11 +96,15 @@ class LayerAxiomTask:
                     k_out_max=int(k_out_max),
                     rng=self._rng,
                 )
+            self._tokenizer = tokenize_layer_axiom.build_tokenizer_from_rule_bank(self._rule_bank)
 
         if self.mode == "offline":
             if self.ds_path is None:
                 raise ValueError("ds_path is required when mode='offline'.")
             self._objective_ds_path = self._resolve_objective_path(self.ds_path, self.objective)
+            metadata_path = self._objective_ds_path / "metadata.json"
+            metadata = json.loads(metadata_path.read_text())
+            self._tokenizer = tokenize_layer_axiom.tokenizer_from_metadata(metadata)
             self.stats = self._stats_from_metadata(
                 self._objective_ds_path,
                 self._distances,
@@ -245,6 +250,8 @@ class LayerAxiomTask:
     def _sample_online_record(self) -> dict:
         if self._rule_bank is None:
             raise RuntimeError("Online mode requires a rule bank.")
+        if self._tokenizer is None:
+            raise RuntimeError("Online mode requires a tokenizer.")
 
         distance = int(self._rng.choice(self._distances))
         sampled = sample_problem(
@@ -260,7 +267,7 @@ class LayerAxiomTask:
             ants = sampled.step_ants[step_idx]
             rule = sampled.step_rules[step_idx]
             sequent = Sequent([Atom(atom) for atom in ants], Atom(sampled.goal_atom))
-            prompt, completion = tokenize_layer_axiom.tokenize_example(sequent, rule.statement_text)
+            prompt, completion = self._tokenizer.tokenize_example(sequent, rule.statement_text)
             return {
                 "distance": distance,
                 "src_layer": int(src_layer),
@@ -272,7 +279,7 @@ class LayerAxiomTask:
         ants = sampled.step_ants[0]
         rule = sampled.step_rules[0]
         sequent = Sequent([Atom(atom) for atom in ants], Atom(sampled.goal_atom))
-        prompt, target = tokenize_layer_axiom.tokenize_example(sequent, rule.statement_text)
+        prompt, target = self._tokenizer.tokenize_example(sequent, rule.statement_text)
         return {
             "distance": distance,
             "src_layer": int(src_layer),
@@ -283,6 +290,10 @@ class LayerAxiomTask:
     @property
     def rule_bank(self) -> RuleBank | None:
         return self._rule_bank
+
+    @property
+    def tokenizer(self) -> tokenize_layer_axiom.LayerAxiomTokenizer | None:
+        return self._tokenizer
 
 
 @dataclass(frozen=True)
@@ -380,10 +391,16 @@ def completion_is_valid_for_layer(
     rule_bank: RuleBank,
     src_layer: int,
     completion_tokens: list[int] | np.ndarray,
+    tokenizer: tokenize_layer_axiom.LayerAxiomTokenizer | None = None,
 ) -> bool:
     try:
         completion = [int(tok) for tok in completion_tokens]
-        statement = tokenize_layer_axiom.decode_completion_text(completion)
+        tokenizer = (
+            tokenizer
+            if tokenizer is not None
+            else tokenize_layer_axiom.build_tokenizer_from_rule_bank(rule_bank)
+        )
+        statement = tokenizer.decode_completion_text(completion)
     except (ValueError, TypeError):
         return False
 

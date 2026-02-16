@@ -9,6 +9,7 @@ from array_record.python import array_record_module
 
 from task.layer_axiom import LayerAxiomTask
 from task.layer_gen.util import tokenize_layer_axiom as tok
+from task.prop_gen.util.elem import Atom, Sequent
 
 
 def _write_array_record(path: Path, records) -> None:
@@ -23,23 +24,28 @@ def test_layer_axiom_task_offline_autoreg(tmp_path: Path) -> None:
     distance_dir.mkdir(parents=True)
     shard_path = distance_dir / "shard_00000.array_record"
 
+    tokenizer = tok.build_tokenizer_from_atoms(["p0_1", "p1_1"])
+    prompt = tokenizer.tokenize_prompt(Sequent([Atom("p0_1")], Atom("p1_1")))
+    completion = tokenizer.encode_completion("(p0_1→p1_1)")
     rec = {
-        "prompt": np.array([1, 2, tok.sep_token_id], dtype=np.int32),
-        "completions": [np.array([11, tok.eot_token_id], dtype=np.int32)],
+        "prompt": np.array(prompt, dtype=np.int32),
+        "completions": [np.array(completion, dtype=np.int32)],
     }
     _write_array_record(shard_path, [rec])
 
+    max_token = int(max(max(prompt), max(completion)))
     metadata = {
+        "tokenizer": tokenizer.to_dict(),
         "distances": {
             "1": {
                 "examples": 1,
                 "records": 1,
                 "shards": 1,
                 "stats": {
-                    "max_token": int(tok.eot_token_id),
-                    "max_seq": 4,
-                    "max_prompt_seq": 3,
-                    "max_completion_seq": 2,
+                    "max_token": max_token,
+                    "max_seq": len(prompt) + len(completion) - 1,
+                    "max_prompt_seq": len(prompt),
+                    "max_completion_seq": len(completion),
                 },
             }
         }
@@ -57,8 +63,9 @@ def test_layer_axiom_task_offline_autoreg(tmp_path: Path) -> None:
     )
 
     xs, ys = next(task)
-    assert xs.shape == (1, 4)
-    assert ys.shape == (1, 4)
+    expected_len = len(prompt) + len(completion) - 1
+    assert xs.shape == (1, expected_len)
+    assert ys.shape == (1, expected_len)
     assert ys[0, 0] == 0
 
 
@@ -68,23 +75,28 @@ def test_layer_axiom_task_offline_first_step(tmp_path: Path) -> None:
     distance_dir.mkdir(parents=True)
     shard_path = distance_dir / "shard_00000.array_record"
 
+    tokenizer = tok.build_tokenizer_from_atoms(["p1_1", "p2_1"])
+    prompt = tokenizer.tokenize_prompt(Sequent([Atom("p1_1")], Atom("p2_1")))
+    target = tokenizer.encode_completion("(p1_1→p2_1)")
     rec = {
-        "prompt": np.array([5, 6, tok.sep_token_id], dtype=np.int32),
-        "target_first": np.array([21, 22, tok.eot_token_id], dtype=np.int32),
+        "prompt": np.array(prompt, dtype=np.int32),
+        "target_first": np.array(target, dtype=np.int32),
     }
     _write_array_record(shard_path, [rec])
 
+    max_token = int(max(max(prompt), max(target)))
     metadata = {
+        "tokenizer": tokenizer.to_dict(),
         "distances": {
             "2": {
                 "examples": 1,
                 "records": 1,
                 "shards": 1,
                 "stats": {
-                    "max_token": int(tok.eot_token_id),
-                    "max_seq": 3,
-                    "max_prompt_seq": 3,
-                    "max_target_seq": 3,
+                    "max_token": max_token,
+                    "max_seq": max(len(prompt), len(target)),
+                    "max_prompt_seq": len(prompt),
+                    "max_target_seq": len(target),
                 },
             }
         }
@@ -102,8 +114,8 @@ def test_layer_axiom_task_offline_first_step(tmp_path: Path) -> None:
     )
 
     prompts, targets = next(task)
-    assert prompts.shape == (1, 3)
-    assert targets.shape == (1, 3)
+    assert prompts.shape == (1, len(prompt))
+    assert targets.shape == (1, len(target))
     assert np.array_equal(targets[0], rec["target_first"])
 
 

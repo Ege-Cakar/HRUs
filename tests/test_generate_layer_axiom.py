@@ -80,8 +80,16 @@ def test_generate_layer_axiom_outputs_and_metadata(tmp_path: Path) -> None:
 
     ar_root = out_dir / "autoreg"
     fs_root = out_dir / "first_step"
+    root_meta = json.loads((out_dir / "metadata.json").read_text())
     ar_meta = json.loads((ar_root / "metadata.json").read_text())
     fs_meta = json.loads((fs_root / "metadata.json").read_text())
+    ar_tokenizer = tok.LayerAxiomTokenizer.from_dict(ar_meta["tokenizer"])
+    fs_tokenizer = tok.LayerAxiomTokenizer.from_dict(fs_meta["tokenizer"])
+
+    assert root_meta["tokenizer"]["version"] == tok.TOKENIZER_VERSION
+    assert ar_meta["stats"]["max_token"] + 1 <= ar_meta["tokenizer"]["vocab_size"]
+    assert fs_meta["stats"]["max_token"] + 1 <= fs_meta["tokenizer"]["vocab_size"]
+    assert ar_meta["tokenizer"]["vocab_size"] < 256
 
     for distance in (1, 2):
         ar_count = _count_records(ar_root / f"distance_{distance:03d}")
@@ -97,12 +105,16 @@ def test_generate_layer_axiom_outputs_and_metadata(tmp_path: Path) -> None:
     fs_rec = _read_one(fs_root / "distance_001")
 
     # Decode checks ensure tokenization is consistent and parseable.
-    sequent = tok.decode_prompt(ar_rec["prompt"].tolist())
-    statement = tok.decode_completion_text(ar_rec["completions"][0].tolist())
+    sequent = ar_tokenizer.decode_prompt(ar_rec["prompt"].tolist())
+    statement = ar_tokenizer.decode_completion_text(ar_rec["completions"][0].tolist())
     assert str(sequent.cons).startswith("p")
-    assert statement.startswith("(")
+    assert "→" in statement
+    assert "(" not in statement
+    assert ")" not in statement
 
-    fs_seq = tok.decode_prompt(fs_rec["prompt"].tolist())
-    fs_stmt = tok.decode_completion_text(fs_rec["target_first"].tolist())
+    fs_seq = fs_tokenizer.decode_prompt(fs_rec["prompt"].tolist())
+    fs_stmt = fs_tokenizer.decode_completion_text(fs_rec["target_first"].tolist())
     assert str(fs_seq.cons).startswith("p")
-    assert fs_stmt.startswith("(")
+    assert "→" in fs_stmt
+    assert "(" not in fs_stmt
+    assert ")" not in fs_stmt
