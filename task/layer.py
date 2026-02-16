@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import partial
 import json
 from pathlib import Path
 import pickle
@@ -38,6 +39,7 @@ class LayerTask:
         worker_count=0,
         reader_options=None,
         drop_remainder=False,
+        prediction_objective="autoregressive",
         # online mode / rule bank config
         rule_bank_path=None,
         n_layers=16,
@@ -50,6 +52,12 @@ class LayerTask:
         self.mode = str(mode)
         if self.mode not in {"offline", "online"}:
             raise ValueError(f"mode must be 'offline' or 'online', got {self.mode!r}")
+        self.prediction_objective = str(prediction_objective)
+        if self.prediction_objective not in {"autoregressive", "all_at_once"}:
+            raise ValueError(
+                "prediction_objective must be 'autoregressive' or 'all_at_once', "
+                f"got {self.prediction_objective!r}"
+            )
         if rule_bank_path is None:
             if ds_path is not None:
                 rule_bank_path = Path(ds_path) / "rule_bank.json"
@@ -75,6 +83,7 @@ class LayerTask:
         self._data_source = None
         self._dataloader = None
         self._iterator = None
+        self._batch_fn = None
 
         self.ds_path = Path(ds_path) if ds_path is not None else None
 
@@ -104,12 +113,14 @@ class LayerTask:
                 self.ds_path,
                 self._distances,
             )
+            self._batch_fn = self._make_batch_fn()
 
             self._data_source = self._build_data_source()
             self._dataloader = self._build_dataloader()
             self._iterator = iter(self._dataloader)
         else:
             self.stats = {}
+            self._batch_fn = self._make_batch_fn()
 
     def __next__(self):
         if self.mode == "offline":
@@ -122,7 +133,7 @@ class LayerTask:
                 return next(self._iterator)
 
         records = [self._sample_online_record() for _ in range(self.batch_size)]
-        return _batch_records_autoreg(records)
+        return self._batch_fn(records)
 
     def __iter__(self):
         return self
@@ -212,7 +223,7 @@ class LayerTask:
             transforms.Batch(
                 batch_size=self.batch_size,
                 drop_remainder=self.drop_remainder,
-                batch_fn=_batch_records_autoreg,
+                batch_fn=self._batch_fn,
             ),
         ]
 
@@ -259,6 +270,17 @@ class LayerTask:
     def tokenizer(self) -> tokenize_layer.LayerTokenizer | None:
         return self._tokenizer
 
+    def _make_batch_fn(self):
+        if self.prediction_objective == "autoregressive":
+            return _batch_records_autoreg
+
+        if self._tokenizer is None:
+            raise RuntimeError("All-at-once objective requires tokenizer.")
+        return partial(
+            _batch_records_all_at_once,
+            eot_token_id=int(self._tokenizer.eot_token_id),
+        )
+
 
 @dataclass(frozen=True)
 class _DecodeRecord(transforms.MapTransform):
@@ -284,9 +306,9 @@ def _normalize_completions(completions) -> list[np.ndarray]:
     return out
 
 
-def _pad_sequences(arrays: list[np.ndarray]) -> np.ndarray:
+def _pad_sequences(arrays: list[np.ndarray], *, pad_value: int = 0) -> np.ndarray:
     max_len = max(arr.shape[0] for arr in arrays)
-    out = np.zeros((len(arrays), max_len), dtype=np.int32)
+    out = np.full((len(arrays), max_len), int(pad_value), dtype=np.int32)
     for idx, arr in enumerate(arrays):
         out[idx, : arr.shape[0]] = arr
     return out
@@ -325,6 +347,37 @@ def _batch_records_autoreg(records):
         ys.append(y)
 
     return _pad_sequences(xs), _pad_sequences(ys)
+
+
+def _batch_records_all_at_once(records, *, eot_token_id: int):
+    if not records:
+        return np.zeros((0, 0), dtype=np.int32), np.zeros((0, 0), dtype=np.int32)
+
+    xs: list[np.ndarray] = []
+    ys: list[np.ndarray] = []
+
+    for rec in records:
+        prompt = np.asarray(rec["prompt"], dtype=np.int32)
+        if prompt.ndim != 1:
+            raise ValueError(f"Prompt must be 1D, got {prompt.shape}")
+
+        completions = _normalize_completions(rec["completions"])
+        if not completions:
+            raise ValueError("Cannot sample from empty completion list.")
+
+        pick = np.random.randint(len(completions))
+        completion = completions[pick]
+        if completion.shape[0] < 1:
+            raise ValueError("Completion must contain at least one token.")
+        if int(completion[-1]) != int(eot_token_id):
+            raise ValueError(
+                "Completion must terminate with EOT token for all-at-once objective."
+            )
+
+        xs.append(prompt.copy())
+        ys.append(completion.copy())
+
+    return _pad_sequences(xs), _pad_sequences(ys, pad_value=eot_token_id)
 
 
 def completion_is_valid_for_layer(
