@@ -59,6 +59,12 @@ class LayerAxiomTask:
             raise ValueError(
                 f"objective must be one of {tuple(self.STATS_KEYS_BY_OBJECTIVE)}, got {self.objective!r}"
             )
+        if rule_bank_path is None:
+            if ds_path is not None:
+                rule_bank_path = Path(ds_path) / "rule_bank.json"
+                if not rule_bank_path.exists():
+                    print(f'warn: rule_bank.json not found in ds_path={ds_path}')
+                    rule_bank_path = None
 
         self.distance_range = distance_range
         self._distances = self._normalize_distances(distance_range)

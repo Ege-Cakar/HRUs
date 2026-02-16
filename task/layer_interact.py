@@ -19,3 +19,6 @@ print(ys[0])
 
 # ''.join([tokenizer.id_to_char(int(x)) for x in xs[3] if int(x) != tokenizer.sep_token_id and int(x) != 0])
 task.tokenizer.decode_batch_ids(xs)
+
+# <codecell>
+task.rule_bank.transitions[1]
