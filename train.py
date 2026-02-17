@@ -58,7 +58,6 @@ def parse_loss_name(loss):
     return _LOSS_MAP[loss]
 
 
-# TODO: simplify with static arg nums to cache loss_func (fix agent issue)
 def _make_train_step_fn(loss_func):
     """Create a JIT-compiled train step function for a specific loss function."""
     @nnx.jit
