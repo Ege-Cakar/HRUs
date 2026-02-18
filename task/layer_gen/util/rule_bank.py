@@ -216,7 +216,7 @@ def sample_problem(
     distance: int,
     initial_ant_max: int,
     rng: np.random.Generator,
-    max_attempts: int = 256,
+    max_attempts: int = 1024,
 ) -> SampledProblem:
     if distance < 1:
         raise ValueError(f"distance must be >= 1, got {distance}")
