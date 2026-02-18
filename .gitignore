@@ -2,6 +2,7 @@ __pycache__/
 *.png
 *.svg
 *.pkl
+*.json
 fig/
 wandb/
 *.ipynb_checkpoints/
@@ -20,4 +21,3 @@ data/
 AGENTS.md
 journal/
 *.github
-
