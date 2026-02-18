@@ -1,10 +1,9 @@
-"""Metric helpers for 6_layer_sweep."""
+"""Layer-sweep-specific utility helpers."""
 
 from __future__ import annotations
 
 import re
 
-import jax.numpy as jnp
 import numpy as np
 
 from task.layer import RuleMatchMetrics
@@ -13,26 +12,6 @@ from task.prop_gen.util.elem import Atom
 
 
 _ATOM_RE = re.compile(r"p(\d+)_(\d+)$")
-
-
-def last_nonzero_indices(labels: jnp.ndarray) -> jnp.ndarray:
-    if labels.ndim != 2:
-        raise ValueError(f"Expected labels with shape (batch, seq), got {labels.shape}")
-
-    mask = labels != 0
-    pos_idx = jnp.arange(labels.shape[1])[None, :]
-    last_idx = jnp.max(jnp.where(mask, pos_idx, -1), axis=1)
-    return jnp.maximum(last_idx, 0)
-
-
-def final_token_accuracy(preds: jnp.ndarray, labels: jnp.ndarray) -> jnp.ndarray:
-    if preds.shape != labels.shape:
-        raise ValueError(
-            f"Predictions and labels must have the same shape, got {preds.shape} and {labels.shape}"
-        )
-    last_idx = last_nonzero_indices(labels)
-    batch_idx = jnp.arange(labels.shape[0])
-    return jnp.mean(preds[batch_idx, last_idx] == labels[batch_idx, last_idx])
 
 
 def infer_src_layer_from_prompt_tokens(
@@ -149,9 +128,7 @@ def extract_completion_rule_match_inputs(
 
 def summarize_rule_match_metrics(metrics: RuleMatchMetrics) -> dict[str, float | int]:
     n_valid = int(sum(int(result.is_valid_rule) for result in metrics.results))
-    correct_given_valid_rate = (
-        float(metrics.n_correct) / float(n_valid) if n_valid > 0 else 0.0
-    )
+    correct_given_valid_rate = float(metrics.n_correct) / float(n_valid) if n_valid > 0 else 0.0
     valid_rule_rate = float(n_valid) / float(metrics.n_examples) if metrics.n_examples > 0 else 0.0
 
     return {
@@ -178,3 +155,4 @@ def _truncate_at_first_eot(tokens, *, eot_token_id: int) -> np.ndarray:
     if eot_pos.size == 0:
         return row.astype(np.int32)
     return row[: int(eot_pos[0]) + 1].astype(np.int32)
+
