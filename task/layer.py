@@ -7,7 +7,7 @@ from functools import partial
 import json
 from pathlib import Path
 import pickle
-from typing import Iterable
+from typing import Any, Callable, Iterable, Protocol
 
 import grain
 from grain._src.core import sharding, transforms
@@ -16,6 +16,7 @@ import numpy as np
 
 from task.layer_gen.util import tokenize_layer
 from task.layer_gen.util.rule_bank import (
+    LayerRule,
     RuleBank,
     build_random_rule_bank,
     load_rule_bank,
@@ -387,15 +388,715 @@ def completion_is_valid_for_layer(
     completion_tokens: list[int] | np.ndarray,
     tokenizer: tokenize_layer.LayerTokenizer | None = None,
 ) -> bool:
-    try:
-        completion = [int(tok) for tok in completion_tokens]
-        tokenizer = (
-            tokenizer
-            if tokenizer is not None
-            else tokenize_layer.build_tokenizer_from_rule_bank(rule_bank)
+    result = match_rule_completion(
+        rule_bank=rule_bank,
+        src_layer=src_layer,
+        completion_tokens=completion_tokens,
+        tokenizer=tokenizer,
+    )
+    return result.is_valid_rule
+
+
+class LayerPredictionAdapter(Protocol):
+    def predict_completion(
+        self,
+        *,
+        model: Callable[[np.ndarray], Any],
+        prompt_tokens: list[int] | np.ndarray,
+        tokenizer: tokenize_layer.LayerTokenizer,
+        temperature: float = 0.0,
+        rng: np.random.Generator | None = None,
+    ) -> np.ndarray: ...
+
+
+@dataclass(frozen=True)
+class RuleMatchResult:
+    src_layer: int
+    decoded_statement: str | None
+    expected_statement_text: str | None
+    matched_rule: LayerRule | None
+    decode_error: bool
+    unknown_rule_error: bool
+    wrong_rule_error: bool
+    is_valid_rule: bool
+    is_correct: bool
+
+
+@dataclass(frozen=True)
+class RuleMatchMetrics:
+    n_examples: int
+    n_correct: int
+    n_decode_error: int
+    n_unknown_rule_error: int
+    n_wrong_rule_error: int
+    accuracy: float
+    decode_error_rate: float
+    unknown_rule_error_rate: float
+    wrong_rule_error_rate: float
+    results: tuple[RuleMatchResult, ...]
+
+
+@dataclass(frozen=True)
+class LayerRolloutExample:
+    distance: int
+    start_layer: int
+    goal_atom: str
+    initial_ants: tuple[str, ...]
+    max_steps: int
+    oracle_rule_statements: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class LayerRolloutTraceStep:
+    step_idx: int
+    src_layer: int
+    prompt_tokens: tuple[int, ...]
+    completion_tokens: tuple[int, ...]
+    decoded_statement: str | None
+    matched_rule_statement: str | None
+    decode_error: bool
+    unknown_rule_error: bool
+    inapplicable_rule_error: bool
+    goal_reached: bool
+
+
+@dataclass(frozen=True)
+class LayerRolloutResult:
+    success: bool
+    failure_reason: str | None
+    n_steps: int
+    goal_reached: bool
+    final_layer: int
+    final_facts: tuple[str, ...]
+    steps: tuple[LayerRolloutTraceStep, ...]
+    example: LayerRolloutExample
+
+
+@dataclass(frozen=True)
+class LayerRolloutMetrics:
+    n_examples: int
+    n_success: int
+    n_failure_decode_error: int
+    n_failure_unknown_rule_error: int
+    n_failure_inapplicable_rule_error: int
+    n_failure_goal_not_reached: int
+    success_rate: float
+    decode_error_rate: float
+    unknown_rule_error_rate: float
+    inapplicable_rule_error_rate: float
+    goal_not_reached_rate: float
+    avg_steps: float
+    results: tuple[LayerRolloutResult, ...]
+
+
+FAILURE_DECODE_ERROR = "decode_error"
+FAILURE_UNKNOWN_RULE_ERROR = "unknown_rule_error"
+FAILURE_INAPPLICABLE_RULE_ERROR = "inapplicable_rule_error"
+FAILURE_GOAL_NOT_REACHED = "goal_not_reached"
+
+
+class CompletionLogitsAdapter:
+    """Decode fixed-length completion logits into completion tokens."""
+
+    def __init__(self, *, n_seq: int, pad_token_id: int = 0) -> None:
+        self.n_seq = int(n_seq)
+        self.pad_token_id = int(pad_token_id)
+
+    def predict_completion(
+        self,
+        *,
+        model: Callable[[np.ndarray], Any],
+        prompt_tokens: list[int] | np.ndarray,
+        tokenizer: tokenize_layer.LayerTokenizer,
+        temperature: float = 0.0,
+        rng: np.random.Generator | None = None,
+    ) -> np.ndarray:
+        prompt_only = _build_prompt_only_inputs_single(
+            prompt_tokens=prompt_tokens,
+            n_seq=self.n_seq,
+            sep_token_id=int(tokenizer.sep_token_id),
+            pad_token_id=self.pad_token_id,
         )
+
+        logits = np.asarray(model(prompt_only[None, :]))
+        logits = _normalize_completion_logits(logits)
+
+        out: list[int] = []
+        for idx in range(logits.shape[0]):
+            tok = _sample_token_from_logits(
+                logits[idx],
+                temperature=temperature,
+                rng=rng,
+            )
+            out.append(tok)
+            if tok == int(tokenizer.eot_token_id):
+                break
+        return np.asarray(out, dtype=np.int32)
+
+
+class AutoregressiveLogitsAdapter:
+    """Decode next-token logits autoregressively until EOT or length cap."""
+
+    def __init__(
+        self,
+        *,
+        n_seq: int,
+        max_completion_len: int,
+        pad_token_id: int = 0,
+    ) -> None:
+        self.n_seq = int(n_seq)
+        self.max_completion_len = int(max_completion_len)
+        self.pad_token_id = int(pad_token_id)
+
+    def predict_completion(
+        self,
+        *,
+        model: Callable[[np.ndarray], Any],
+        prompt_tokens: list[int] | np.ndarray,
+        tokenizer: tokenize_layer.LayerTokenizer,
+        temperature: float = 0.0,
+        rng: np.random.Generator | None = None,
+    ) -> np.ndarray:
+        prompt = np.asarray(prompt_tokens, dtype=np.int32)
+        if prompt.ndim != 1:
+            raise ValueError(f"Prompt must be 1D, got {prompt.shape}")
+        if prompt.shape[0] < 1:
+            raise ValueError("Prompt cannot be empty.")
+        if prompt.shape[0] >= self.n_seq:
+            raise ValueError(
+                f"Prompt length {prompt.shape[0]} must be < n_seq={self.n_seq}."
+            )
+
+        xs = np.full((1, self.n_seq), self.pad_token_id, dtype=np.int32)
+        xs[0, : prompt.shape[0]] = prompt
+
+        cursor = prompt.shape[0] - 1
+        out: list[int] = []
+        for _ in range(self.max_completion_len):
+            logits = np.asarray(model(xs))
+            tok_logits = _select_ar_token_logits(logits, cursor)
+            next_tok = _sample_token_from_logits(
+                tok_logits,
+                temperature=temperature,
+                rng=rng,
+            )
+
+            next_idx = cursor + 1
+            if next_idx >= self.n_seq:
+                break
+
+            xs[0, next_idx] = int(next_tok)
+            out.append(int(next_tok))
+            cursor = next_idx
+
+            if next_tok == int(tokenizer.eot_token_id):
+                break
+        return np.asarray(out, dtype=np.int32)
+
+
+def match_rule_completion(
+    *,
+    rule_bank: RuleBank,
+    src_layer: int,
+    completion_tokens: list[int] | np.ndarray,
+    expected_statement_text: str | None = None,
+    tokenizer: tokenize_layer.LayerTokenizer | None = None,
+) -> RuleMatchResult:
+    tokenizer = _resolve_layer_tokenizer(rule_bank=rule_bank, tokenizer=tokenizer)
+    src_layer = int(src_layer)
+
+    try:
+        completion = [int(tok) for tok in np.asarray(completion_tokens, dtype=np.int32).tolist()]
+    except (TypeError, ValueError):
+        completion = []
+
+    try:
         statement = tokenizer.decode_completion_text(completion)
     except (ValueError, TypeError):
-        return False
+        return RuleMatchResult(
+            src_layer=src_layer,
+            decoded_statement=None,
+            expected_statement_text=expected_statement_text,
+            matched_rule=None,
+            decode_error=True,
+            unknown_rule_error=False,
+            wrong_rule_error=False,
+            is_valid_rule=False,
+            is_correct=False,
+        )
 
-    return statement in rule_bank.statement_set(int(src_layer))
+    matched_rule = _match_rule_statement(rule_bank=rule_bank, src_layer=src_layer, statement=statement)
+    if matched_rule is None:
+        return RuleMatchResult(
+            src_layer=src_layer,
+            decoded_statement=statement,
+            expected_statement_text=expected_statement_text,
+            matched_rule=None,
+            decode_error=False,
+            unknown_rule_error=True,
+            wrong_rule_error=False,
+            is_valid_rule=False,
+            is_correct=False,
+        )
+
+    wrong_rule_error = (
+        expected_statement_text is not None
+        and statement != str(expected_statement_text)
+    )
+    is_correct = not wrong_rule_error
+    return RuleMatchResult(
+        src_layer=src_layer,
+        decoded_statement=statement,
+        expected_statement_text=expected_statement_text,
+        matched_rule=matched_rule,
+        decode_error=False,
+        unknown_rule_error=False,
+        wrong_rule_error=bool(wrong_rule_error),
+        is_valid_rule=True,
+        is_correct=is_correct,
+    )
+
+
+def evaluate_rule_matches(
+    *,
+    rule_bank: RuleBank,
+    src_layers: Iterable[int],
+    completion_tokens: Iterable[list[int] | np.ndarray],
+    expected_statement_texts: Iterable[str | None] | None = None,
+    tokenizer: tokenize_layer.LayerTokenizer | None = None,
+) -> RuleMatchMetrics:
+    src_layers = [int(layer) for layer in src_layers]
+    completion_tokens = list(completion_tokens)
+    if len(src_layers) != len(completion_tokens):
+        raise ValueError(
+            f"src_layers and completion_tokens must have same length, got "
+            f"{len(src_layers)} and {len(completion_tokens)}"
+        )
+
+    if expected_statement_texts is None:
+        expected_statement_texts = [None] * len(src_layers)
+    else:
+        expected_statement_texts = list(expected_statement_texts)
+        if len(expected_statement_texts) != len(src_layers):
+            raise ValueError(
+                "expected_statement_texts must match src_layers length, got "
+                f"{len(expected_statement_texts)} and {len(src_layers)}"
+            )
+
+    results = tuple(
+        match_rule_completion(
+            rule_bank=rule_bank,
+            src_layer=src_layer,
+            completion_tokens=completion,
+            expected_statement_text=expected_statement,
+            tokenizer=tokenizer,
+        )
+        for src_layer, completion, expected_statement in zip(
+            src_layers, completion_tokens, expected_statement_texts
+        )
+    )
+
+    n_examples = len(results)
+    n_correct = sum(int(result.is_correct) for result in results)
+    n_decode_error = sum(int(result.decode_error) for result in results)
+    n_unknown_rule_error = sum(int(result.unknown_rule_error) for result in results)
+    n_wrong_rule_error = sum(int(result.wrong_rule_error) for result in results)
+
+    return RuleMatchMetrics(
+        n_examples=n_examples,
+        n_correct=n_correct,
+        n_decode_error=n_decode_error,
+        n_unknown_rule_error=n_unknown_rule_error,
+        n_wrong_rule_error=n_wrong_rule_error,
+        accuracy=_safe_rate(n_correct, n_examples),
+        decode_error_rate=_safe_rate(n_decode_error, n_examples),
+        unknown_rule_error_rate=_safe_rate(n_unknown_rule_error, n_examples),
+        wrong_rule_error_rate=_safe_rate(n_wrong_rule_error, n_examples),
+        results=results,
+    )
+
+
+def sample_rollout_examples(
+    *,
+    rule_bank: RuleBank,
+    distance: int,
+    n_examples: int,
+    initial_ant_max: int,
+    max_steps: int | None = None,
+    rng: np.random.Generator | None = None,
+) -> list[LayerRolloutExample]:
+    if n_examples < 1:
+        raise ValueError(f"n_examples must be >= 1, got {n_examples}")
+    if rng is None:
+        rng = np.random.default_rng()
+
+    out: list[LayerRolloutExample] = []
+    for _ in range(int(n_examples)):
+        sampled = sample_problem(
+            bank=rule_bank,
+            distance=int(distance),
+            initial_ant_max=int(initial_ant_max),
+            rng=rng,
+        )
+        if not sampled.step_ants:
+            raise RuntimeError("Sampled problem contained no steps.")
+        out.append(
+            LayerRolloutExample(
+                distance=int(sampled.distance),
+                start_layer=int(sampled.start_layer),
+                goal_atom=str(sampled.goal_atom),
+                initial_ants=tuple(str(atom) for atom in sampled.step_ants[0]),
+                max_steps=int(sampled.distance if max_steps is None else max_steps),
+                oracle_rule_statements=tuple(
+                    str(rule.statement_text) for rule in sampled.step_rules
+                ),
+            )
+        )
+    return out
+
+
+def run_layer_rollout(
+    *,
+    rule_bank: RuleBank,
+    example: LayerRolloutExample,
+    model: Callable[[np.ndarray], Any],
+    adapter: LayerPredictionAdapter,
+    tokenizer: tokenize_layer.LayerTokenizer | None = None,
+    temperature: float = 0.0,
+    rng: np.random.Generator | None = None,
+) -> LayerRolloutResult:
+    tokenizer = _resolve_layer_tokenizer(rule_bank=rule_bank, tokenizer=tokenizer)
+    if rng is None:
+        rng = np.random.default_rng()
+
+    facts = set(str(atom) for atom in example.initial_ants)
+    traces: list[LayerRolloutTraceStep] = []
+    goal = str(example.goal_atom)
+
+    for step_idx in range(int(example.max_steps)):
+        src_layer = int(example.start_layer) + step_idx
+        prompt = tokenizer.tokenize_prompt(
+            Sequent(
+                [Atom(atom) for atom in _sorted_layer_atoms(facts)],
+                Atom(goal),
+            )
+        )
+        completion = adapter.predict_completion(
+            model=model,
+            prompt_tokens=prompt,
+            tokenizer=tokenizer,
+            temperature=temperature,
+            rng=rng,
+        )
+
+        matched = match_rule_completion(
+            rule_bank=rule_bank,
+            src_layer=src_layer,
+            completion_tokens=completion,
+            tokenizer=tokenizer,
+        )
+
+        if matched.decode_error:
+            traces.append(
+                LayerRolloutTraceStep(
+                    step_idx=step_idx,
+                    src_layer=src_layer,
+                    prompt_tokens=tuple(int(tok) for tok in prompt),
+                    completion_tokens=tuple(int(tok) for tok in completion),
+                    decoded_statement=None,
+                    matched_rule_statement=None,
+                    decode_error=True,
+                    unknown_rule_error=False,
+                    inapplicable_rule_error=False,
+                    goal_reached=False,
+                )
+            )
+            return LayerRolloutResult(
+                success=False,
+                failure_reason=FAILURE_DECODE_ERROR,
+                n_steps=len(traces),
+                goal_reached=False,
+                final_layer=src_layer,
+                final_facts=tuple(_sorted_layer_atoms(facts)),
+                steps=tuple(traces),
+                example=example,
+            )
+
+        if matched.unknown_rule_error or matched.matched_rule is None:
+            traces.append(
+                LayerRolloutTraceStep(
+                    step_idx=step_idx,
+                    src_layer=src_layer,
+                    prompt_tokens=tuple(int(tok) for tok in prompt),
+                    completion_tokens=tuple(int(tok) for tok in completion),
+                    decoded_statement=matched.decoded_statement,
+                    matched_rule_statement=None,
+                    decode_error=False,
+                    unknown_rule_error=True,
+                    inapplicable_rule_error=False,
+                    goal_reached=False,
+                )
+            )
+            return LayerRolloutResult(
+                success=False,
+                failure_reason=FAILURE_UNKNOWN_RULE_ERROR,
+                n_steps=len(traces),
+                goal_reached=False,
+                final_layer=src_layer,
+                final_facts=tuple(_sorted_layer_atoms(facts)),
+                steps=tuple(traces),
+                example=example,
+            )
+
+        rule = matched.matched_rule
+        if not set(rule.lhs).issubset(facts):
+            traces.append(
+                LayerRolloutTraceStep(
+                    step_idx=step_idx,
+                    src_layer=src_layer,
+                    prompt_tokens=tuple(int(tok) for tok in prompt),
+                    completion_tokens=tuple(int(tok) for tok in completion),
+                    decoded_statement=matched.decoded_statement,
+                    matched_rule_statement=rule.statement_text,
+                    decode_error=False,
+                    unknown_rule_error=False,
+                    inapplicable_rule_error=True,
+                    goal_reached=False,
+                )
+            )
+            return LayerRolloutResult(
+                success=False,
+                failure_reason=FAILURE_INAPPLICABLE_RULE_ERROR,
+                n_steps=len(traces),
+                goal_reached=False,
+                final_layer=src_layer,
+                final_facts=tuple(_sorted_layer_atoms(facts)),
+                steps=tuple(traces),
+                example=example,
+            )
+
+        facts = set(str(atom) for atom in rule.rhs)
+        goal_reached = goal in facts
+        traces.append(
+            LayerRolloutTraceStep(
+                step_idx=step_idx,
+                src_layer=src_layer,
+                prompt_tokens=tuple(int(tok) for tok in prompt),
+                completion_tokens=tuple(int(tok) for tok in completion),
+                decoded_statement=matched.decoded_statement,
+                matched_rule_statement=rule.statement_text,
+                decode_error=False,
+                unknown_rule_error=False,
+                inapplicable_rule_error=False,
+                goal_reached=goal_reached,
+            )
+        )
+
+        if goal_reached:
+            return LayerRolloutResult(
+                success=True,
+                failure_reason=None,
+                n_steps=len(traces),
+                goal_reached=True,
+                final_layer=int(rule.dst_layer),
+                final_facts=tuple(_sorted_layer_atoms(facts)),
+                steps=tuple(traces),
+                example=example,
+            )
+
+    return LayerRolloutResult(
+        success=False,
+        failure_reason=FAILURE_GOAL_NOT_REACHED,
+        n_steps=len(traces),
+        goal_reached=False,
+        final_layer=int(example.start_layer) + len(traces),
+        final_facts=tuple(_sorted_layer_atoms(facts)),
+        steps=tuple(traces),
+        example=example,
+    )
+
+
+def evaluate_layer_rollouts(
+    *,
+    rule_bank: RuleBank,
+    examples: Iterable[LayerRolloutExample],
+    model: Callable[[np.ndarray], Any],
+    adapter: LayerPredictionAdapter,
+    tokenizer: tokenize_layer.LayerTokenizer | None = None,
+    temperature: float = 0.0,
+    rng: np.random.Generator | None = None,
+) -> LayerRolloutMetrics:
+    if rng is None:
+        rng = np.random.default_rng()
+
+    results = tuple(
+        run_layer_rollout(
+            rule_bank=rule_bank,
+            example=example,
+            model=model,
+            adapter=adapter,
+            tokenizer=tokenizer,
+            temperature=temperature,
+            rng=rng,
+        )
+        for example in examples
+    )
+
+    n_examples = len(results)
+    n_success = sum(int(result.success) for result in results)
+    n_failure_decode_error = sum(
+        int(result.failure_reason == FAILURE_DECODE_ERROR)
+        for result in results
+    )
+    n_failure_unknown_rule_error = sum(
+        int(result.failure_reason == FAILURE_UNKNOWN_RULE_ERROR)
+        for result in results
+    )
+    n_failure_inapplicable_rule_error = sum(
+        int(result.failure_reason == FAILURE_INAPPLICABLE_RULE_ERROR)
+        for result in results
+    )
+    n_failure_goal_not_reached = sum(
+        int(result.failure_reason == FAILURE_GOAL_NOT_REACHED)
+        for result in results
+    )
+    avg_steps = float(np.mean([result.n_steps for result in results])) if results else 0.0
+
+    return LayerRolloutMetrics(
+        n_examples=n_examples,
+        n_success=n_success,
+        n_failure_decode_error=n_failure_decode_error,
+        n_failure_unknown_rule_error=n_failure_unknown_rule_error,
+        n_failure_inapplicable_rule_error=n_failure_inapplicable_rule_error,
+        n_failure_goal_not_reached=n_failure_goal_not_reached,
+        success_rate=_safe_rate(n_success, n_examples),
+        decode_error_rate=_safe_rate(n_failure_decode_error, n_examples),
+        unknown_rule_error_rate=_safe_rate(n_failure_unknown_rule_error, n_examples),
+        inapplicable_rule_error_rate=_safe_rate(n_failure_inapplicable_rule_error, n_examples),
+        goal_not_reached_rate=_safe_rate(n_failure_goal_not_reached, n_examples),
+        avg_steps=avg_steps,
+        results=results,
+    )
+
+
+def _resolve_layer_tokenizer(
+    *,
+    rule_bank: RuleBank,
+    tokenizer: tokenize_layer.LayerTokenizer | None,
+) -> tokenize_layer.LayerTokenizer:
+    if tokenizer is not None:
+        return tokenizer
+    return tokenize_layer.build_tokenizer_from_rule_bank(rule_bank)
+
+
+def _match_rule_statement(
+    *,
+    rule_bank: RuleBank,
+    src_layer: int,
+    statement: str,
+) -> LayerRule | None:
+    for rule in rule_bank.transition_rules(int(src_layer)):
+        if rule.statement_text == statement:
+            return rule
+    return None
+
+
+def _safe_rate(num: int, den: int) -> float:
+    if den <= 0:
+        return 0.0
+    return float(num) / float(den)
+
+
+def _layer_atom_sort_key(atom: str) -> tuple[int, int]:
+    if not atom.startswith("p") or "_" not in atom:
+        return (1_000_000, 1_000_000)
+    try:
+        layer_str, idx_str = atom[1:].split("_", maxsplit=1)
+        return int(layer_str), int(idx_str)
+    except ValueError:
+        return (1_000_000, 1_000_000)
+
+
+def _sorted_layer_atoms(atoms: Iterable[str]) -> tuple[str, ...]:
+    return tuple(sorted((str(atom) for atom in atoms), key=_layer_atom_sort_key))
+
+
+def _build_prompt_only_inputs_single(
+    *,
+    prompt_tokens: list[int] | np.ndarray,
+    n_seq: int,
+    sep_token_id: int,
+    pad_token_id: int,
+) -> np.ndarray:
+    prompt = np.asarray(prompt_tokens, dtype=np.int32)
+    if prompt.ndim != 1:
+        raise ValueError(f"Prompt must be 1D, got {prompt.shape}")
+    if prompt.shape[0] > n_seq:
+        raise ValueError(f"Prompt length {prompt.shape[0]} exceeds n_seq={n_seq}")
+
+    out = np.full((n_seq,), int(pad_token_id), dtype=np.int32)
+    out[: prompt.shape[0]] = prompt
+    sep_hits = np.where(out == int(sep_token_id))[0]
+    if sep_hits.size == 0:
+        raise ValueError("Prompt must include SEP token.")
+    sep_idx = int(sep_hits[0])
+    out[sep_idx + 1 :] = int(pad_token_id)
+    return out
+
+
+def _normalize_completion_logits(logits: np.ndarray) -> np.ndarray:
+    if logits.ndim == 2:
+        return logits
+    if logits.ndim == 3:
+        if logits.shape[0] != 1:
+            raise ValueError(
+                f"Expected completion logits with batch size 1, got {logits.shape}"
+            )
+        return logits[0]
+    raise ValueError(f"Expected completion logits with ndim 2 or 3, got {logits.shape}")
+
+
+def _select_ar_token_logits(logits: np.ndarray, cursor: int) -> np.ndarray:
+    if logits.ndim == 2:
+        if logits.shape[0] != 1:
+            raise ValueError(
+                f"Expected AR logits with batch size 1, got {logits.shape}"
+            )
+        return logits[0]
+    if logits.ndim == 3:
+        if logits.shape[0] != 1:
+            raise ValueError(
+                f"Expected AR logits with batch size 1, got {logits.shape}"
+            )
+        if cursor < 0 or cursor >= logits.shape[1]:
+            raise ValueError(f"Cursor index {cursor} out of bounds for {logits.shape}")
+        return logits[0, cursor]
+    raise ValueError(f"Unsupported AR logits shape: {logits.shape}")
+
+
+def _sample_token_from_logits(
+    logits: np.ndarray,
+    *,
+    temperature: float,
+    rng: np.random.Generator | None,
+) -> int:
+    logits = np.asarray(logits, dtype=np.float64)
+    if logits.ndim != 1:
+        raise ValueError(f"Expected 1D logits, got {logits.shape}")
+    if logits.shape[0] < 1:
+        raise ValueError("Cannot sample from empty logits.")
+
+    if temperature <= 0:
+        return int(np.argmax(logits))
+
+    if rng is None:
+        rng = np.random.default_rng()
+
+    scaled = logits / float(temperature)
+    scaled = scaled - np.max(scaled)
+    probs = np.exp(scaled)
+    probs_sum = np.sum(probs)
+    if probs_sum <= 0:
+        return int(np.argmax(logits))
+    probs = probs / probs_sum
+    return int(rng.choice(np.arange(logits.shape[0]), p=probs))
