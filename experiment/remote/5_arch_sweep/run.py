@@ -23,8 +23,8 @@ from task.prop_ar import ImplyAutoregSizeTask
 from task.prop_gen.util.tokenize_ar import eot_token_id, sep_token_id
 from train import Case, ce_mask
 
-from data_utils import build_completion_targets, build_prompt_only_inputs
-from metrics_utils import final_token_accuracy
+from experiment.utils.data_utils import build_completion_targets, build_prompt_only_inputs
+from experiment.utils.metrics_utils import final_token_accuracy
 
 
 RUN_ID = new_seed()

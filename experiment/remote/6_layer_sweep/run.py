@@ -15,7 +15,9 @@ import optax
 import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[3]
+LOCAL_DIR = Path(__file__).resolve().parent
 sys.path.append(str(ROOT))
+sys.path.append(str(LOCAL_DIR))
 
 from common import new_seed, split_cases
 from model.mlp import CompletionMixerConfig
@@ -33,16 +35,16 @@ from task.layer_gen.util import tokenize_layer
 from task.layer_gen.util.rule_bank import build_random_rule_bank, save_rule_bank
 from train import Case, ce_mask
 
-from data_utils import (
+from experiment.utils.data_utils import (
     build_prompt_only_inputs,
     pad_completion_targets,
 )
-from metrics_utils import (
+from utils import (
     extract_ar_rule_match_inputs,
     extract_completion_rule_match_inputs,
-    final_token_accuracy,
     summarize_rule_match_metrics,
 )
+from experiment.utils.metrics_utils import final_token_accuracy
 
 
 RUN_ID = new_seed()

@@ -1,4 +1,4 @@
-"""Metric helpers for 5_arch_sweep."""
+"""Shared metric helpers for experiment sweeps."""
 
 from __future__ import annotations
 
@@ -6,12 +6,7 @@ import jax.numpy as jnp
 
 
 def last_nonzero_indices(labels: jnp.ndarray) -> jnp.ndarray:
-    """Return the last index with nonzero label for each row.
-
-    Labels in the autoregressive implication task use ``0`` for masked/padded
-    positions, so the final completion token is the rightmost nonzero token.
-    Rows with no nonzero labels are clamped to index 0.
-    """
+    """Return the last index with nonzero label for each row."""
     if labels.ndim != 2:
         raise ValueError(f"Expected labels with shape (batch, seq), got {labels.shape}")
 
@@ -30,3 +25,4 @@ def final_token_accuracy(preds: jnp.ndarray, labels: jnp.ndarray) -> jnp.ndarray
     last_idx = last_nonzero_indices(labels)
     batch_idx = jnp.arange(labels.shape[0])
     return jnp.mean(preds[batch_idx, last_idx] == labels[batch_idx, last_idx])
+
