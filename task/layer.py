@@ -49,6 +49,7 @@ class LayerTask:
         k_in_max=3,
         k_out_max=3,
         initial_ant_max=3,
+        sample_max_attempts=4096,
     ) -> None:
         self.mode = str(mode)
         if self.mode not in {"offline", "online"}:
@@ -78,6 +79,11 @@ class LayerTask:
         self.drop_remainder = drop_remainder
 
         self.initial_ant_max = int(initial_ant_max)
+        self.sample_max_attempts = int(sample_max_attempts)
+        if self.sample_max_attempts < 1:
+            raise ValueError(
+                f"sample_max_attempts must be >= 1, got {self.sample_max_attempts}"
+            )
         self._rng = np.random.default_rng(self.seed)
 
         self._epoch = 0
@@ -243,12 +249,26 @@ class LayerTask:
             raise RuntimeError("Online mode requires a tokenizer.")
 
         distance = int(self._rng.choice(self._distances))
-        sampled = sample_problem(
-            bank=self._rule_bank,
-            distance=distance,
-            initial_ant_max=self.initial_ant_max,
-            rng=self._rng,
-        )
+        sampled = None
+        last_err = None
+        for _ in range(3):
+            try:
+                sampled = sample_problem(
+                    bank=self._rule_bank,
+                    distance=distance,
+                    initial_ant_max=self.initial_ant_max,
+                    rng=self._rng,
+                    max_attempts=self.sample_max_attempts,
+                )
+                break
+            except RuntimeError as err:
+                last_err = err
+
+        if sampled is None:
+            raise RuntimeError(
+                f"Failed to sample online LayerTask record for distance={distance} "
+                f"after 3 retries with max_attempts={self.sample_max_attempts}."
+            ) from last_err
 
         step_idx = int(self._rng.integers(0, len(sampled.step_rules)))
         src_layer = sampled.step_layers[step_idx]

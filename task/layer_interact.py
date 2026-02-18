@@ -8,9 +8,9 @@ sys.path.append(str(ROOT))
 from layer import LayerTask
 from layer_gen.util.rule_bank import *
 
-rule_bank = build_random_rule_bank(n_layers=10, props_per_layer=8, rules_per_transition=32, k_in_max=3, k_out_max=3, rng=np.random.default_rng())
-problem = sample_problem(bank=rule_bank, distance=4, initial_ant_max=3, rng=np.random.default_rng())
-problem
+rule_bank = build_random_rule_bank(n_layers=24, props_per_layer=16, rules_per_transition=32, k_in_max=3, k_out_max=6, rng=np.random.default_rng())
+problem = sample_problem(max_attempts=1024, bank=rule_bank, distance=20, initial_ant_max=3, rng=np.random.default_rng())
+problem.step_rules
 
 # <codecell>
 problem.step_ants
