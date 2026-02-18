@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass, field
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 import json
+import os
 from pathlib import Path
 import pickle
 import time
@@ -42,6 +44,15 @@ class _AutoregStats:
     max_seq: int = 0
     max_prompt_seq: int = 0
     max_completion_seq: int = 0
+
+
+@dataclass(frozen=True)
+class _DistanceResult:
+    distance: int
+    examples: int
+    records: int
+    shards: int
+    stats: _AutoregStats
 
 
 class ArrayRecordShardWriter:
@@ -98,13 +109,6 @@ class ArrayRecordShardWriter:
         return self.shard_idx + 1
 
 
-@dataclass
-class _DistanceStateAutoreg:
-    writer: ArrayRecordShardWriter
-    examples: int = 0
-    stats: _AutoregStats = field(default_factory=_AutoregStats)
-
-
 def _default_seed() -> int:
     return int(np.random.randint(0, np.iinfo(np.int32).max))
 
@@ -126,6 +130,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--max-distance", type=int, default=4)
     parser.add_argument("--examples-per-distance", type=int, default=10_000)
     parser.add_argument("--examples-per-shard", type=int, default=50_000)
+    parser.add_argument("--workers", type=int, default=min(32, os.cpu_count() or 4))
     parser.add_argument("--seed", type=int, default=None)
 
     parser.add_argument("--rule-bank-path", type=Path, default=None)
@@ -163,10 +168,79 @@ def _build_or_load_rule_bank(args: argparse.Namespace, rng: np.random.Generator)
     )
 
 
+def _distance_seed(base_seed: int, distance: int) -> int:
+    return int(base_seed + distance * 1_000_003)
+
+
+def _generate_distance_data(
+    *,
+    out_dir: str,
+    distance: int,
+    examples_per_distance: int,
+    examples_per_shard: int,
+    writer_options: str,
+    initial_ant_max: int,
+    seed: int,
+    bank_payload: dict,
+) -> _DistanceResult:
+    rng = np.random.default_rng(seed)
+    bank = RuleBank.from_dict(bank_payload)
+    tokenizer = tokenize_layer.build_tokenizer_from_rule_bank(bank)
+    writer = ArrayRecordShardWriter(
+        out_dir=Path(out_dir) / f"distance_{distance:03d}",
+        examples_per_shard=examples_per_shard,
+        writer_options=writer_options,
+    )
+    stats = _AutoregStats()
+    examples = 0
+
+    try:
+        for _ in range(examples_per_distance):
+            sampled = sample_problem(
+                bank=bank,
+                distance=distance,
+                initial_ant_max=initial_ant_max,
+                rng=rng,
+            )
+
+            for step_idx, (src_layer, ants, rule) in enumerate(
+                zip(sampled.step_layers, sampled.step_ants, sampled.step_rules)
+            ):
+                sequent = Sequent([Atom(atom) for atom in ants], Atom(sampled.goal_atom))
+                prompt, completion = tokenizer.tokenize_example(sequent, rule.statement_text)
+                payload = pickle.dumps(
+                    {
+                        "distance": int(sampled.distance),
+                        "start_layer": int(sampled.start_layer),
+                        "src_layer": int(src_layer),
+                        "step_idx": int(step_idx),
+                        "goal_atom": sampled.goal_atom,
+                        "prompt": np.asarray(prompt, dtype=np.int32),
+                        "completions": [np.asarray(completion, dtype=np.int32)],
+                        "statement_text": rule.statement_text,
+                    },
+                    protocol=5,
+                )
+                writer.write(payload)
+                _update_autoreg_stats(stats, prompt, completion)
+
+            examples += 1
+    finally:
+        writer.close()
+
+    return _DistanceResult(
+        distance=int(distance),
+        examples=int(examples),
+        records=int(writer.total_records),
+        shards=int(writer.shard_count),
+        stats=stats,
+    )
+
+
 def _write_metadata(
     *,
     out_dir: Path,
-    states: dict[int, _DistanceStateAutoreg],
+    results: dict[int, _DistanceResult],
     tokenizer: tokenize_layer.LayerTokenizer,
     created_at: str,
     seed: int,
@@ -174,17 +248,20 @@ def _write_metadata(
     min_distance: int,
     max_distance: int,
     rule_bank_path: str,
+    workers: int,
+    parallel_backend: str,
     config: dict,
 ) -> None:
     distances = {}
     stats_list = []
-    for distance, state in states.items():
-        st = state.stats
+    for distance in sorted(results):
+        result = results[distance]
+        st = result.stats
         stats_list.append(st)
         distances[str(distance)] = {
-            "examples": int(state.examples),
-            "records": int(state.writer.total_records),
-            "shards": int(state.writer.shard_count),
+            "examples": int(result.examples),
+            "records": int(result.records),
+            "shards": int(result.shards),
             "stats": {
                 "max_token": int(st.max_token),
                 "max_seq": int(st.max_seq),
@@ -207,6 +284,8 @@ def _write_metadata(
         "examples_per_distance": int(examples_per_distance),
         "distance_range": [int(min_distance), int(max_distance)],
         "rule_bank": rule_bank_path,
+        "workers": int(workers),
+        "parallel_backend": parallel_backend,
         "config": config,
         "tokenizer": tokenizer.to_dict(),
         "stats": overall,
@@ -224,6 +303,8 @@ def main() -> None:
         raise ValueError("--min-distance must be >= 1")
     if args.max_distance < args.min_distance:
         raise ValueError("--max-distance must be >= --min-distance")
+    if args.workers < 1:
+        raise ValueError("--workers must be >= 1")
 
     distances = list(range(args.min_distance, args.max_distance + 1))
 
@@ -234,15 +315,6 @@ def main() -> None:
     tokenizer = tokenize_layer.build_tokenizer_from_rule_bank(bank)
     rule_bank_out = args.out_dir / "rule_bank.json"
     save_rule_bank(rule_bank_out, bank)
-
-    autoreg_states: dict[int, _DistanceStateAutoreg] = {}
-    for distance in distances:
-        writer = ArrayRecordShardWriter(
-            out_dir=args.out_dir / f"distance_{distance:03d}",
-            examples_per_shard=args.examples_per_shard,
-            writer_options=args.arrayrecord_options,
-        )
-        autoreg_states[distance] = _DistanceStateAutoreg(writer=writer)
 
     config = {
         "n_layers": int(bank.n_layers),
@@ -255,56 +327,50 @@ def main() -> None:
 
     created_at = time.strftime("%Y-%m-%d %H:%M:%S")
     total_target = len(distances) * int(args.examples_per_distance)
-    step = max(1, int(args.log_every)) if args.log_every != 0 else 1
+    max_workers = max(
+        1,
+        min(int(args.workers), len(distances), os.cpu_count() or int(args.workers)),
+    )
+    bank_payload = bank.to_dict()
+    results: dict[int, _DistanceResult] = {}
+
+    executor = None
+    backend = "single"
+    if max_workers == 1:
+        executor = ThreadPoolExecutor(max_workers=1)
+        backend = "thread"
+    else:
+        try:
+            executor = ProcessPoolExecutor(max_workers=max_workers)
+            backend = "process"
+        except (PermissionError, OSError):
+            executor = ThreadPoolExecutor(max_workers=max_workers)
+            backend = "thread"
 
     with tqdm(total=total_target, desc="generate layered", leave=True) as bar:
-        pending = 0
-        for distance in distances:
-            for _ in range(args.examples_per_distance):
-                sampled = sample_problem(
-                    bank=bank,
+        with executor as pool:
+            future_to_distance = {
+                pool.submit(
+                    _generate_distance_data,
+                    out_dir=str(args.out_dir),
                     distance=distance,
-                    initial_ant_max=args.initial_ant_max,
-                    rng=rng,
-                )
-
-                state = autoreg_states[distance]
-                for step_idx, (src_layer, ants, rule) in enumerate(
-                    zip(sampled.step_layers, sampled.step_ants, sampled.step_rules)
-                ):
-                    sequent = Sequent([Atom(atom) for atom in ants], Atom(sampled.goal_atom))
-                    prompt, completion = tokenizer.tokenize_example(sequent, rule.statement_text)
-                    payload = pickle.dumps(
-                        {
-                            "distance": int(sampled.distance),
-                            "start_layer": int(sampled.start_layer),
-                            "src_layer": int(src_layer),
-                            "step_idx": int(step_idx),
-                            "goal_atom": sampled.goal_atom,
-                            "prompt": np.asarray(prompt, dtype=np.int32),
-                            "completions": [np.asarray(completion, dtype=np.int32)],
-                            "statement_text": rule.statement_text,
-                        },
-                        protocol=5,
-                    )
-                    state.writer.write(payload)
-                    _update_autoreg_stats(state.stats, prompt, completion)
-                state.examples += 1
-
-                pending += 1
-                if pending >= step:
-                    bar.update(pending)
-                    pending = 0
-
-        if pending:
-            bar.update(pending)
-
-    for state in autoreg_states.values():
-        state.writer.close()
+                    examples_per_distance=int(args.examples_per_distance),
+                    examples_per_shard=int(args.examples_per_shard),
+                    writer_options=args.arrayrecord_options,
+                    initial_ant_max=int(args.initial_ant_max),
+                    seed=_distance_seed(int(args.seed), distance),
+                    bank_payload=bank_payload,
+                ): distance
+                for distance in distances
+            }
+            for future in as_completed(future_to_distance):
+                result = future.result()
+                results[result.distance] = result
+                bar.update(int(result.examples))
 
     _write_metadata(
         out_dir=args.out_dir,
-        states=autoreg_states,
+        results=results,
         tokenizer=tokenizer,
         created_at=created_at,
         seed=args.seed,
@@ -312,6 +378,8 @@ def main() -> None:
         min_distance=args.min_distance,
         max_distance=args.max_distance,
         rule_bank_path=str(rule_bank_out.resolve()),
+        workers=max_workers,
+        parallel_backend=backend,
         config=config,
     )
 

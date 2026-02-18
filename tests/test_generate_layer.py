@@ -11,7 +11,7 @@ from array_record.python import array_record_module
 from task.layer_gen.util import tokenize_layer as tok
 
 
-def _run_generate(tmp_path: Path, *, examples: int = 4) -> Path:
+def _run_generate(tmp_path: Path, *, examples: int = 4, workers: int = 1) -> Path:
     script = Path(__file__).parents[1] / "task" / "layer_gen" / "generate_layer.py"
     out_dir = tmp_path / "layer_out"
 
@@ -40,6 +40,8 @@ def _run_generate(tmp_path: Path, *, examples: int = 4) -> Path:
         str(examples),
         "--examples-per-shard",
         "2",
+        "--workers",
+        str(workers),
         "--seed",
         "13",
         "--log-every",
@@ -71,7 +73,7 @@ def _read_one(distance_dir: Path):
 
 def test_generate_layer_outputs_and_metadata(tmp_path: Path) -> None:
     examples = 5
-    out_dir = _run_generate(tmp_path, examples=examples)
+    out_dir = _run_generate(tmp_path, examples=examples, workers=2)
 
     assert (out_dir / "rule_bank.json").exists()
     assert (out_dir / "metadata.json").exists()
@@ -82,6 +84,8 @@ def test_generate_layer_outputs_and_metadata(tmp_path: Path) -> None:
     assert root_meta["tokenizer"]["version"] == tok.TOKENIZER_VERSION
     assert root_meta["stats"]["max_token"] + 1 <= root_meta["tokenizer"]["vocab_size"]
     assert root_meta["tokenizer"]["vocab_size"] < 256
+    assert root_meta["workers"] == 2
+    assert root_meta["parallel_backend"] in {"process", "thread"}
 
     for distance in (1, 2):
         count = _count_records(out_dir / f"distance_{distance:03d}")
@@ -99,3 +103,10 @@ def test_generate_layer_outputs_and_metadata(tmp_path: Path) -> None:
     assert "→" in statement
     assert "(" not in statement
     assert ")" not in statement
+
+
+def test_generate_layer_single_worker_metadata(tmp_path: Path) -> None:
+    out_dir = _run_generate(tmp_path, examples=2, workers=1)
+    root_meta = json.loads((out_dir / "metadata.json").read_text())
+    assert root_meta["workers"] == 1
+    assert root_meta["parallel_backend"] == "thread"
