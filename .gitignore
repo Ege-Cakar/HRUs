@@ -18,6 +18,5 @@ data/
 *.out
 
 # agent files
-AGENTS.md
 journal/
 *.github
