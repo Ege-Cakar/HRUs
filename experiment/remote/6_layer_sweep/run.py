@@ -13,6 +13,7 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 import pandas as pd
+from tqdm import tqdm
 
 ROOT = Path(__file__).resolve().parents[3]
 LOCAL_DIR = Path(__file__).resolve().parent
@@ -55,7 +56,7 @@ EVAL_DISTANCES = list(range(1, 21))
 
 BATCH_SIZE = 64
 TRAIN_ITERS = 5_000
-TEST_EVERY = 500
+TEST_EVERY = 1000
 TEST_ITERS = 3
 EVAL_ITERS_PER_DISTANCE = 3
 ROLLOUT_EXAMPLES_PER_DISTANCE = 64
@@ -775,7 +776,7 @@ print("CASES IN THIS RUN:", len(all_cases))
 
 # <codecell>
 rows = []
-for case in all_cases:
+for case in tqdm(all_cases):
     print("RUNNING", case.name, case.info)
     case.run()
 
