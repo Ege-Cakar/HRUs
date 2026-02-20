@@ -225,6 +225,7 @@ class MambaBlock(nnx.Module):
         return residual + y
 
 
+# TODO: extremely inefficient
 class Mamba2Block(nnx.Module):
     """Minimal Mamba-2-style block with multi-head SSM state updates."""
 
