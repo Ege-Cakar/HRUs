@@ -22,7 +22,7 @@ sys.path.append(str(LOCAL_DIR))
 
 from common import new_seed, split_cases
 from model.mlp import CompletionMixerConfig
-from model.ssm import Mamba2Config
+from model.ssm import MambaConfig
 from model.transformer import TransformerConfig
 from task.layer import (
     AutoregressiveLogitsAdapter,
@@ -77,11 +77,11 @@ TRANSFORMER_LRS = [3e-4, 1e-3]
 TRANSFORMER_POS = ["rope"]
 TRANSFORMER_SWIGLU = [True]
 
-MAMBA2_LAYERS = [4, 8]
-MAMBA2_WIDTH_HEADS = [(128, 4), (256, 8)]
-MAMBA2_D_STATE = [16, 32]
-MAMBA2_D_CONV = [4]
-MAMBA2_LRS = [3e-4, 1e-3]
+MAMBA_LAYERS = [4, 8]
+MAMBA_HIDDEN = [128, 256]
+MAMBA_D_STATE = [16, 32]
+MAMBA_D_CONV = [4]
+MAMBA_LRS = [3e-4, 1e-3]
 
 MIXER_LAYERS = [4, 8]
 MIXER_HIDDEN = [128, 256]
@@ -101,11 +101,11 @@ MIXER_LRS = [1e-3, 3e-3]
 # TRANSFORMER_LAYERS = [4]
 # TRANSFORMER_WIDTH_HEADS = [(128, 4)]
 # TRANSFORMER_LRS = [3e-4]
-# MAMBA2_LAYERS = [4]
-# MAMBA2_WIDTH_HEADS = [(128, 4)]
-# MAMBA2_D_STATE = [16]
-# MAMBA2_D_CONV = [4]
-# MAMBA2_LRS = [3e-4]
+# MAMBA_LAYERS = [4]
+# MAMBA_HIDDEN = [128]
+# MAMBA_D_STATE = [16]
+# MAMBA_D_CONV = [4]
+# MAMBA_LRS = [3e-4]
 # MIXER_LAYERS = [4]
 # MIXER_HIDDEN = [128]
 # MIXER_CHANNELS = [128]
@@ -600,19 +600,18 @@ for train_max_distance in TRAIN_MAX_DISTANCES:
             )
         )
 
-    for n_layers, (n_hidden, n_heads), d_state, d_conv, lr in itertools.product(
-        MAMBA2_LAYERS,
-        MAMBA2_WIDTH_HEADS,
-        MAMBA2_D_STATE,
-        MAMBA2_D_CONV,
-        MAMBA2_LRS,
+    for n_layers, n_hidden, d_state, d_conv, lr in itertools.product(
+        MAMBA_LAYERS,
+        MAMBA_HIDDEN,
+        MAMBA_D_STATE,
+        MAMBA_D_CONV,
+        MAMBA_LRS,
     ):
-        config = Mamba2Config(
+        config = MambaConfig(
             n_vocab=N_VOCAB,
             n_seq=N_SEQ_AR,
             n_layers=n_layers,
             n_hidden=n_hidden,
-            n_heads=n_heads,
             n_out=N_VOCAB,
             n_pred_tokens=1,
             output_mode="full_sequence",
@@ -654,7 +653,7 @@ for train_max_distance in TRAIN_MAX_DISTANCES:
         }
 
         info = {
-            "model_family": "mamba2",
+            "model_family": "mamba1",
             "target_format": "next_token_full_sequence",
             "train_max_distance": int(train_max_distance),
             "train_distances": train_distances,
@@ -662,7 +661,6 @@ for train_max_distance in TRAIN_MAX_DISTANCES:
             "ood_distances": ood_distances,
             "n_layers": n_layers,
             "n_hidden": n_hidden,
-            "n_heads": n_heads,
             "d_state": d_state,
             "d_conv": d_conv,
             "lr": lr,
@@ -672,7 +670,7 @@ for train_max_distance in TRAIN_MAX_DISTANCES:
 
         all_cases.append(
             Case(
-                f"6_layer_sweep_mamba2_k{int(train_max_distance):02d}",
+                f"6_layer_sweep_mamba1_k{int(train_max_distance):02d}",
                 config,
                 train_task=train_task,
                 test_task=test_task,
@@ -772,6 +770,7 @@ for train_max_distance in TRAIN_MAX_DISTANCES:
 print("TOTAL CASES:", len(all_cases))
 all_cases = split_cases(all_cases, RUN_SPLIT, shuffle_seed=200)
 print("CASES IN THIS RUN:", len(all_cases))
+print("CASE NAMES", [case.name for case in all_cases])
 
 
 # <codecell>
