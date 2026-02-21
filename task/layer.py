@@ -41,6 +41,8 @@ class LayerTask:
         reader_options=None,
         drop_remainder=False,
         prediction_objective="autoregressive",
+        fixed_length_mode="batch_max",
+        fixed_length_n_seq=None,
         # online mode / rule bank config
         rule_bank_path=None,
         n_layers=16,
@@ -59,6 +61,19 @@ class LayerTask:
             raise ValueError(
                 "prediction_objective must be 'autoregressive' or 'all_at_once', "
                 f"got {self.prediction_objective!r}"
+            )
+        self.fixed_length_mode = str(fixed_length_mode)
+        if self.fixed_length_mode not in {"batch_max", "global_max"}:
+            raise ValueError(
+                "fixed_length_mode must be 'batch_max' or 'global_max', "
+                f"got {self.fixed_length_mode!r}"
+            )
+        self.fixed_length_n_seq = (
+            None if fixed_length_n_seq is None else int(fixed_length_n_seq)
+        )
+        if self.fixed_length_n_seq is not None and self.fixed_length_n_seq < 2:
+            raise ValueError(
+                f"fixed_length_n_seq must be >= 2, got {self.fixed_length_n_seq}"
             )
         if rule_bank_path is None:
             if ds_path is not None:
@@ -91,6 +106,7 @@ class LayerTask:
         self._dataloader = None
         self._iterator = None
         self._batch_fn = None
+        self._global_autoreg_seq_len: int | None = None
 
         self.ds_path = Path(ds_path) if ds_path is not None else None
 
@@ -129,18 +145,26 @@ class LayerTask:
             self.stats = {}
             self._batch_fn = self._make_batch_fn()
 
+        if (
+            self.prediction_objective == "autoregressive"
+            and self.fixed_length_mode == "global_max"
+        ):
+            self._global_autoreg_seq_len = self._resolve_global_autoreg_seq_len()
+
     def __next__(self):
         if self.mode == "offline":
             try:
-                return next(self._iterator)
+                batch = next(self._iterator)
             except StopIteration:
                 self._epoch += 1
                 self._dataloader = self._build_dataloader()
                 self._iterator = iter(self._dataloader)
-                return next(self._iterator)
+                batch = next(self._iterator)
+            return self._pad_autoreg_batch_to_global_len(batch)
 
         records = [self._sample_online_record() for _ in range(self.batch_size)]
-        return self._batch_fn(records)
+        batch = self._batch_fn(records)
+        return self._pad_autoreg_batch_to_global_len(batch)
 
     def __iter__(self):
         return self
@@ -301,6 +325,72 @@ class LayerTask:
             _batch_records_all_at_once,
             eot_token_id=int(self._tokenizer.eot_token_id),
         )
+
+    def _resolve_global_autoreg_seq_len(self) -> int:
+        if self.fixed_length_n_seq is not None:
+            return int(self.fixed_length_n_seq)
+
+        if self.mode == "offline":
+            if "max_seq" not in self.stats:
+                raise RuntimeError("Offline global fixed length requires stats['max_seq'].")
+            n_seq = int(self.stats["max_seq"])
+        else:
+            if self._rule_bank is None:
+                raise RuntimeError("Online global fixed length requires a rule bank.")
+            if self._tokenizer is None:
+                raise RuntimeError("Online global fixed length requires a tokenizer.")
+
+            max_prompt_len = 2 * int(self._rule_bank.props_per_layer) + 2
+            max_completion_len = 1
+            for rules in self._rule_bank.transitions.values():
+                for rule in rules:
+                    max_completion_len = max(
+                        max_completion_len,
+                        len(self._tokenizer.encode_completion(rule.statement_text)),
+                    )
+            n_seq = int(max_prompt_len + max_completion_len - 1)
+
+        if n_seq < 2:
+            raise ValueError(f"Resolved global fixed length must be >= 2, got {n_seq}")
+        return n_seq
+
+    def _pad_autoreg_batch_to_global_len(self, batch):
+        if self.prediction_objective != "autoregressive":
+            return batch
+        if self.fixed_length_mode != "global_max":
+            return batch
+        if self._global_autoreg_seq_len is None:
+            raise RuntimeError("Global autoregressive seq length was not initialized.")
+
+        xs, ys = batch
+        xs = np.asarray(xs)
+        ys = np.asarray(ys)
+        if xs.ndim != 2 or ys.ndim != 2:
+            raise ValueError(
+                f"Autoregressive batches must be 2D, got xs={xs.shape}, ys={ys.shape}"
+            )
+        if xs.shape[0] != ys.shape[0]:
+            raise ValueError(
+                f"Batch size mismatch for autoregressive batch: xs={xs.shape}, ys={ys.shape}"
+            )
+
+        n_seq = int(self._global_autoreg_seq_len)
+        if xs.shape[1] > n_seq or ys.shape[1] > n_seq:
+            raise ValueError(
+                "Autoregressive batch sequence exceeds fixed global length: "
+                f"xs={xs.shape}, ys={ys.shape}, fixed_length_n_seq={n_seq}"
+            )
+
+        if xs.shape[1] == n_seq and ys.shape[1] == n_seq:
+            return xs, ys
+
+        out_x = np.full((xs.shape[0], n_seq), 0, dtype=xs.dtype)
+        out_y = np.full((ys.shape[0], n_seq), 0, dtype=ys.dtype)
+        if xs.shape[1] > 0:
+            out_x[:, : xs.shape[1]] = xs
+        if ys.shape[1] > 0:
+            out_y[:, : ys.shape[1]] = ys
+        return out_x, out_y
 
 
 @dataclass(frozen=True)

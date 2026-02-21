@@ -89,6 +89,44 @@ def test_layer_task_offline_autoreg(tmp_path: Path) -> None:
     assert ys[0, 0] == 0
 
 
+def test_layer_task_offline_autoreg_global_max_uses_metadata_max_seq(tmp_path: Path) -> None:
+    distance_dir = tmp_path / "distance_001"
+    distance_dir.mkdir(parents=True)
+    shard_path = distance_dir / "shard_00000.array_record"
+
+    tokenizer = tok.build_tokenizer_from_atoms(["p0_1", "p1_1"])
+    prompt = tokenizer.tokenize_prompt(Sequent([Atom("p0_1")], Atom("p1_1")))
+    completion_short = tokenizer.encode_completion("p1_1")
+    completion_long = tokenizer.encode_completion("(p0_1→p1_1)")
+
+    rec_short = {
+        "prompt": np.array(prompt, dtype=np.int32),
+        "completions": [np.array(completion_short, dtype=np.int32)],
+    }
+    rec_long = {
+        "prompt": np.array(prompt, dtype=np.int32),
+        "completions": [np.array(completion_long, dtype=np.int32)],
+    }
+    _write_array_record(shard_path, [rec_short, rec_long])
+    _write_metadata_for_records(tmp_path, tokenizer, [rec_short, rec_long])
+
+    task = LayerTask(
+        ds_path=tmp_path,
+        distance_range=(1, 1),
+        batch_size=1,
+        mode="offline",
+        shuffle=False,
+        worker_count=0,
+        prediction_objective="autoregressive",
+        fixed_length_mode="global_max",
+    )
+
+    xs, ys = next(task)
+    expected_seq = len(prompt) + len(completion_long) - 1
+    assert xs.shape == (1, expected_seq)
+    assert ys.shape == (1, expected_seq)
+
+
 def test_layer_task_offline_all_at_once_returns_prompt_and_completion(tmp_path: Path) -> None:
     distance_dir = tmp_path / "distance_001"
     distance_dir.mkdir(parents=True)
@@ -187,6 +225,61 @@ def test_layer_task_online_sampling_autoreg() -> None:
     assert np.any(ys == 0)
 
 
+def test_layer_task_online_autoreg_global_max_has_stable_length() -> None:
+    task = LayerTask(
+        distance_range=(1, 2),
+        batch_size=4,
+        mode="online",
+        seed=11,
+        n_layers=6,
+        props_per_layer=5,
+        rules_per_transition=8,
+        k_in_max=2,
+        k_out_max=2,
+        initial_ant_max=3,
+        fixed_length_mode="global_max",
+    )
+
+    max_completion = 1
+    for rules in task.rule_bank.transitions.values():
+        for rule in rules:
+            max_completion = max(
+                max_completion,
+                len(task.tokenizer.encode_completion(rule.statement_text)),
+            )
+    expected_n_seq = 2 * int(task.rule_bank.props_per_layer) + 2 + max_completion - 1
+
+    widths = set()
+    for _ in range(6):
+        xs, ys = next(task)
+        assert xs.shape == ys.shape
+        widths.add(xs.shape[1])
+    assert widths == {expected_n_seq}
+
+
+def test_layer_task_online_autoreg_global_max_explicit_override() -> None:
+    fixed_n_seq = 64
+    task = LayerTask(
+        distance_range=(1, 2),
+        batch_size=4,
+        mode="online",
+        seed=11,
+        n_layers=6,
+        props_per_layer=5,
+        rules_per_transition=8,
+        k_in_max=2,
+        k_out_max=2,
+        initial_ant_max=3,
+        fixed_length_mode="global_max",
+        fixed_length_n_seq=fixed_n_seq,
+    )
+
+    for _ in range(3):
+        xs, ys = next(task)
+        assert xs.shape == (4, fixed_n_seq)
+        assert ys.shape == (4, fixed_n_seq)
+
+
 def test_layer_task_online_sampling_all_at_once() -> None:
     task = LayerTask(
         distance_range=(1, 2),
@@ -210,6 +303,36 @@ def test_layer_task_online_sampling_all_at_once() -> None:
     assert np.all(np.any(ys == task.tokenizer.eot_token_id, axis=1))
 
 
+def test_layer_task_global_max_does_not_change_all_at_once_shapes() -> None:
+    fixed_n_seq = 64
+    task = LayerTask(
+        distance_range=(1, 2),
+        batch_size=4,
+        mode="online",
+        seed=11,
+        n_layers=6,
+        props_per_layer=5,
+        rules_per_transition=8,
+        k_in_max=2,
+        k_out_max=2,
+        initial_ant_max=3,
+        prediction_objective="all_at_once",
+        fixed_length_mode="global_max",
+        fixed_length_n_seq=fixed_n_seq,
+    )
+
+    xs, ys = next(task)
+    assert xs.shape[0] == 4
+    assert ys.shape[0] == 4
+    assert xs.shape[1] < fixed_n_seq
+    assert ys.shape[1] < fixed_n_seq
+
+
 def test_layer_task_rejects_unknown_prediction_objective() -> None:
     with pytest.raises(ValueError, match="prediction_objective"):
         LayerTask(mode="online", prediction_objective="unknown")
+
+
+def test_layer_task_rejects_unknown_fixed_length_mode() -> None:
+    with pytest.raises(ValueError, match="fixed_length_mode"):
+        LayerTask(mode="online", fixed_length_mode="unknown")
