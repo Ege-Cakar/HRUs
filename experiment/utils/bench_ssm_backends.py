@@ -1,0 +1,107 @@
+"""Benchmark SSM scan backends under train_step workload."""
+
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+import sys
+import time
+
+import jax
+import jax.numpy as jnp
+import numpy as np
+import optax
+from flax import nnx
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.append(str(ROOT))
+
+from model.ssm import MambaConfig
+from train import create_optimizer, parse_loss_name, train_step
+
+
+def _bench_backend(
+    *,
+    backend: str,
+    batch_size: int,
+    n_seq: int,
+    n_vocab: int,
+    n_layers: int,
+    n_hidden: int,
+    d_state: int,
+    warmup_steps: int,
+    timed_steps: int,
+) -> dict[str, float | str]:
+    config = MambaConfig(
+        n_vocab=n_vocab,
+        n_seq=n_seq,
+        n_layers=n_layers,
+        n_hidden=n_hidden,
+        n_out=n_vocab,
+        n_pred_tokens=1,
+        output_mode="full_sequence",
+        d_state=d_state,
+        scan_backend=backend,
+    )
+    optimizer = create_optimizer(
+        config.to_model(rngs=nnx.Rngs(0)),
+        lr=3e-4,
+        optim=optax.adamw,
+    )
+    loss_func = parse_loss_name("ce_mask")
+
+    xs = jnp.ones((batch_size, n_seq), dtype=jnp.int32)
+    ys = jnp.ones((batch_size, n_seq), dtype=jnp.int32)
+
+    for _ in range(warmup_steps):
+        loss_val = train_step(optimizer, (xs, ys), loss_func)
+        jax.block_until_ready(loss_val)
+
+    times = []
+    for _ in range(timed_steps):
+        t0 = time.perf_counter()
+        loss_val = train_step(optimizer, (xs, ys), loss_func)
+        jax.block_until_ready(loss_val)
+        times.append(time.perf_counter() - t0)
+
+    return {
+        "backend": backend,
+        "mean_step_s": float(np.mean(times)),
+        "p95_step_s": float(np.percentile(times, 95)),
+        "steps_per_s": float(1.0 / np.mean(times)),
+    }
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--n-seq", type=int, default=64)
+    parser.add_argument("--n-vocab", type=int, default=512)
+    parser.add_argument("--n-layers", type=int, default=4)
+    parser.add_argument("--n-hidden", type=int, default=128)
+    parser.add_argument("--d-state", type=int, default=16)
+    parser.add_argument("--warmup-steps", type=int, default=4)
+    parser.add_argument("--timed-steps", type=int, default=16)
+    args = parser.parse_args()
+
+    print("JAX backend:", jax.default_backend())
+    for backend in ("reference", "auto", "pallas"):
+        res = _bench_backend(
+            backend=backend,
+            batch_size=args.batch_size,
+            n_seq=args.n_seq,
+            n_vocab=args.n_vocab,
+            n_layers=args.n_layers,
+            n_hidden=args.n_hidden,
+            d_state=args.d_state,
+            warmup_steps=args.warmup_steps,
+            timed_steps=args.timed_steps,
+        )
+        print(
+            f"{res['backend']}: mean={res['mean_step_s']:.4f}s "
+            f"p95={res['p95_step_s']:.4f}s steps/s={res['steps_per_s']:.2f}"
+        )
+
+
+if __name__ == "__main__":
+    main()

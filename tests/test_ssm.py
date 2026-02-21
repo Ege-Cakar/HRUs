@@ -28,6 +28,9 @@ class TestMambaConfig:
         assert config.expand == 2
         assert config.dt_rank == "auto"
         assert config.d_conv == 4
+        assert config.scan_backend == "reference"
+        assert config.scan_chunk_len == 64
+        assert config.scan_debug_checks is False
 
     def test_custom_values(self):
         config = MambaConfig(
@@ -49,6 +52,9 @@ class TestMambaConfig:
             d_conv=3,
             dt_min=1e-4,
             dt_max=0.2,
+            scan_backend="auto",
+            scan_chunk_len=32,
+            scan_debug_checks=True,
         )
         assert config.n_vocab == 512
         assert config.n_seq == 256
@@ -68,6 +74,9 @@ class TestMambaConfig:
         assert config.d_conv == 3
         assert config.dt_min == 1e-4
         assert config.dt_max == 0.2
+        assert config.scan_backend == "auto"
+        assert config.scan_chunk_len == 32
+        assert config.scan_debug_checks is True
 
     def test_to_model(self):
         config = MambaConfig(n_vocab=100, n_hidden=32, n_layers=2)
@@ -95,6 +104,9 @@ class TestMamba2Config:
         assert config.expand == 2
         assert config.dt_rank == "auto"
         assert config.d_conv == 4
+        assert config.scan_backend == "reference"
+        assert config.scan_chunk_len == 64
+        assert config.scan_debug_checks is False
 
     def test_custom_values(self):
         config = Mamba2Config(
@@ -117,6 +129,9 @@ class TestMamba2Config:
             d_conv=5,
             dt_min=5e-4,
             dt_max=0.15,
+            scan_backend="auto",
+            scan_chunk_len=16,
+            scan_debug_checks=True,
         )
         assert config.n_vocab == 256
         assert config.n_seq == 64
@@ -137,6 +152,9 @@ class TestMamba2Config:
         assert config.d_conv == 5
         assert config.dt_min == 5e-4
         assert config.dt_max == 0.15
+        assert config.scan_backend == "auto"
+        assert config.scan_chunk_len == 16
+        assert config.scan_debug_checks is True
 
     def test_to_model(self):
         config = Mamba2Config(n_vocab=100, n_hidden=32, n_layers=2, n_heads=4)
@@ -298,6 +316,16 @@ class TestSSMErrors:
         config = Mamba2Config(n_hidden=30, n_heads=8)
         with pytest.raises(ValueError, match="must be divisible"):
             Mamba2(config, rngs=nnx.Rngs(42))
+
+    def test_invalid_scan_backend(self):
+        config = MambaConfig(scan_backend="invalid")
+        with pytest.raises(ValueError, match="scan_backend"):
+            Mamba(config, rngs=nnx.Rngs(42))
+
+    def test_invalid_scan_chunk_len(self):
+        config = MambaConfig(scan_chunk_len=0)
+        with pytest.raises(ValueError, match="scan_chunk_len"):
+            Mamba(config, rngs=nnx.Rngs(42))
 
 
 class TestSSMTrainIntegration:

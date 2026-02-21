@@ -39,3 +39,6 @@ dev = [
     "jupyter>=1.1.1",
     "pip>=25.3",
 ]
+ssm-kernels = [
+    "jax-triton>=0.3.0",
+]

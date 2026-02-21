@@ -9,6 +9,7 @@ import jax.numpy as jnp
 from flax import nnx
 
 from model.mup import MuReadout
+from model.ssm_kernels import selective_scan_mamba, selective_scan_mamba2
 
 # TODO: all mamba models are extremely inefficient
 
@@ -28,6 +29,16 @@ def _validate_output_config(output_mode: str, n_pred_tokens: int) -> None:
         )
     if n_pred_tokens < 1:
         raise ValueError(f"n_pred_tokens must be >= 1, got {n_pred_tokens}")
+
+
+def _validate_scan_config(scan_backend: str, scan_chunk_len: int) -> None:
+    if scan_backend not in {"reference", "pallas", "auto"}:
+        raise ValueError(
+            "scan_backend must be one of 'reference', 'pallas', or 'auto', "
+            f"got {scan_backend!r}"
+        )
+    if scan_chunk_len < 1:
+        raise ValueError(f"scan_chunk_len must be >= 1, got {scan_chunk_len}")
 
 
 def _select_last_nonpad_hidden(
@@ -85,6 +96,9 @@ class MambaConfig:
     d_conv: int = 4
     dt_min: float = 1e-3
     dt_max: float = 0.1
+    scan_backend: str = "reference"
+    scan_chunk_len: int = 64
+    scan_debug_checks: bool = False
 
     def to_model(self, *, rngs: nnx.Rngs) -> "Mamba":
         return Mamba(self, rngs=rngs)
@@ -113,6 +127,9 @@ class Mamba2Config:
     d_conv: int = 4
     dt_min: float = 1e-3
     dt_max: float = 0.1
+    scan_backend: str = "reference"
+    scan_chunk_len: int = 64
+    scan_debug_checks: bool = False
 
     def to_model(self, *, rngs: nnx.Rngs) -> "Mamba2":
         return Mamba2(self, rngs=rngs)
@@ -132,12 +149,16 @@ class MambaBlock(nnx.Module):
             raise ValueError(
                 f"Invalid dt range: dt_min={config.dt_min}, dt_max={config.dt_max}"
             )
+        _validate_scan_config(config.scan_backend, config.scan_chunk_len)
 
         self.n_hidden = config.n_hidden
         self.d_state = config.d_state
         self.inner = config.expand * config.n_hidden
         self.dt_min = config.dt_min
         self.dt_max = config.dt_max
+        self.scan_backend = config.scan_backend
+        self.scan_chunk_len = int(config.scan_chunk_len)
+        self.scan_debug_checks = bool(config.scan_debug_checks)
 
         self.norm = nnx.RMSNorm(config.n_hidden, rngs=rngs) if config.layer_norm else None
         self.in_proj = nnx.Linear(
@@ -184,23 +205,17 @@ class MambaBlock(nnx.Module):
     def _scan(self, u, dt, b, c):
         a = -jnp.exp(self.a_log[...])
         d = self.d[...]
-        state0 = jnp.zeros((u.shape[0], self.inner, self.d_state), dtype=u.dtype)
-
-        u_t = jnp.swapaxes(u, 0, 1)
-        dt_t = jnp.swapaxes(dt, 0, 1)
-        b_t = jnp.swapaxes(b, 0, 1)
-        c_t = jnp.swapaxes(c, 0, 1)
-
-        def step(state, inputs):
-            u_i, dt_i, b_i, c_i = inputs
-            delta_a = jnp.exp(dt_i[..., None] * a[None, :, :])
-            delta_b_u = dt_i[..., None] * b_i[:, None, :] * u_i[..., None]
-            state = state * delta_a + delta_b_u
-            y_i = jnp.sum(state * c_i[:, None, :], axis=-1) + d[None, :] * u_i
-            return state, y_i
-
-        _, ys = jax.lax.scan(step, state0, (u_t, dt_t, b_t, c_t))
-        return jnp.swapaxes(ys, 0, 1)
+        return selective_scan_mamba(
+            u=u,
+            dt=dt,
+            b=b,
+            c=c,
+            a=a,
+            d=d,
+            scan_backend=self.scan_backend,
+            scan_chunk_len=self.scan_chunk_len,
+            scan_debug_checks=self.scan_debug_checks,
+        )
 
     def __call__(self, x):
         residual = x
@@ -244,6 +259,7 @@ class Mamba2Block(nnx.Module):
             raise ValueError(
                 f"Invalid dt range: dt_min={config.dt_min}, dt_max={config.dt_max}"
             )
+        _validate_scan_config(config.scan_backend, config.scan_chunk_len)
 
         self.n_hidden = config.n_hidden
         self.n_heads = config.n_heads
@@ -256,6 +272,9 @@ class Mamba2Block(nnx.Module):
         self.head_dim = self.inner // config.n_heads
         self.dt_min = config.dt_min
         self.dt_max = config.dt_max
+        self.scan_backend = config.scan_backend
+        self.scan_chunk_len = int(config.scan_chunk_len)
+        self.scan_debug_checks = bool(config.scan_debug_checks)
 
         self.norm = nnx.RMSNorm(config.n_hidden, rngs=rngs) if config.layer_norm else None
         self.in_proj = nnx.Linear(
@@ -312,33 +331,20 @@ class Mamba2Block(nnx.Module):
     def _scan(self, u, dt, b, c):
         a = -jnp.exp(self.a_log[...])
         d = self.d[...].reshape(self.n_heads, self.head_dim)
-
-        u_h = u.reshape(u.shape[0], u.shape[1], self.n_heads, self.head_dim)
-        dt_h = dt.reshape(dt.shape[0], dt.shape[1], self.n_heads, self.head_dim)
-        b_h = b.reshape(b.shape[0], b.shape[1], self.n_heads, self.d_state)
-        c_h = c.reshape(c.shape[0], c.shape[1], self.n_heads, self.d_state)
-
-        state0 = jnp.zeros(
-            (u.shape[0], self.n_heads, self.head_dim, self.d_state),
-            dtype=u.dtype,
+        return selective_scan_mamba2(
+            u=u,
+            dt=dt,
+            b=b,
+            c=c,
+            a=a,
+            d=d,
+            n_heads=self.n_heads,
+            head_dim=self.head_dim,
+            d_state=self.d_state,
+            scan_backend=self.scan_backend,
+            scan_chunk_len=self.scan_chunk_len,
+            scan_debug_checks=self.scan_debug_checks,
         )
-
-        u_t = jnp.swapaxes(u_h, 0, 1)
-        dt_t = jnp.swapaxes(dt_h, 0, 1)
-        b_t = jnp.swapaxes(b_h, 0, 1)
-        c_t = jnp.swapaxes(c_h, 0, 1)
-
-        def step(state, inputs):
-            u_i, dt_i, b_i, c_i = inputs
-            delta_a = jnp.exp(dt_i[..., None] * a[None, :, None, :])
-            delta_b_u = dt_i[..., None] * b_i[:, :, None, :] * u_i[..., None]
-            state = state * delta_a + delta_b_u
-            y_i = jnp.sum(state * c_i[:, :, None, :], axis=-1) + d[None, :, :] * u_i
-            return state, y_i
-
-        _, ys = jax.lax.scan(step, state0, (u_t, dt_t, b_t, c_t))
-        ys = jnp.swapaxes(ys, 0, 1)
-        return ys.reshape(ys.shape[0], ys.shape[1], self.inner)
 
     def __call__(self, x):
         residual = x

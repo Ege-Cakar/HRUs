@@ -82,6 +82,7 @@ MAMBA_HIDDEN = [128, 256]
 MAMBA_D_STATE = [16, 32]
 MAMBA_D_CONV = [4]
 MAMBA_LRS = [3e-4, 1e-3]
+MAMBA_SCAN_BACKENDS = ["reference"]
 
 MIXER_LAYERS = [4, 8]
 MIXER_HIDDEN = [128, 256]
@@ -106,6 +107,7 @@ MIXER_LRS = [1e-3, 3e-3]
 # MAMBA_D_STATE = [16]
 # MAMBA_D_CONV = [4]
 # MAMBA_LRS = [3e-4]
+# MAMBA_SCAN_BACKENDS = ["reference"]
 # MIXER_LAYERS = [4]
 # MIXER_HIDDEN = [128]
 # MIXER_CHANNELS = [128]
@@ -600,12 +602,13 @@ for train_max_distance in TRAIN_MAX_DISTANCES:
             )
         )
 
-    for n_layers, n_hidden, d_state, d_conv, lr in itertools.product(
+    for n_layers, n_hidden, d_state, d_conv, lr, scan_backend in itertools.product(
         MAMBA_LAYERS,
         MAMBA_HIDDEN,
         MAMBA_D_STATE,
         MAMBA_D_CONV,
         MAMBA_LRS,
+        MAMBA_SCAN_BACKENDS,
     ):
         config = MambaConfig(
             n_vocab=N_VOCAB,
@@ -623,6 +626,7 @@ for train_max_distance in TRAIN_MAX_DISTANCES:
             d_conv=d_conv,
             expand=2,
             dt_rank="auto",
+            scan_backend=scan_backend,
         )
 
         train_task = _make_layer_task(
@@ -664,6 +668,7 @@ for train_max_distance in TRAIN_MAX_DISTANCES:
             "d_state": d_state,
             "d_conv": d_conv,
             "lr": lr,
+            "scan_backend": scan_backend,
             "n_vocab": N_VOCAB,
             "n_seq": N_SEQ_AR,
         }
