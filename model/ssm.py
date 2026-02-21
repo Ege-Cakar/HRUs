@@ -10,6 +10,7 @@ from flax import nnx
 
 from model.mup import MuReadout
 
+# TODO: all mamba models are extremely inefficient
 
 def _resolve_dt_rank(dt_rank: int | str, n_hidden: int) -> int:
     if dt_rank == "auto":
@@ -225,7 +226,6 @@ class MambaBlock(nnx.Module):
         return residual + y
 
 
-# TODO: extremely inefficient
 class Mamba2Block(nnx.Module):
     """Minimal Mamba-2-style block with multi-head SSM state updates."""
 
