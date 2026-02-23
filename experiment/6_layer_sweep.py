@@ -96,6 +96,7 @@ def _extract_final_row(row):
         out["n_heads"] = info.get("n_heads", np.nan)
         out["d_state"] = info.get("d_state", np.nan)
         out["d_conv"] = info.get("d_conv", np.nan)
+        out["scan_chunk_len"] = info.get("scan_chunk_len", np.nan)
     elif family == "mixer_completion":
         out["n_channels"] = info.get("n_channels", np.nan)
         out["max_out_len"] = info.get("max_out_len", np.nan)

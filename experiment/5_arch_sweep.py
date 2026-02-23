@@ -86,9 +86,11 @@ def _extract_final_row(row):
         out["pos_encoding"] = info.get("pos_encoding")
         out["n_heads"] = info.get("n_heads", np.nan)
         out["use_swiglu"] = info.get("use_swiglu")
-    elif family == "mamba1":
+    elif family == "mamba2":
+        out["n_heads"] = info.get("n_heads", np.nan)
         out["d_state"] = info.get("d_state", np.nan)
         out["d_conv"] = info.get("d_conv", np.nan)
+        out["scan_chunk_len"] = info.get("scan_chunk_len", np.nan)
     elif family == "mixer_completion":
         out["n_channels"] = info.get("n_channels", np.nan)
         out["max_out_len"] = info.get("max_out_len", np.nan)
@@ -231,4 +233,3 @@ for train_max_size in train_max_values:
     )
 
 print("Saved:", OUT_DIR)
-

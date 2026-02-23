@@ -17,7 +17,7 @@ sys.path.append(str(ROOT))
 
 from common import new_seed, split_cases
 from model.mlp import CompletionMixerConfig
-from model.ssm import MambaConfig
+from model.ssm_bonsai import Mamba2BonsaiConfig
 from model.transformer import TransformerConfig
 from task.prop_ar import ImplyAutoregSizeTask
 from task.prop_gen.util.tokenize_ar import eot_token_id, sep_token_id
@@ -49,12 +49,12 @@ TRANSFORMER_LRS = [1e-4, 3e-4, 1e-3]
 TRANSFORMER_POS = ["rope"]
 TRANSFORMER_SWIGLU = [True]
 
-MAMBA_LAYERS = [4, 8]
-MAMBA_HIDDEN = [128, 256]
-MAMBA_D_STATE = [16, 32]
-MAMBA_D_CONV = [4, 8]
-MAMBA_LRS = [1e-4, 3e-4, 1e-3]
-MAMBA_SCAN_BACKENDS = ["reference"]
+MAMBA2_BONSAI_LAYERS = [4, 8]
+MAMBA2_BONSAI_WIDTH_HEADS = [(128, 4), (256, 8)]
+MAMBA2_BONSAI_D_STATE = [16, 32]
+MAMBA2_BONSAI_D_CONV = [4, 8]
+MAMBA2_BONSAI_SCAN_CHUNK_LEN = [64]
+MAMBA2_BONSAI_LRS = [1e-4, 3e-4, 1e-3]
 
 MIXER_LAYERS = [4, 8]
 MIXER_HIDDEN = [128, 256]
@@ -80,12 +80,12 @@ MIXER_LRS = [3e-4, 1e-3, 3e-3]
 # TRANSFORMER_POS = ["none"]
 # TRANSFORMER_SWIGLU = [False]
 
-# MAMBA_LAYERS = [4]
-# MAMBA_HIDDEN = [128]
-# MAMBA_D_STATE = [16]
-# MAMBA_D_CONV = [4]
-# MAMBA_LRS = [3e-4]
-# MAMBA_SCAN_BACKENDS = ["reference"]
+# MAMBA2_BONSAI_LAYERS = [4]
+# MAMBA2_BONSAI_WIDTH_HEADS = [(128, 4)]
+# MAMBA2_BONSAI_D_STATE = [16]
+# MAMBA2_BONSAI_D_CONV = [4]
+# MAMBA2_BONSAI_SCAN_CHUNK_LEN = [32]
+# MAMBA2_BONSAI_LRS = [3e-4]
 
 # MIXER_LAYERS = [4]
 # MIXER_HIDDEN = [128]
@@ -366,20 +366,21 @@ for train_max_size in TRAIN_MAX_SIZES:
             )
         )
 
-    # Mamba-1 cases.
-    for n_layers, n_hidden, d_state, d_conv, lr, scan_backend in itertools.product(
-        MAMBA_LAYERS,
-        MAMBA_HIDDEN,
-        MAMBA_D_STATE,
-        MAMBA_D_CONV,
-        MAMBA_LRS,
-        MAMBA_SCAN_BACKENDS,
+    # Mamba-2 Bonsai cases.
+    for n_layers, (n_hidden, n_heads), d_state, d_conv, scan_chunk_len, lr in itertools.product(
+        MAMBA2_BONSAI_LAYERS,
+        MAMBA2_BONSAI_WIDTH_HEADS,
+        MAMBA2_BONSAI_D_STATE,
+        MAMBA2_BONSAI_D_CONV,
+        MAMBA2_BONSAI_SCAN_CHUNK_LEN,
+        MAMBA2_BONSAI_LRS,
     ):
-        config = MambaConfig(
+        config = Mamba2BonsaiConfig(
             n_vocab=n_vocab,
             n_seq=n_seq,
             n_layers=n_layers,
             n_hidden=n_hidden,
+            n_heads=n_heads,
             n_out=n_vocab,
             n_pred_tokens=1,
             output_mode="full_sequence",
@@ -390,8 +391,7 @@ for train_max_size in TRAIN_MAX_SIZES:
             d_state=d_state,
             d_conv=d_conv,
             expand=2,
-            dt_rank="auto",
-            scan_backend=scan_backend,
+            scan_chunk_len=scan_chunk_len,
         )
 
         train_task = _make_task(train_sizes, drop_remainder=True, shuffle=True)
@@ -408,7 +408,7 @@ for train_max_size in TRAIN_MAX_SIZES:
         }
 
         info = {
-            "model_family": "mamba1",
+            "model_family": "mamba2",
             "target_format": "next_token_full_sequence",
             "train_max_size": int(train_max_size),
             "train_sizes": train_sizes,
@@ -416,17 +416,18 @@ for train_max_size in TRAIN_MAX_SIZES:
             "ood_sizes": ood_sizes,
             "n_layers": n_layers,
             "n_hidden": n_hidden,
+            "n_heads": n_heads,
             "d_state": d_state,
             "d_conv": d_conv,
+            "scan_chunk_len": scan_chunk_len,
             "lr": lr,
-            "scan_backend": scan_backend,
             "n_vocab": n_vocab,
             "n_seq": n_seq,
         }
 
         all_cases.append(
             Case(
-                f"5_arch_sweep_mamba1_tmax{int(train_max_size):02d}",
+                f"5_arch_sweep_mamba2_tmax{int(train_max_size):02d}",
                 config,
                 train_task=train_task,
                 test_task=test_task,
