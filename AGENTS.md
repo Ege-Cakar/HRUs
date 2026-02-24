@@ -10,7 +10,13 @@ This is a JAX/Flax NNX-based deep learning research codebase for studying neural
 - `experiment/` holds numbered experiment scripts; `experiment/remote/` contains SLURM array jobs and `sb_*.sh` wrappers.
 - `experiment/interactive/` mirrors `experiment/remote/` experiment IDs for local train/debug/inspection scripts that are meant to run on a workstation.
 - `tests/` contains pytest suites (e.g., `tests/test_model.py`, `tests/test_train.py`).
+- `journal/` stores dated research notes and design logs.
 - Propositional data pipeline: `task/prop_gen/generate_imply.py` → ArrayRecord shards → `task/prop.py` (`ImplySizeTask` via grain).
+
+## Journal Conventions
+- Name journal files as `YYYY-MM-DD-<short-kebab-name>.md` (for new entries going forward).
+- Start each entry with a title line: `# YYYY-MM-DD - <Descriptive Name>`.
+- Keep entries decision-oriented: context, key observations, decisions, and next experiments.
 
 ## Build, Test, and Development Commands
 - `source ./.venv/bin/activate` activates the typical local venv (or call `./.venv/bin/python`).

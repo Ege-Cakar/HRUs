@@ -150,6 +150,7 @@ def test_layer_fol_task_online_sampling_autoreg() -> None:
         k_in_max=2,
         k_out_max=2,
         initial_ant_max=3,
+        online_prefetch_backend="sync",
     )
 
     xs, ys = next(task)
@@ -176,6 +177,7 @@ def test_layer_fol_task_online_autoreg_global_max_has_stable_length() -> None:
         k_out_max=2,
         initial_ant_max=3,
         fixed_length_mode="global_max",
+        online_prefetch_backend="sync",
     )
 
     widths = set()
@@ -202,6 +204,7 @@ def test_layer_fol_task_online_sampling_all_at_once() -> None:
         k_out_max=2,
         initial_ant_max=3,
         prediction_objective="all_at_once",
+        online_prefetch_backend="sync",
     )
 
     xs, ys = next(task)
@@ -218,3 +221,100 @@ def test_layer_fol_task_rejects_unknown_prediction_objective() -> None:
 def test_layer_fol_task_rejects_unknown_fixed_length_mode() -> None:
     with pytest.raises(ValueError, match="fixed_length_mode"):
         FOLLayerTask(mode="online", fixed_length_mode="unknown")
+
+
+def test_layer_fol_task_online_prefetch_enabled_by_default() -> None:
+    task = FOLLayerTask(
+        distance_range=(1, 2),
+        batch_size=4,
+        mode="online",
+        seed=14,
+        n_layers=6,
+        predicates_per_layer=4,
+        rules_per_transition=8,
+        arity_max=3,
+        vars_per_rule_max=4,
+        constants=("a", "b", "c"),
+        k_in_max=2,
+        k_out_max=2,
+        initial_ant_max=3,
+        online_prefetch_workers=1,
+    )
+    try:
+        assert task.online_prefetch_enabled
+        assert task.online_prefetch_backend_resolved in {"process", "thread"}
+        assert task.online_prefetch_workers_resolved == 1
+        assert task.online_prefetch_buffer_size_resolved >= task.batch_size
+        xs, ys = next(task)
+        assert xs.shape[0] == 4
+        assert ys.shape[0] == 4
+    finally:
+        task.close()
+
+
+def test_layer_fol_task_online_prefetch_thread_context_manager_closes() -> None:
+    with FOLLayerTask(
+        distance_range=(1, 2),
+        batch_size=4,
+        mode="online",
+        seed=15,
+        n_layers=6,
+        predicates_per_layer=4,
+        rules_per_transition=8,
+        arity_max=3,
+        vars_per_rule_max=4,
+        constants=("a", "b", "c"),
+        k_in_max=2,
+        k_out_max=2,
+        initial_ant_max=3,
+        online_prefetch_backend="thread",
+        online_prefetch_workers=1,
+        online_prefetch_buffer_size=8,
+    ) as task:
+        assert task.online_prefetch_enabled
+        assert task.online_prefetch_backend_resolved == "thread"
+        next(task)
+    assert not task.online_prefetch_enabled
+    assert task._online_prefetch_buffer is None
+
+
+def test_layer_fol_task_online_prefetch_rejects_invalid_config() -> None:
+    with pytest.raises(ValueError, match="online_prefetch_backend"):
+        FOLLayerTask(mode="online", online_prefetch_backend="bad-backend")
+    with pytest.raises(ValueError, match="online_prefetch_workers"):
+        FOLLayerTask(mode="online", online_prefetch_workers=0)
+    with pytest.raises(ValueError, match="online_prefetch_buffer_size"):
+        FOLLayerTask(mode="online", online_prefetch_buffer_size=0)
+
+
+def test_layer_fol_task_online_prefetch_process_fallback(monkeypatch) -> None:
+    def _raise_process(*args, **kwargs):
+        raise OSError("process pool unavailable")
+
+    monkeypatch.setattr("task.layer_fol.ProcessPoolExecutor", _raise_process)
+    task = FOLLayerTask(
+        distance_range=(1, 2),
+        batch_size=2,
+        mode="online",
+        seed=16,
+        n_layers=6,
+        predicates_per_layer=4,
+        rules_per_transition=8,
+        arity_max=3,
+        vars_per_rule_max=4,
+        constants=("a", "b", "c"),
+        k_in_max=2,
+        k_out_max=2,
+        initial_ant_max=3,
+        online_prefetch_backend="process",
+        online_prefetch_workers=1,
+    )
+    try:
+        assert task.online_prefetch_backend_resolved in {"thread", "sync"}
+        if task.online_prefetch_backend_resolved == "thread":
+            assert task.online_prefetch_enabled
+            xs, ys = next(task)
+            assert xs.shape[0] == 2
+            assert ys.shape[0] == 2
+    finally:
+        task.close()

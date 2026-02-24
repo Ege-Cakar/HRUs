@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import partial
 import json
+import os
 from pathlib import Path
 import pickle
+import threading
 from typing import Any, Callable, Iterable, Protocol
 
 import grain
@@ -15,6 +18,7 @@ from grain._src.python import data_sources, samplers
 import numpy as np
 
 from task.layer_gen.util import tokenize_layer
+from task.layer_gen.util import online_prefetch as online_prefetch_util
 from task.layer_gen.util.rule_bank import (
     LayerRule,
     RuleBank,
@@ -23,6 +27,85 @@ from task.layer_gen.util.rule_bank import (
     sample_problem,
 )
 from task.prop_gen.util.elem import Atom, Sequent
+
+
+_LAYER_ONLINE_WORKER_LOCAL = threading.local()
+
+
+def _init_layer_online_worker(
+    seed_base: int,
+    bank_payload: dict,
+    distances: tuple[int, ...],
+    initial_ant_max: int,
+    sample_max_attempts: int,
+) -> None:
+    bank = RuleBank.from_dict(bank_payload)
+    tokenizer = tokenize_layer.build_tokenizer_from_rule_bank(bank)
+    worker_seed = (
+        int(seed_base)
+        + int(os.getpid()) * 1_000_003
+        + int(threading.get_ident() % 1_000_003)
+    )
+    _LAYER_ONLINE_WORKER_LOCAL.state = {
+        "bank": bank,
+        "tokenizer": tokenizer,
+        "distances": tuple(int(distance) for distance in distances),
+        "initial_ant_max": int(initial_ant_max),
+        "sample_max_attempts": int(sample_max_attempts),
+        "rng": np.random.default_rng(worker_seed),
+    }
+
+
+def _sample_layer_online_worker_record() -> dict:
+    state = getattr(_LAYER_ONLINE_WORKER_LOCAL, "state", None)
+    if state is None:
+        raise RuntimeError("Layer online worker state was not initialized.")
+
+    rng: np.random.Generator = state["rng"]
+    bank: RuleBank = state["bank"]
+    tokenizer = state["tokenizer"]
+
+    distance = int(rng.choice(state["distances"]))
+    sampled = None
+    last_err = None
+    for _ in range(3):
+        try:
+            sampled = sample_problem(
+                bank=bank,
+                distance=distance,
+                initial_ant_max=state["initial_ant_max"],
+                rng=rng,
+                max_attempts=state["sample_max_attempts"],
+            )
+            break
+        except RuntimeError as err:
+            last_err = err
+
+    if sampled is None:
+        raise RuntimeError(
+            f"Failed to sample online LayerTask record for distance={distance} "
+            f"after 3 retries with max_attempts={state['sample_max_attempts']}."
+        ) from last_err
+
+    step_idx = int(rng.integers(0, len(sampled.step_rules)))
+    src_layer = sampled.step_layers[step_idx]
+    ants = sampled.step_ants[step_idx]
+    rule = sampled.step_rules[step_idx]
+    sequent = Sequent([Atom(atom) for atom in ants], Atom(sampled.goal_atom))
+    prompt, completion = tokenizer.tokenize_example(sequent, rule.statement_text)
+    return {
+        "distance": int(distance),
+        "src_layer": int(src_layer),
+        "prompt": np.asarray(prompt, dtype=np.int32),
+        "completions": [np.asarray(completion, dtype=np.int32)],
+    }
+
+
+def _sample_layer_online_worker_records(n_records: int) -> list[dict]:
+    n_records = int(n_records)
+    if n_records < 1:
+        raise ValueError(f"n_records must be >= 1, got {n_records}")
+    return [_sample_layer_online_worker_record() for _ in range(n_records)]
 
 
 class LayerTask:
@@ -52,6 +135,10 @@ class LayerTask:
         k_out_max=3,
         initial_ant_max=3,
         sample_max_attempts=4096,
+        online_prefetch=True,
+        online_prefetch_backend=online_prefetch_util.DEFAULT_PREFETCH_BACKEND,
+        online_prefetch_workers=None,
+        online_prefetch_buffer_size=None,
     ) -> None:
         self.mode = str(mode)
         if self.mode not in {"offline", "online"}:
@@ -99,6 +186,16 @@ class LayerTask:
             raise ValueError(
                 f"sample_max_attempts must be >= 1, got {self.sample_max_attempts}"
             )
+        self._online_prefetch_requested = bool(online_prefetch)
+        self._online_prefetch_backend_requested = str(online_prefetch_backend)
+        self._online_prefetch_workers_requested = (
+            None if online_prefetch_workers is None else int(online_prefetch_workers)
+        )
+        self._online_prefetch_buffer_size_requested = (
+            None
+            if online_prefetch_buffer_size is None
+            else int(online_prefetch_buffer_size)
+        )
         self._rng = np.random.default_rng(self.seed)
 
         self._epoch = 0
@@ -107,6 +204,14 @@ class LayerTask:
         self._iterator = None
         self._batch_fn = None
         self._global_autoreg_seq_len: int | None = None
+        self._online_executor = None
+        self._online_prefetch_buffer: online_prefetch_util.AsyncRecordPrefetchBuffer | None = (
+            None
+        )
+        self._online_prefetch_enabled = False
+        self._online_prefetch_backend_resolved = "sync"
+        self._online_prefetch_workers_resolved = 1
+        self._online_prefetch_buffer_size_resolved = max(1, self.batch_size)
 
         self.ds_path = Path(ds_path) if ds_path is not None else None
 
@@ -144,6 +249,7 @@ class LayerTask:
         else:
             self.stats = {}
             self._batch_fn = self._make_batch_fn()
+            self._init_online_prefetch()
 
         if (
             self.prediction_objective == "autoregressive"
@@ -162,12 +268,28 @@ class LayerTask:
                 batch = next(self._iterator)
             return self._pad_autoreg_batch_to_global_len(batch)
 
-        records = [self._sample_online_record() for _ in range(self.batch_size)]
+        if self._online_prefetch_buffer is None:
+            records = [self._sample_online_record() for _ in range(self.batch_size)]
+        else:
+            records = self._online_prefetch_buffer.take(self.batch_size)
         batch = self._batch_fn(records)
         return self._pad_autoreg_batch_to_global_len(batch)
 
     def __iter__(self):
         return self
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, exc_tb):
+        self.close()
+        return False
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
 
     @staticmethod
     def _normalize_distances(distance_range) -> list[int]:
@@ -265,6 +387,110 @@ class LayerTask:
             worker_count=self.worker_count,
             shard_options=shard_opts,
         )
+
+    def _init_online_prefetch(self) -> None:
+        enabled, backend, workers, buffer_size = online_prefetch_util.resolve_online_prefetch_config(
+            enable=self._online_prefetch_requested,
+            backend=self._online_prefetch_backend_requested,
+            workers=self._online_prefetch_workers_requested,
+            buffer_size=self._online_prefetch_buffer_size_requested,
+            batch_size=self.batch_size,
+        )
+        self._online_prefetch_workers_resolved = int(workers)
+        self._online_prefetch_buffer_size_resolved = int(buffer_size)
+        self._online_prefetch_backend_resolved = str(backend)
+        self._online_prefetch_enabled = bool(enabled)
+
+        if not enabled:
+            return
+        if self._rule_bank is None or self._tokenizer is None:
+            raise RuntimeError("Online prefetch requires rule bank and tokenizer.")
+
+        initargs = (
+            int(self.seed),
+            self._rule_bank.to_dict(),
+            tuple(self._distances),
+            int(self.initial_ant_max),
+            int(self.sample_max_attempts),
+        )
+
+        def _make_process_executor():
+            return ProcessPoolExecutor(
+                max_workers=workers,
+                initializer=_init_layer_online_worker,
+                initargs=initargs,
+            )
+
+        def _make_thread_executor():
+            return ThreadPoolExecutor(
+                max_workers=workers,
+                initializer=_init_layer_online_worker,
+                initargs=initargs,
+            )
+
+        resolved_backend, executor = online_prefetch_util.create_executor_with_fallback(
+            backend=backend,
+            make_process_executor=_make_process_executor,
+            make_thread_executor=_make_thread_executor,
+        )
+        self._online_prefetch_backend_resolved = str(resolved_backend)
+        if executor is None:
+            self._online_prefetch_enabled = False
+            return
+
+        records_per_job = 1
+        if resolved_backend == "process":
+            records_per_job = max(1, self.batch_size // max(1, workers))
+
+        shutdown_fn = lambda: executor.shutdown(wait=True, cancel_futures=True)
+        try:
+            self._online_prefetch_buffer = online_prefetch_util.AsyncRecordPrefetchBuffer(
+                submit_fn=lambda: executor.submit(
+                    _sample_layer_online_worker_records,
+                    records_per_job,
+                ),
+                buffer_size=buffer_size,
+                on_close=shutdown_fn,
+            )
+        except Exception:
+            shutdown_fn()
+            self._online_prefetch_enabled = False
+            self._online_prefetch_backend_resolved = "sync"
+            self._online_prefetch_buffer = None
+            self._online_executor = None
+            return
+
+        self._online_executor = executor
+        self._online_prefetch_enabled = True
+
+    @property
+    def online_prefetch_enabled(self) -> bool:
+        return bool(self._online_prefetch_enabled)
+
+    @property
+    def online_prefetch_backend_resolved(self) -> str:
+        return str(self._online_prefetch_backend_resolved)
+
+    @property
+    def online_prefetch_workers_resolved(self) -> int:
+        return int(self._online_prefetch_workers_resolved)
+
+    @property
+    def online_prefetch_buffer_size_resolved(self) -> int:
+        return int(self._online_prefetch_buffer_size_resolved)
+
+    def close(self) -> None:
+        if self._online_prefetch_buffer is not None:
+            self._online_prefetch_buffer.close()
+            self._online_prefetch_buffer = None
+            self._online_executor = None
+            self._online_prefetch_enabled = False
+            return
+
+        if self._online_executor is not None:
+            self._online_executor.shutdown(wait=True, cancel_futures=True)
+            self._online_executor = None
+            self._online_prefetch_enabled = False
 
     def _sample_online_record(self) -> dict:
         if self._rule_bank is None:

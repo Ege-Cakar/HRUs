@@ -37,11 +37,11 @@ def preview_batch(task: FOLLayerTask, n_rows: int = 3) -> None:
 
 # <codecell>
 # Sample a random FOL rule bank + one multi-step problem.
-rng = np.random.default_rng(0)
+rng = np.random.default_rng()
 rule_bank = build_random_fol_rule_bank(
-    n_layers=12,
-    predicates_per_layer=6,
-    rules_per_transition=16,
+    n_layers=50,
+    predicates_per_layer=8,
+    rules_per_transition=32,
     arity_max=3,
     vars_per_rule_max=4,
     constants=("alice", "bob", "carol", "dave"),
@@ -156,49 +156,106 @@ else:
 
 
 # <codecell>
-# Quick throughput comparison (optional).
-N_BATCHES = 1000
-results = {}
+# Quick throughput comparison (optional): online sync/thread/process.
+N_WARMUP = 50
+N_BATCHES = 500
 
-for mode in ("online", "offline"):
-    kwargs = {
-        "batch_size": 8,
-        "prediction_objective": "autoregressive",
-        "distance_range": (1, 3),
-    }
-    if mode == "online":
-        task_bench = FOLLayerTask(
-            mode="online",
-            seed=7,
-            n_layers=12,
-            predicates_per_layer=6,
-            rules_per_transition=16,
-            arity_max=3,
-            vars_per_rule_max=4,
-            constants=("alice", "bob", "carol", "dave"),
-            k_in_max=3,
-            k_out_max=3,
-            initial_ant_max=3,
-            **kwargs,
+base_kwargs = {
+    "batch_size": 64,
+    "prediction_objective": "autoregressive",
+    "distance_range": (1, 3),
+    "seed": 7,
+    "n_layers": 12,
+    "predicates_per_layer": 6,
+    "rules_per_transition": 16,
+    "arity_max": 3,
+    "vars_per_rule_max": 4,
+    "constants": ("alice", "bob", "carol", "dave"),
+    "k_in_max": 3,
+    "k_out_max": 3,
+    "initial_ant_max": 3,
+}
+
+rows = []
+for backend in ("sync", "thread", "process"):
+    task_bench = FOLLayerTask(
+        mode="online",
+        online_prefetch_backend=backend,
+        online_prefetch_workers=8,
+        online_prefetch_buffer_size=256,
+        **base_kwargs,
+    )
+    try:
+        for _ in range(N_WARMUP):
+            next(task_bench)
+        t0 = time.perf_counter()
+        for _ in range(N_BATCHES):
+            next(task_bench)
+        elapsed = time.perf_counter() - t0
+    finally:
+        task_bench.close()
+
+    bps = N_BATCHES / elapsed
+    eps = N_BATCHES * base_kwargs["batch_size"] / elapsed
+    rows.append(
+        {
+            "requested": backend,
+            "resolved": task_bench.online_prefetch_backend_resolved,
+            "workers": task_bench.online_prefetch_workers_resolved,
+            "buffer": task_bench.online_prefetch_buffer_size_resolved,
+            "sec": elapsed,
+            "bps": bps,
+            "eps": eps,
+        }
+    )
+
+print(
+    f"{'requested':>10s} {'resolved':>10s} {'workers':>7s} "
+    f"{'buffer':>7s} {'sec':>8s} {'batches/s':>10s} {'examples/s':>11s}"
+)
+for row in rows:
+    print(
+        f"{row['requested']:>10s} {row['resolved']:>10s} {row['workers']:>7d} "
+        f"{row['buffer']:>7d} {row['sec']:>8.2f} {row['bps']:>10.1f} {row['eps']:>11.1f}"
+    )
+
+sync_row = next((row for row in rows if row["requested"] == "sync"), None)
+if sync_row is not None:
+    for row in rows:
+        if row["requested"] == "sync":
+            continue
+        print(
+            f"{row['requested']:>10s} speedup vs sync: "
+            f"{row['eps'] / sync_row['eps']:.2f}x"
         )
-    elif DS_PATH.exists():
-        task_bench = FOLLayerTask(
-            mode="offline",
-            ds_path=DS_PATH,
-            shuffle=False,
-            worker_count=0,
-            **kwargs,
-        )
-    else:
-        print(f"skip {mode} benchmark (missing dataset: {DS_PATH})")
-        continue
 
-    t0 = time.perf_counter()
-    for _ in range(N_BATCHES):
-        next(task_bench)
-    elapsed = time.perf_counter() - t0
-    results[mode] = elapsed
-    print(f"{mode:>8s}: {elapsed:.2f}s ({N_BATCHES / elapsed:.0f} batches/s)")
+# Optional offline comparison against sync online.
+if DS_PATH.exists():
+    offline_task = FOLLayerTask(
+        mode="offline",
+        ds_path=DS_PATH,
+        shuffle=False,
+        worker_count=0,
+        batch_size=base_kwargs["batch_size"],
+        prediction_objective=base_kwargs["prediction_objective"],
+        distance_range=base_kwargs["distance_range"],
+    )
+    try:
+        for _ in range(N_WARMUP):
+            next(offline_task)
+        t0 = time.perf_counter()
+        for _ in range(N_BATCHES):
+            next(offline_task)
+        offline_elapsed = time.perf_counter() - t0
+    finally:
+        offline_task.close()
 
-if "online" in results and "offline" in results:
-    print(f"\nonline/offline ratio: {results['online'] / results['offline']:.2f}x")
+    offline_eps = N_BATCHES * base_kwargs["batch_size"] / offline_elapsed
+    print(
+        f"{'offline':>10s} {'-':>10s} {'-':>7s} {'-':>7s} "
+        f"{offline_elapsed:>8.2f} {N_BATCHES / offline_elapsed:>10.1f} {offline_eps:>11.1f}"
+    )
+else:
+    print(f"skip offline benchmark (missing dataset: {DS_PATH})")
+
+# %%

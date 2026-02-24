@@ -40,8 +40,8 @@ task.rule_bank.transitions[1]
 import time
 
 DS_PATH = "layer_gen/data/toy_layer"
-BATCH_SIZE = 8
-N_BATCHES = 10_000
+BATCH_SIZE = 64
+N_BATCHES = 500
 
 results = {}
 for mode in ("online", "offline"):
