@@ -16,9 +16,14 @@ from .fol_rule_bank import (
 )
 
 pad_idx = 0
-TOKENIZER_VERSION = "layer_fol_v1_compact"
+TOKENIZER_VERSION = "layer_fol_v2_unified"
+
+PAD_TOKEN = "<PAD>"
+SEP_TOKEN = "<SEP>"
+EOT_TOKEN = "<EOT>"
 
 _LOGIC_TOKENS = ("⊢", "∧", "→", "(", ")", ",")
+_RESERVED_TOKENS = (PAD_TOKEN, SEP_TOKEN, EOT_TOKEN)
 _IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
@@ -26,48 +31,55 @@ def _format_conjunction(atoms: tuple[FOLAtom, ...]) -> str:
     return " ∧ ".join(atom.text for atom in atoms)
 
 
-def _build_logic_maps() -> tuple[dict[str, int], dict[int, str]]:
-    logic_to_id = {token: idx + 1 for idx, token in enumerate(_LOGIC_TOKENS)}
-    id_to_logic = {idx: token for token, idx in logic_to_id.items()}
-    return logic_to_id, id_to_logic
+def _build_vocab(
+    identifiers: Iterable[str],
+) -> tuple[dict[str, int], dict[int, str], int, int]:
+    unique_sorted = sorted(set(str(tok) for tok in identifiers))
+    for token in unique_sorted:
+        if token in _RESERVED_TOKENS:
+            raise ValueError(f"Identifier token is reserved for special use: {token!r}")
+        if _IDENTIFIER_RE.fullmatch(token) is None:
+            raise ValueError(f"Invalid identifier token: {token!r}")
+
+    token_to_id: dict[str, int] = {PAD_TOKEN: pad_idx}
+    next_id = pad_idx + 1
+
+    for token in _LOGIC_TOKENS:
+        token_to_id[token] = next_id
+        next_id += 1
+
+    sep_token_id = next_id
+    token_to_id[SEP_TOKEN] = sep_token_id
+    next_id += 1
+
+    eot_token_id = next_id
+    token_to_id[EOT_TOKEN] = eot_token_id
+    next_id += 1
+
+    for token in unique_sorted:
+        token_to_id[token] = next_id
+        next_id += 1
+
+    id_to_token = {idx: token for token, idx in token_to_id.items()}
+    return token_to_id, id_to_token, sep_token_id, eot_token_id
 
 
 @dataclass(frozen=True)
 class FOLLayerTokenizer:
-    logic_char_to_id: dict[str, int]
-    id_to_logic_char: dict[int, str]
-    identifier_to_token: dict[str, int]
-    token_to_identifier: dict[int, str]
+    token_to_id: dict[str, int]
+    id_to_token: dict[int, str]
     sep_token_id: int
     eot_token_id: int
     version: str = TOKENIZER_VERSION
 
     @classmethod
     def from_identifiers(cls, identifiers: Iterable[str]) -> "FOLLayerTokenizer":
-        logic_to_id, id_to_logic = _build_logic_maps()
-        sep = len(logic_to_id) + 1
-        eot = sep + 1
-
-        unique_sorted = sorted(set(str(tok) for tok in identifiers))
-        for token in unique_sorted:
-            if _IDENTIFIER_RE.fullmatch(token) is None:
-                raise ValueError(f"Invalid identifier token: {token!r}")
-
-        identifier_to_token: dict[str, int] = {}
-        token_to_identifier: dict[int, str] = {}
-        next_id = eot + 1
-        for token in unique_sorted:
-            identifier_to_token[token] = next_id
-            token_to_identifier[next_id] = token
-            next_id += 1
-
+        token_to_id, id_to_token, sep_token_id, eot_token_id = _build_vocab(identifiers)
         return cls(
-            logic_char_to_id=logic_to_id,
-            id_to_logic_char=id_to_logic,
-            identifier_to_token=identifier_to_token,
-            token_to_identifier=token_to_identifier,
-            sep_token_id=sep,
-            eot_token_id=eot,
+            token_to_id=token_to_id,
+            id_to_token=id_to_token,
+            sep_token_id=sep_token_id,
+            eot_token_id=eot_token_id,
         )
 
     @classmethod
@@ -82,84 +94,93 @@ class FOLLayerTokenizer:
         version = str(payload.get("version", ""))
         if version != TOKENIZER_VERSION:
             raise ValueError(
-                f"Unsupported tokenizer version {version!r}; expected {TOKENIZER_VERSION!r}."
+                f"Unsupported tokenizer version {version!r}; expected {TOKENIZER_VERSION!r}. "
+                "Strict migration enabled: regenerate FOL datasets/metadata."
             )
 
-        logic_tokens = tuple(payload.get("logic_tokens", _LOGIC_TOKENS))
-        if logic_tokens != _LOGIC_TOKENS:
-            raise ValueError(f"Unsupported logic token set: {logic_tokens!r}")
+        token_to_id_raw = payload.get("token_to_id")
+        if not isinstance(token_to_id_raw, dict) or not token_to_id_raw:
+            raise ValueError("Unified tokenizer metadata must include non-empty 'token_to_id'.")
 
-        logic_to_id, id_to_logic = _build_logic_maps()
-        sep = int(payload.get("sep_token_id", len(logic_to_id) + 1))
-        eot = int(payload.get("eot_token_id", sep + 1))
-        if sep != len(logic_to_id) + 1 or eot != sep + 1:
-            raise ValueError(
-                "Expected contiguous special ids with SEP immediately after logic tokens."
-            )
+        token_to_id = {str(token): int(tok_id) for token, tok_id in token_to_id_raw.items()}
+        id_to_token = {tok_id: token for token, tok_id in token_to_id.items()}
+        if len(id_to_token) != len(token_to_id):
+            raise ValueError("token_to_id must be one-to-one.")
 
-        identifier_to_id_raw = payload.get("identifier_to_id", {})
-        identifier_to_token = {
-            str(identifier): int(tok)
-            for identifier, tok in identifier_to_id_raw.items()
-        }
+        sorted_ids = sorted(id_to_token)
+        if sorted_ids != list(range(len(sorted_ids))):
+            raise ValueError("Tokenizer token ids must be contiguous and start at 0.")
 
-        next_expected = eot + 1
-        for identifier in sorted(identifier_to_token):
-            got = identifier_to_token[identifier]
-            if got != next_expected:
+        if token_to_id.get(PAD_TOKEN) != pad_idx:
+            raise ValueError(f"Expected {PAD_TOKEN} token id to be {pad_idx}.")
+
+        for idx, token in enumerate(_LOGIC_TOKENS, start=1):
+            got = token_to_id.get(token)
+            if got != idx:
                 raise ValueError(
-                    f"Identifier id mapping must be contiguous from {eot + 1}, got {got} "
-                    f"for {identifier}."
+                    f"Expected logic token {token!r} to have id {idx}, got {got}."
                 )
-            next_expected += 1
 
-        token_to_identifier = {tok: identifier for identifier, tok in identifier_to_token.items()}
-        vocab_size = int(payload.get("vocab_size", next_expected))
-        if vocab_size != next_expected:
+        expected_sep = len(_LOGIC_TOKENS) + 1
+        expected_eot = expected_sep + 1
+        if token_to_id.get(SEP_TOKEN) != expected_sep:
             raise ValueError(
-                f"Inconsistent vocab_size {vocab_size}; expected {next_expected}."
+                f"Expected {SEP_TOKEN} token id {expected_sep}, got {token_to_id.get(SEP_TOKEN)}."
+            )
+        if token_to_id.get(EOT_TOKEN) != expected_eot:
+            raise ValueError(
+                f"Expected {EOT_TOKEN} token id {expected_eot}, got {token_to_id.get(EOT_TOKEN)}."
+            )
+
+        for tok_id in range(expected_eot + 1, len(sorted_ids)):
+            token = id_to_token[tok_id]
+            if token in _RESERVED_TOKENS or token in _LOGIC_TOKENS:
+                raise ValueError(f"Unexpected reserved token in identifier range: {token!r}")
+            if _IDENTIFIER_RE.fullmatch(token) is None:
+                raise ValueError(f"Invalid identifier token in metadata: {token!r}")
+
+        vocab_size = int(payload.get("vocab_size", len(sorted_ids)))
+        if vocab_size != len(sorted_ids):
+            raise ValueError(
+                f"Inconsistent vocab_size {vocab_size}; expected {len(sorted_ids)}."
             )
 
         return cls(
-            logic_char_to_id=logic_to_id,
-            id_to_logic_char=id_to_logic,
-            identifier_to_token=identifier_to_token,
-            token_to_identifier=token_to_identifier,
-            sep_token_id=sep,
-            eot_token_id=eot,
+            token_to_id=token_to_id,
+            id_to_token=id_to_token,
+            sep_token_id=expected_sep,
+            eot_token_id=expected_eot,
             version=version,
         )
 
     @property
     def vocab_size(self) -> int:
-        return self.eot_token_id + 1 + len(self.identifier_to_token)
+        return len(self.token_to_id)
 
     def to_dict(self) -> dict:
+        token_to_id = {
+            self.id_to_token[idx]: int(idx)
+            for idx in range(self.vocab_size)
+        }
         return {
             "version": self.version,
             "pad_idx": pad_idx,
             "logic_tokens": list(_LOGIC_TOKENS),
+            "special_tokens": [PAD_TOKEN, SEP_TOKEN, EOT_TOKEN],
             "sep_token_id": int(self.sep_token_id),
             "eot_token_id": int(self.eot_token_id),
-            "identifier_to_id": {
-                token: int(tok)
-                for token, tok in sorted(self.identifier_to_token.items())
-            },
+            "token_to_id": token_to_id,
             "vocab_size": int(self.vocab_size),
         }
 
     def char_to_id(self, token: str) -> int:
-        if token in self.logic_char_to_id:
-            return self.logic_char_to_id[token]
-        if token in self.identifier_to_token:
-            return self.identifier_to_token[token]
+        if token in self.token_to_id:
+            return self.token_to_id[token]
         raise ValueError(f"Unknown token symbol: {token}")
 
     def id_to_char(self, token_id: int) -> str:
-        if token_id in self.id_to_logic_char:
-            return self.id_to_logic_char[token_id]
-        if token_id in self.token_to_identifier:
-            return self.token_to_identifier[token_id]
+        if token_id in self.id_to_token:
+            return self.id_to_token[token_id]
         raise ValueError(f"Unknown token id: {token_id}")
 
     def _tokenize_text(self, text: str) -> list[int]:
@@ -171,8 +192,8 @@ class FOLLayerTokenizer:
                 idx += 1
                 continue
 
-            if ch in self.logic_char_to_id:
-                tokens.append(self.logic_char_to_id[ch])
+            if ch in _LOGIC_TOKENS:
+                tokens.append(self.char_to_id(ch))
                 idx += 1
                 continue
 
@@ -245,18 +266,14 @@ class FOLLayerTokenizer:
         for row in rows:
             parts: list[str] = []
             for token in row:
-                tok = int(token)
-                if skip_pad and tok == pad_idx:
+                sym = self.id_to_char(int(token))
+                if skip_pad and sym == PAD_TOKEN:
                     continue
-                if tok == self.sep_token_id:
+                if sym in _RESERVED_TOKENS:
                     if include_special_tokens:
-                        parts.append("<SEP>")
+                        parts.append(sym)
                     continue
-                if tok == self.eot_token_id:
-                    if include_special_tokens:
-                        parts.append("<EOT>")
-                    continue
-                parts.append(self.id_to_char(tok))
+                parts.append(sym)
             decoded.append("".join(parts))
         return decoded
 

@@ -58,3 +58,32 @@ def test_decode_batch_ids_from_task_like_arrays() -> None:
     decoded = tokenizer.decode_batch_ids(batch)
     assert decoded[0].endswith("<SEP>")
     assert decoded[1].endswith("<EOT>")
+
+
+def test_special_tokens_are_in_unified_maps() -> None:
+    tokenizer = tok.build_tokenizer_from_identifiers(["r0_1", "a"])
+    assert tokenizer.char_to_id("<PAD>") == 0
+    assert tokenizer.id_to_char(0) == "<PAD>"
+    assert tokenizer.char_to_id("<SEP>") == tokenizer.sep_token_id
+    assert tokenizer.id_to_char(tokenizer.sep_token_id) == "<SEP>"
+    assert tokenizer.char_to_id("<EOT>") == tokenizer.eot_token_id
+    assert tokenizer.id_to_char(tokenizer.eot_token_id) == "<EOT>"
+
+
+def test_from_dict_rejects_v1_payload() -> None:
+    payload_v1 = {
+        "version": "layer_fol_v1_compact",
+        "pad_idx": 0,
+        "logic_tokens": ["⊢", "∧", "→", "(", ")", ","],
+        "sep_token_id": 7,
+        "eot_token_id": 8,
+        "identifier_to_id": {"a": 9, "r0_1": 10},
+        "vocab_size": 11,
+    }
+
+    try:
+        tok.FOLLayerTokenizer.from_dict(payload_v1)
+    except ValueError as exc:
+        assert "Strict migration enabled" in str(exc)
+    else:
+        raise AssertionError("Expected ValueError for v1 tokenizer payload")
