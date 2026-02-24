@@ -3,6 +3,7 @@ __pycache__/
 *.svg
 *.pkl
 *.json
+*.jsonl
 fig/
 wandb/
 *.ipynb_checkpoints/

@@ -8,6 +8,7 @@ This is a JAX/Flax NNX-based deep learning research codebase for studying neural
 - `task/` contains iterator-style data generators (`__next__()` returns `(xs, ys)`; `batch_size` required).
 - `train.py` is the core training loop (`train(config, train_iter, ...)`), `common.py` has shared helpers like `collate_dfs`.
 - `experiment/` holds numbered experiment scripts; `experiment/remote/` contains SLURM array jobs and `sb_*.sh` wrappers.
+- `experiment/interactive/` mirrors `experiment/remote/` experiment IDs for local train/debug/inspection scripts that are meant to run on a workstation.
 - `tests/` contains pytest suites (e.g., `tests/test_model.py`, `tests/test_train.py`).
 - Propositional data pipeline: `task/prop_gen/generate_imply.py` → ArrayRecord shards → `task/prop.py` (`ImplySizeTask` via grain).
 
@@ -39,7 +40,11 @@ than large, monolithic functions. Prefer code reuse and abstraction rather than 
 
 ## Experiment Workflow (New Runs)
 - Place sweep logic in `experiment/remote/<id_name>/run.py` and Slurm submission in `experiment/remote/<id_name>/sb_*.sh`.
+- Place local interactive/debug scripts in `experiment/interactive/<id_name>/` (mirroring the corresponding `remote` ID when applicable).
+- For interactive scripts, prefer a single editable in-file config object over CLI parsing, so local notebook-style iteration only requires modifying the script.
+- For interactive scripts, keep execution at top level (avoid a `main()` wrapper) to simplify stepwise runs in codecell/Jupyter-like workflows.
 - Put plotting/analysis in `experiment/<id_name>.py`, using `common.collate_dfs` to load `remote/<id_name>` results.
 - Always include a clearly delineated, commented-out **TEST CONFIGS** section in `run.py` with minimal configs for quick local testing before cluster submission (e.g., small sweep lists, short `train_iters`, `RUN_SPLIT=1`).
 - For full runs, keep `RUN_SPLIT` aligned with the Slurm `--array` size.
 - Use a placeholder dataset path in `run.py` when data is not yet available, and update it before cluster runs.
+- Save outputs from local interactive scripts under `experiment/interactive/<id_name>/set/` by default.
