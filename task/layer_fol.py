@@ -421,6 +421,12 @@ class FOLLayerTask:
         self._online_prefetch_backend_resolved = str(backend)
         self._online_prefetch_enabled = bool(enabled)
 
+        print('info: FOLLayerTask online prefetch config resolved to: ')
+        print(f'  enabled: {enabled}')
+        print(f'  backend: {backend}')
+        print(f'  workers: {workers}')
+        print(f'  buffer_size: {buffer_size}')
+
         if not enabled:
             return
         if self._rule_bank is None or self._tokenizer is None:

@@ -42,7 +42,7 @@ This is a JAX/Flax NNX-based deep learning research codebase for studying neural
 - Prefer writing code using small, interpretable, modular helper functions rather
 than large, monolithic functions. Prefer code reuse and abstraction rather than copying, where possible.
 - NNX modules are stateful; use `nnx.state(model)` when you need to serialize state.
-- The `# <codecell>` tags and `# %%` tags are used to dilineate code blocks that can be executed in the style of Jupyter notebook cells. Keep these intact where possible, and add them after each plot is made in experiment plotting scripts.
+- The `# <codecell>` tags and `# %%` tags are used to dilineate code blocks that can be executed in the style of Jupyter notebook cells. Keep these intact where possible. If you're making a script that is intended to be run interactively like a Jupyter notebook, please add these cells where you would normally dilineate code blocks.
 
 ## Experiment Workflow (New Runs)
 - Place sweep logic in `experiment/remote/<id_name>/run.py` and Slurm submission in `experiment/remote/<id_name>/sb_*.sh`.
