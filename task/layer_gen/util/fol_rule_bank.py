@@ -568,6 +568,7 @@ def _unify_template_atom(
     ground: FOLAtom,
     subst: dict[str, str],
 ) -> dict[str, str] | None:
+    # Unify one template atom with one ground fact under the current substitution.
     if template.predicate != ground.predicate:
         return None
     if len(template.args) != len(ground.args):
@@ -592,6 +593,7 @@ def _find_lhs_substitutions(
     facts: tuple[FOLAtom, ...],
     max_solutions: int,
 ) -> list[dict[str, str]]:
+    # Backtracking search for substitutions that make every LHS atom match facts.
     solutions: list[dict[str, str]] = []
 
     def _search(idx: int, subst: dict[str, str]) -> None:
@@ -602,6 +604,7 @@ def _find_lhs_substitutions(
             return
 
         templ = lhs[idx]
+        # Try matching this LHS atom against every available fact.
         for fact in facts:
             maybe = _unify_template_atom(templ, fact, subst)
             if maybe is None:
@@ -619,6 +622,7 @@ def _has_rhs_support(
     rule: FOLLayerRule,
     subst: dict[str, str],
 ) -> bool:
+    # Keep only substitutions that bind all variables used on the RHS.
     rhs_vars = {
         term
         for atom in rule.rhs

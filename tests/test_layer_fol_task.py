@@ -8,7 +8,11 @@ import numpy as np
 import pytest
 from array_record.python import array_record_module
 
-from task.layer_fol import FOLLayerTask
+from task.layer_fol import (
+    FOLLayerTask,
+    _collect_applicable_demo_schemas,
+    _find_instantiation_for_rule,
+)
 from task.layer_gen.util import tokenize_layer_fol as tok
 from task.layer_gen.util.fol_rule_bank import FOLAtom, FOLSequent
 
@@ -66,6 +70,29 @@ def _simple_prompt_and_completion(tokenizer):
     prompt = tokenizer.tokenize_prompt(sequent)
     completion = tokenizer.encode_completion("r0_1(a,b) → r1_1(a,b)")
     return prompt, completion
+
+
+def _split_prompt_segments(prompt_tokens: np.ndarray, sep_token_id: int) -> list[list[int]]:
+    segments: list[list[int]] = []
+    current: list[int] = []
+    for tok in prompt_tokens.tolist():
+        tok = int(tok)
+        if tok == int(sep_token_id):
+            segments.append(current)
+            current = []
+        else:
+            current.append(tok)
+    assert not current
+    return segments
+
+
+def _constants_from_atoms(atoms) -> set[str]:
+    return {
+        str(term)
+        for atom in atoms
+        for term in atom.args
+        if isinstance(term, str) and not term.startswith("x")
+    }
 
 
 def test_layer_fol_task_offline_autoreg(tmp_path: Path) -> None:
@@ -223,6 +250,175 @@ def test_layer_fol_task_rejects_unknown_fixed_length_mode() -> None:
         FOLLayerTask(mode="online", fixed_length_mode="unknown")
 
 
+def test_layer_fol_task_rejects_negative_max_n_demos() -> None:
+    with pytest.raises(ValueError, match="max_n_demos"):
+        FOLLayerTask(mode="online", max_n_demos=-1)
+
+
+def test_layer_fol_task_online_sampling_prepends_demos_when_enabled() -> None:
+    task = FOLLayerTask(
+        distance_range=(1, 2),
+        batch_size=2,
+        mode="online",
+        seed=17,
+        n_layers=6,
+        predicates_per_layer=4,
+        rules_per_transition=8,
+        arity_max=3,
+        vars_per_rule_max=4,
+        constants=("a", "b", "c"),
+        k_in_max=2,
+        k_out_max=2,
+        initial_ant_max=3,
+        max_n_demos=3,
+        online_prefetch_backend="sync",
+    )
+
+    for _ in range(10):
+        rec = task._sample_online_record()
+        prompt = np.asarray(rec["prompt"], dtype=np.int32)
+        segments = _split_prompt_segments(prompt, task.tokenizer.sep_token_id)
+        n_demos = len(segments) - 1
+        assert 1 <= n_demos <= 3
+
+
+def test_layer_fol_task_online_sampling_demo_candidates_sampled_with_replacement() -> None:
+    task = FOLLayerTask(
+        distance_range=(1, 1),
+        batch_size=1,
+        mode="online",
+        seed=18,
+        n_layers=4,
+        predicates_per_layer=1,
+        rules_per_transition=1,
+        arity_max=1,
+        vars_per_rule_max=1,
+        constants=("a", "b"),
+        k_in_max=1,
+        k_out_max=1,
+        initial_ant_max=1,
+        max_n_demos=3,
+        online_prefetch_backend="sync",
+    )
+
+    saw_multi_demo = False
+    saw_duplicate_demo = False
+    for _ in range(80):
+        rec = task._sample_online_record()
+        prompt = np.asarray(rec["prompt"], dtype=np.int32)
+        segments = _split_prompt_segments(prompt, task.tokenizer.sep_token_id)
+        demo_segments = segments[:-1]
+        if len(demo_segments) < 2:
+            continue
+        saw_multi_demo = True
+        if demo_segments[0] == demo_segments[1]:
+            saw_duplicate_demo = True
+            break
+
+    assert saw_multi_demo
+    assert saw_duplicate_demo
+
+
+def test_layer_fol_task_online_sampling_demo_constants_not_tied_to_antecedent() -> None:
+    task = FOLLayerTask(
+        distance_range=(1, 1),
+        batch_size=1,
+        mode="online",
+        seed=181,
+        n_layers=4,
+        predicates_per_layer=2,
+        rules_per_transition=4,
+        arity_max=2,
+        vars_per_rule_max=2,
+        constants=("alice", "bob", "carol", "dave"),
+        k_in_max=2,
+        k_out_max=2,
+        initial_ant_max=1,
+        max_n_demos=3,
+        online_prefetch_backend="sync",
+    )
+
+    saw_outside_constant = False
+    for _ in range(120):
+        rec = task._sample_online_record()
+        prompt = np.asarray(rec["prompt"], dtype=np.int32)
+        segments = _split_prompt_segments(prompt, task.tokenizer.sep_token_id)
+        demo_segments = segments[:-1]
+        if not demo_segments:
+            continue
+
+        main_prompt = list(segments[-1]) + [int(task.tokenizer.sep_token_id)]
+        sequent = task.tokenizer.decode_prompt(main_prompt)
+        antecedent_constants = _constants_from_atoms(sequent.ants)
+
+        for demo in demo_segments:
+            lhs_atoms, rhs_atoms = task.tokenizer.decode_completion_clause(
+                list(demo) + [int(task.tokenizer.eot_token_id)]
+            )
+            demo_constants = _constants_from_atoms(lhs_atoms + rhs_atoms)
+            if demo_constants - antecedent_constants:
+                saw_outside_constant = True
+                break
+        if saw_outside_constant:
+            break
+
+    assert saw_outside_constant
+
+
+def test_layer_fol_task_online_sampling_demo_schemas_are_applicable() -> None:
+    task = FOLLayerTask(
+        distance_range=(1, 2),
+        batch_size=1,
+        mode="online",
+        seed=182,
+        n_layers=6,
+        predicates_per_layer=4,
+        rules_per_transition=8,
+        arity_max=3,
+        vars_per_rule_max=4,
+        constants=("a", "b", "c", "d"),
+        k_in_max=2,
+        k_out_max=2,
+        initial_ant_max=3,
+        max_n_demos=3,
+        online_prefetch_backend="sync",
+    )
+
+    for _ in range(40):
+        rec = task._sample_online_record()
+        prompt = np.asarray(rec["prompt"], dtype=np.int32)
+        segments = _split_prompt_segments(prompt, task.tokenizer.sep_token_id)
+        demo_segments = segments[:-1]
+        if not demo_segments:
+            continue
+
+        src_layer = int(rec["src_layer"])
+        main_prompt = list(segments[-1]) + [int(task.tokenizer.sep_token_id)]
+        sequent = task.tokenizer.decode_prompt(main_prompt)
+        applicable = _collect_applicable_demo_schemas(
+            rule_bank=task.rule_bank,
+            src_layer=src_layer,
+            ants=sequent.ants,
+            max_unify_solutions=task.max_unify_solutions,
+        )
+        assert applicable
+
+        for demo in demo_segments:
+            lhs_atoms, rhs_atoms = task.tokenizer.decode_completion_clause(
+                list(demo) + [int(task.tokenizer.eot_token_id)]
+            )
+            is_from_applicable_schema = any(
+                _find_instantiation_for_rule(
+                    template=schema,
+                    lhs_ground=lhs_atoms,
+                    rhs_ground=rhs_atoms,
+                )
+                is not None
+                for schema in applicable
+            )
+            assert is_from_applicable_schema
+
+
 def test_layer_fol_task_online_prefetch_enabled_by_default() -> None:
     task = FOLLayerTask(
         distance_range=(1, 2),
@@ -278,6 +474,31 @@ def test_layer_fol_task_online_prefetch_thread_context_manager_closes() -> None:
     assert task._online_prefetch_buffer is None
 
 
+def test_layer_fol_task_online_prefetch_thread_supports_demos() -> None:
+    with FOLLayerTask(
+        distance_range=(1, 2),
+        batch_size=2,
+        mode="online",
+        seed=151,
+        n_layers=6,
+        predicates_per_layer=4,
+        rules_per_transition=8,
+        arity_max=3,
+        vars_per_rule_max=4,
+        constants=("a", "b", "c"),
+        k_in_max=2,
+        k_out_max=2,
+        initial_ant_max=3,
+        max_n_demos=2,
+        online_prefetch_backend="thread",
+        online_prefetch_workers=1,
+        online_prefetch_buffer_size=4,
+    ) as task:
+        xs, ys = next(task)
+        assert xs.shape[0] == 2
+        assert ys.shape[0] == 2
+
+
 def test_layer_fol_task_online_prefetch_rejects_invalid_config() -> None:
     with pytest.raises(ValueError, match="online_prefetch_backend"):
         FOLLayerTask(mode="online", online_prefetch_backend="bad-backend")
@@ -318,3 +539,51 @@ def test_layer_fol_task_online_prefetch_process_fallback(monkeypatch) -> None:
             assert ys.shape[0] == 2
     finally:
         task.close()
+
+
+def test_layer_fol_task_online_autoreg_global_max_accounts_for_demos() -> None:
+    task_no_demo = FOLLayerTask(
+        distance_range=(1, 2),
+        batch_size=4,
+        mode="online",
+        seed=19,
+        n_layers=6,
+        predicates_per_layer=4,
+        rules_per_transition=8,
+        arity_max=3,
+        vars_per_rule_max=4,
+        constants=("a", "b", "c"),
+        k_in_max=2,
+        k_out_max=2,
+        initial_ant_max=3,
+        fixed_length_mode="global_max",
+        max_n_demos=0,
+        online_prefetch_backend="sync",
+    )
+    task_with_demo = FOLLayerTask(
+        distance_range=(1, 2),
+        batch_size=4,
+        mode="online",
+        seed=19,
+        n_layers=6,
+        predicates_per_layer=4,
+        rules_per_transition=8,
+        arity_max=3,
+        vars_per_rule_max=4,
+        constants=("a", "b", "c"),
+        k_in_max=2,
+        k_out_max=2,
+        initial_ant_max=3,
+        fixed_length_mode="global_max",
+        max_n_demos=3,
+        online_prefetch_backend="sync",
+    )
+
+    assert task_with_demo._global_autoreg_seq_len > task_no_demo._global_autoreg_seq_len
+
+    widths = set()
+    for _ in range(6):
+        xs, ys = next(task_with_demo)
+        assert xs.shape == ys.shape
+        widths.add(xs.shape[1])
+    assert widths == {task_with_demo._global_autoreg_seq_len}

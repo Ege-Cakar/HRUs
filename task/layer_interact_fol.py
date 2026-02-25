@@ -99,21 +99,24 @@ for i in prompt:
 task = FOLLayerTask(
     batch_size=8,
     mode="online",
-    seed=123,
     distance_range=(1, 3),
     n_layers=12,
     predicates_per_layer=6,
     rules_per_transition=16,
     arity_max=3,
-    vars_per_rule_max=4,
-    constants=("alice", "bob", "carol", "dave"),
+    vars_per_rule_max=20,
+    constants=(f'p{i}' for i in range(20)),
     k_in_max=3,
     k_out_max=3,
     initial_ant_max=3,
     prediction_objective="autoregressive",
+    max_n_demos=0
 )
 
 preview_batch(task, n_rows=2)
+
+# <codecell>
+task.rule_bank.transition_rules(0)
 
 
 # <codecell>
