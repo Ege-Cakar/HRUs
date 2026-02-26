@@ -13,6 +13,7 @@ wandb/
 repl/
 *.array_record
 data/
+**/*.csv
 
 # ignore slurm logging outputs
 *.err

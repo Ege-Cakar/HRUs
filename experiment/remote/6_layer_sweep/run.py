@@ -161,7 +161,7 @@ def _compute_dims(rule_bank, tokenizer):
 
 
 def _train_distances_for_k(k: int) -> list[int]:
-    return [int(d) for d in EVAL_DISTANCES if int(d) <= int(k)]
+    return list(range(1, int(k) + 1))
 
 
 def _ood_distances_for_k(k: int) -> list[int]:

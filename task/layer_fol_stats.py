@@ -38,11 +38,11 @@ from task.layer_gen.util.fol_rule_bank import (  # noqa: E402
 # <codecell>
 # Edit all settings here (no argparse by design).
 CONFIG = {
-    "seed": 7,
+    "seed": np.random.randint(0, np.iinfo(np.int32).max),
     "out_dir": ROOT / "task" / "layer_fol_stats" / "set",
     "base_rule_bank": {
-        "n_layers": 14,
-        "predicates_per_layer": 8,
+        "n_layers": 30,
+        "predicates_per_layer": 16,
         "rules_per_transition": 24,
         "arity_max": 3,
         "vars_per_rule_max": 4,
@@ -51,7 +51,7 @@ CONFIG = {
         "k_out_max": 3,
     },
     # Main metric: exact-distance reachability for these d values.
-    "distance_values": [1, 2, 3, 4, 5],
+    "distance_values": np.arange(1, 21),
     "initial_ant_max": 3,
     "n_banks_per_setting": 2,
     "n_trials_per_distance": 80,
@@ -59,7 +59,7 @@ CONFIG = {
     "save_trial_records": False,
     # Separate shortest-path diagnostic protocol.
     "path_length_trials_per_setting": 300,
-    "path_length_max_distance": 6,
+    "path_length_max_distance": 20,
     # Feasibility / compute caps.
     "max_unify_solutions": 128,
     "max_states_per_depth": 2048,
@@ -68,7 +68,7 @@ CONFIG = {
     "sweeps": [
         {
             "name": "rules_per_transition",
-            "values": [8, 16, 24, 32],
+            "values": [4, 8, 16, 24, 32, 64],
         },
     ],
 }
@@ -801,3 +801,5 @@ OUT_DIR = save_outputs(
 )
 print_console_summary(reach_df=REACH_DF, path_df=PATH_SUMMARY_DF)
 print(f"\nSaved outputs to: {OUT_DIR}")
+
+# %%
