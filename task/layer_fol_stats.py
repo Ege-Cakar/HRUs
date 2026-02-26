@@ -1,9 +1,10 @@
 # <codecell>
-"""Interactive reachability statistics for layered first-order tasks.
+"""Interactive diagnostics for layered first-order tasks.
 
 This script estimates:
 1) P(exists valid path of exactly distance d) under independent start/goal draws.
 2) Distribution of shortest path lengths under a separate random start/goal protocol.
+3) Sensitivity of long-distance sampling feasibility to key rule-bank parameters.
 
 Usage:
 - Edit CONFIG directly in this file.
@@ -13,8 +14,10 @@ Usage:
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from pathlib import Path
 import math
+import os
 import sys
 
 import matplotlib.pyplot as plt
@@ -32,6 +35,7 @@ from task.layer_gen.util.fol_rule_bank import (  # noqa: E402
     FOLLayerRule,
     FOLRuleBank,
     build_random_fol_rule_bank,
+    sample_fol_problem,
 )
 
 
@@ -40,6 +44,8 @@ from task.layer_gen.util.fol_rule_bank import (  # noqa: E402
 CONFIG = {
     "seed": np.random.randint(0, np.iinfo(np.int32).max),
     "out_dir": ROOT / "task" / "layer_fol_stats" / "set",
+    # one of: "reachability", "sensitivity", "both"
+    "study_mode": "both",
     "base_rule_bank": {
         "n_layers": 30,
         "predicates_per_layer": 16,
@@ -71,7 +77,41 @@ CONFIG = {
             "values": [4, 8, 16, 24, 32, 64],
         },
     ],
+    # Reproduction study for long-distance sampling feasibility.
+    "sensitivity_repro": {
+        "base_rule_bank": {
+            "n_layers": 30,
+            "predicates_per_layer": 16,
+            "rules_per_transition": 32,
+            "arity_max": 3,
+            "vars_per_rule_max": 4,
+            "constants": tuple(f"c{i}" for i in range(64)),
+            "k_in_max": 3,
+            "k_out_max": 3,
+        },
+        "distance": 12,
+        "seed_values": [0, 1, 2, 3, 4],
+        "trials_per_seed": 12,
+        "initial_ant_max": 3,
+        "sample_max_attempts": 2048,
+        "max_unify_solutions": 128,
+        "sweeps": [
+            {"name": "rules_per_transition", "values": [8, 12, 16, 24, 32, 48]},
+            {"name": "k_in_max", "values": [1, 2, 3, 4, 5]},
+            {"name": "k_out_max", "values": [1, 2, 3, 4]},
+            {"name": "predicates_per_layer", "values": [8, 12, 16, 24, 32]},
+            {"name": "constants_count", "values": [4, 16, 64, 256]},
+        ],
+    },
 }
+
+_study_mode_env = os.environ.get("LAYER_FOL_STATS_STUDY_MODE")
+if _study_mode_env is not None and str(_study_mode_env).strip():
+    CONFIG["study_mode"] = str(_study_mode_env).strip()
+
+_out_dir_env = os.environ.get("LAYER_FOL_STATS_OUT_DIR")
+if _out_dir_env is not None and str(_out_dir_env).strip():
+    CONFIG["out_dir"] = Path(str(_out_dir_env)).expanduser()
 
 
 # <codecell>
@@ -399,6 +439,24 @@ def _make_bank_config(base: dict, override_name: str, override_value: int) -> di
     return out
 
 
+def _build_constants_by_count(count: int) -> tuple[str, ...]:
+    count = int(count)
+    if count < 1:
+        raise ValueError(f"constants_count must be >= 1, got {count}")
+    return tuple(f"c{idx}" for idx in range(count))
+
+
+def _make_sensitivity_bank_config(base: dict, override_name: str, override_value: int) -> dict:
+    out = dict(base)
+    name = str(override_name)
+    value = int(override_value)
+    if name == "constants_count":
+        out["constants"] = _build_constants_by_count(value)
+    else:
+        out[name] = value
+    return out
+
+
 def _build_bank(bank_cfg: dict, seed: int) -> FOLRuleBank:
     return build_random_fol_rule_bank(
         n_layers=int(bank_cfg["n_layers"]),
@@ -411,6 +469,96 @@ def _build_bank(bank_cfg: dict, seed: int) -> FOLRuleBank:
         k_out_max=int(bank_cfg["k_out_max"]),
         rng=np.random.default_rng(int(seed)),
     )
+
+
+def run_sampling_sensitivity_study(
+    cfg: dict,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    sweep_rows: list[dict] = []
+    seed_rows: list[dict] = []
+
+    repro_cfg = dict(cfg["sensitivity_repro"])
+    base_bank_cfg = dict(repro_cfg["base_rule_bank"])
+    distance = int(repro_cfg["distance"])
+    seed_values = [int(seed) for seed in repro_cfg["seed_values"]]
+    trials_per_seed = int(repro_cfg["trials_per_seed"])
+    initial_ant_max = int(repro_cfg["initial_ant_max"])
+    sample_max_attempts = int(repro_cfg["sample_max_attempts"])
+    max_unify_solutions = int(repro_cfg["max_unify_solutions"])
+
+    for sweep in repro_cfg["sweeps"]:
+        sweep_name = str(sweep["name"])
+        sweep_values = [int(v) for v in sweep["values"]]
+
+        for sweep_value in sweep_values:
+            bank_cfg = _make_sensitivity_bank_config(
+                base=base_bank_cfg,
+                override_name=sweep_name,
+                override_value=sweep_value,
+            )
+            seed_rates: list[float] = []
+            total_trials = 0
+            total_success = 0
+
+            for seed in seed_values:
+                rng = np.random.default_rng(int(seed))
+                bank = _build_bank(bank_cfg, seed=int(seed))
+                n_success = 0
+                for _ in range(trials_per_seed):
+                    try:
+                        sample_fol_problem(
+                            bank=bank,
+                            distance=distance,
+                            initial_ant_max=initial_ant_max,
+                            rng=rng,
+                            max_attempts=sample_max_attempts,
+                            max_unify_solutions=max_unify_solutions,
+                        )
+                        n_success += 1
+                    except RuntimeError:
+                        pass
+
+                n_trials = int(trials_per_seed)
+                feasible_rate = float(n_success / n_trials) if n_trials else 0.0
+                seed_rates.append(feasible_rate)
+                total_trials += n_trials
+                total_success += int(n_success)
+                seed_rows.append(
+                    {
+                        "sweep_name": sweep_name,
+                        "sweep_value": int(sweep_value),
+                        "seed": int(seed),
+                        "distance": int(distance),
+                        "n_trials": int(n_trials),
+                        "n_success": int(n_success),
+                        "feasible_rate": float(feasible_rate),
+                    }
+                )
+
+            seed_arr = np.asarray(seed_rates, dtype=np.float64)
+            sweep_rows.append(
+                {
+                    "sweep_name": sweep_name,
+                    "sweep_value": int(sweep_value),
+                    "distance": int(distance),
+                    "n_seeds": int(len(seed_values)),
+                    "trials_per_seed": int(trials_per_seed),
+                    "total_trials": int(total_trials),
+                    "total_success": int(total_success),
+                    "pooled_feasible_rate": float(total_success / total_trials)
+                    if total_trials
+                    else 0.0,
+                    "mean_feasible_rate": float(np.mean(seed_arr)) if seed_rates else 0.0,
+                    "std_feasible_rate": float(np.std(seed_arr)) if seed_rates else 0.0,
+                    "min_seed_rate": float(np.min(seed_arr)) if seed_rates else 0.0,
+                    "max_seed_rate": float(np.max(seed_arr)) if seed_rates else 0.0,
+                    "seed_rates": json.dumps([float(x) for x in seed_rates]),
+                }
+            )
+
+    summary_df = pd.DataFrame(sweep_rows)
+    seed_df = pd.DataFrame(seed_rows)
+    return summary_df, seed_df
 
 
 def run_reachability_study(
@@ -717,7 +865,21 @@ def plot_path_length_histograms(
 
 
 # <codecell>
-def save_outputs(
+def _jsonable(obj):
+    if isinstance(obj, Path):
+        return str(obj)
+    if isinstance(obj, np.generic):
+        return obj.item()
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, dict):
+        return {str(k): _jsonable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_jsonable(v) for v in obj]
+    return obj
+
+
+def save_reachability_outputs(
     *,
     cfg: dict,
     reach_df: pd.DataFrame,
@@ -746,8 +908,72 @@ def save_outputs(
     return out_dir
 
 
+def plot_sampling_sensitivity(
+    *,
+    summary_df: pd.DataFrame,
+    out_dir: Path,
+) -> None:
+    if summary_df.empty:
+        return
+
+    sns.set_theme(style="whitegrid")
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    for sweep_name in sorted(summary_df["sweep_name"].dropna().unique()):
+        part = summary_df[summary_df["sweep_name"] == sweep_name].copy()
+        if part.empty:
+            continue
+        part = part.sort_values("sweep_value")
+
+        x = part["sweep_value"].astype(int).to_numpy()
+        y = part["mean_feasible_rate"].astype(float).to_numpy()
+        y_min = part["min_seed_rate"].astype(float).to_numpy()
+        y_max = part["max_seed_rate"].astype(float).to_numpy()
+        yerr_low = y - y_min
+        yerr_high = y_max - y
+
+        plt.figure(figsize=(7, 4))
+        plt.errorbar(
+            x=x,
+            y=y,
+            yerr=np.vstack([yerr_low, yerr_high]),
+            fmt="-o",
+            linewidth=1.8,
+            capsize=4,
+            color="#2E6F95",
+        )
+        plt.ylim(0.0, 1.0)
+        plt.xlabel(sweep_name)
+        plt.ylabel("mean feasible sampling rate")
+        plt.title(f"Sampling sensitivity at distance={int(part['distance'].iloc[0])}")
+        plt.tight_layout()
+        plt.savefig(out_dir / f"sampling_sensitivity_{sweep_name}.png", dpi=180)
+        plt.close()
+
+
+def save_sampling_sensitivity_outputs(
+    *,
+    cfg: dict,
+    summary_df: pd.DataFrame,
+    seed_df: pd.DataFrame,
+) -> Path:
+    out_dir = Path(cfg["out_dir"])
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    summary_path = out_dir / "sampling_sensitivity_summary.csv"
+    seed_path = out_dir / "sampling_sensitivity_seed_rates.csv"
+    cfg_path = out_dir / "sampling_sensitivity_config.json"
+    summary_df.to_csv(summary_path, index=False)
+    seed_df.to_csv(seed_path, index=False)
+    cfg_path.write_text(
+        json.dumps(_jsonable(cfg["sensitivity_repro"]), indent=2)
+    )
+    plot_sampling_sensitivity(summary_df=summary_df, out_dir=out_dir)
+    return out_dir
+
+
 # <codecell>
-def print_console_summary(
+def print_reachability_console_summary(
     *,
     reach_df: pd.DataFrame,
     path_df: pd.DataFrame,
@@ -788,18 +1014,81 @@ def print_console_summary(
             )
 
 
+def print_sampling_sensitivity_console_summary(
+    *,
+    summary_df: pd.DataFrame,
+) -> None:
+    print("\n=== Sampling sensitivity summary ===")
+    if summary_df.empty:
+        print("No rows.")
+        return
+
+    cols = [
+        "sweep_name",
+        "sweep_value",
+        "distance",
+        "n_seeds",
+        "trials_per_seed",
+        "mean_feasible_rate",
+        "std_feasible_rate",
+        "min_seed_rate",
+        "max_seed_rate",
+    ]
+    present_cols = summary_df.columns.intersection(cols)
+    print(
+        summary_df[present_cols]
+        .sort_values(["sweep_name", "sweep_value"])
+        .to_string(index=False)
+    )
+
+
+def _resolve_study_mode(mode_raw: str) -> tuple[bool, bool]:
+    mode = str(mode_raw).strip().lower()
+    if mode == "reachability":
+        return True, False
+    if mode == "sensitivity":
+        return False, True
+    if mode == "both":
+        return True, True
+    raise ValueError(f"Unsupported study_mode={mode_raw!r}; expected reachability|sensitivity|both")
+
+
 # <codecell>
 # Execute study at top level for interactive workflows.
-REACH_DF, REACH_TRIAL_DF, PATH_SUMMARY_DF, PATH_HIST_DF, PATH_TRIAL_DF = run_reachability_study(CONFIG)
-OUT_DIR = save_outputs(
-    cfg=CONFIG,
-    reach_df=REACH_DF,
-    reach_trial_df=REACH_TRIAL_DF,
-    path_summary_df=PATH_SUMMARY_DF,
-    path_hist_df=PATH_HIST_DF,
-    path_trial_df=PATH_TRIAL_DF,
-)
-print_console_summary(reach_df=REACH_DF, path_df=PATH_SUMMARY_DF)
+RUN_REACHABILITY, RUN_SENSITIVITY = _resolve_study_mode(CONFIG.get("study_mode", "both"))
+OUT_DIR = Path(CONFIG["out_dir"])
+
+REACH_DF = pd.DataFrame()
+REACH_TRIAL_DF = pd.DataFrame()
+PATH_SUMMARY_DF = pd.DataFrame()
+PATH_HIST_DF = pd.DataFrame()
+PATH_TRIAL_DF = pd.DataFrame()
+SENSITIVITY_SUMMARY_DF = pd.DataFrame()
+SENSITIVITY_SEED_DF = pd.DataFrame()
+
+if RUN_REACHABILITY:
+    REACH_DF, REACH_TRIAL_DF, PATH_SUMMARY_DF, PATH_HIST_DF, PATH_TRIAL_DF = run_reachability_study(
+        CONFIG
+    )
+    OUT_DIR = save_reachability_outputs(
+        cfg=CONFIG,
+        reach_df=REACH_DF,
+        reach_trial_df=REACH_TRIAL_DF,
+        path_summary_df=PATH_SUMMARY_DF,
+        path_hist_df=PATH_HIST_DF,
+        path_trial_df=PATH_TRIAL_DF,
+    )
+    print_reachability_console_summary(reach_df=REACH_DF, path_df=PATH_SUMMARY_DF)
+
+if RUN_SENSITIVITY:
+    SENSITIVITY_SUMMARY_DF, SENSITIVITY_SEED_DF = run_sampling_sensitivity_study(CONFIG)
+    OUT_DIR = save_sampling_sensitivity_outputs(
+        cfg=CONFIG,
+        summary_df=SENSITIVITY_SUMMARY_DF,
+        seed_df=SENSITIVITY_SEED_DF,
+    )
+    print_sampling_sensitivity_console_summary(summary_df=SENSITIVITY_SUMMARY_DF)
+
 print(f"\nSaved outputs to: {OUT_DIR}")
 
 # %%

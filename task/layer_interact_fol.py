@@ -39,12 +39,12 @@ def preview_batch(task: FOLLayerTask, n_rows: int = 3) -> None:
 # Sample a random FOL rule bank + one multi-step problem.
 rng = np.random.default_rng()
 rule_bank = build_random_fol_rule_bank(
-    n_layers=50,
-    predicates_per_layer=8,
-    rules_per_transition=32,
+    n_layers=12,
+    predicates_per_layer=32,
+    rules_per_transition=64,
     arity_max=3,
-    vars_per_rule_max=4,
-    constants=("alice", "bob", "carol", "dave"),
+    vars_per_rule_max=6,
+    constants=[f'p{i}' for i in range(512)],
     k_in_max=3,
     k_out_max=3,
     rng=rng,
@@ -52,8 +52,8 @@ rule_bank = build_random_fol_rule_bank(
 
 problem = sample_fol_problem(
     bank=rule_bank,
-    distance=4,
-    initial_ant_max=3,
+    distance=8,
+    initial_ant_max=5,
     rng=rng,
 )
 
