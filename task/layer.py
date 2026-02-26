@@ -150,9 +150,9 @@ class LayerTask:
                 f"got {self.prediction_objective!r}"
             )
         self.fixed_length_mode = str(fixed_length_mode)
-        if self.fixed_length_mode not in {"batch_max", "global_max"}:
+        if self.fixed_length_mode not in {"batch_max", "global_max", "next_pow2"}:
             raise ValueError(
-                "fixed_length_mode must be 'batch_max' or 'global_max', "
+                "fixed_length_mode must be 'batch_max', 'global_max', or 'next_pow2', "
                 f"got {self.fixed_length_mode!r}"
             )
         self.fixed_length_n_seq = (
@@ -266,14 +266,14 @@ class LayerTask:
                 self._dataloader = self._build_dataloader()
                 self._iterator = iter(self._dataloader)
                 batch = next(self._iterator)
-            return self._pad_autoreg_batch_to_global_len(batch)
+            return self._apply_autoreg_fixed_length(batch)
 
         if self._online_prefetch_buffer is None:
             records = [self._sample_online_record() for _ in range(self.batch_size)]
         else:
             records = self._online_prefetch_buffer.take(self.batch_size)
         batch = self._batch_fn(records)
-        return self._pad_autoreg_batch_to_global_len(batch)
+        return self._apply_autoreg_fixed_length(batch)
 
     def __iter__(self):
         return self
@@ -580,14 +580,15 @@ class LayerTask:
             raise ValueError(f"Resolved global fixed length must be >= 2, got {n_seq}")
         return n_seq
 
-    def _pad_autoreg_batch_to_global_len(self, batch):
-        if self.prediction_objective != "autoregressive":
-            return batch
-        if self.fixed_length_mode != "global_max":
-            return batch
-        if self._global_autoreg_seq_len is None:
-            raise RuntimeError("Global autoregressive seq length was not initialized.")
+    @staticmethod
+    def _ceil_pow2(n: int) -> int:
+        n = int(n)
+        if n <= 1:
+            return 1
+        return 1 << (n - 1).bit_length()
 
+    @staticmethod
+    def _coerce_autoreg_batch(batch) -> tuple[np.ndarray, np.ndarray]:
         xs, ys = batch
         xs = np.asarray(xs)
         ys = np.asarray(ys)
@@ -599,11 +600,17 @@ class LayerTask:
             raise ValueError(
                 f"Batch size mismatch for autoregressive batch: xs={xs.shape}, ys={ys.shape}"
             )
+        return xs, ys
 
-        n_seq = int(self._global_autoreg_seq_len)
+    @classmethod
+    def _pad_autoreg_batch_to_length(cls, batch, *, n_seq: int):
+        xs, ys = cls._coerce_autoreg_batch(batch)
+        n_seq = int(n_seq)
+        if n_seq < 2:
+            raise ValueError(f"Autoregressive fixed length must be >= 2, got {n_seq}")
         if xs.shape[1] > n_seq or ys.shape[1] > n_seq:
             raise ValueError(
-                "Autoregressive batch sequence exceeds fixed global length: "
+                "Autoregressive batch sequence exceeds fixed length: "
                 f"xs={xs.shape}, ys={ys.shape}, fixed_length_n_seq={n_seq}"
             )
 
@@ -617,6 +624,34 @@ class LayerTask:
         if ys.shape[1] > 0:
             out_y[:, : ys.shape[1]] = ys
         return out_x, out_y
+
+    def _apply_autoreg_fixed_length(self, batch):
+        if self.prediction_objective != "autoregressive":
+            return batch
+        if self.fixed_length_mode == "batch_max":
+            return batch
+
+        if self.fixed_length_mode == "global_max":
+            if self._global_autoreg_seq_len is None:
+                raise RuntimeError("Global autoregressive seq length was not initialized.")
+            return self._pad_autoreg_batch_to_length(
+                batch,
+                n_seq=int(self._global_autoreg_seq_len),
+            )
+
+        if self.fixed_length_mode == "next_pow2":
+            xs, _ = self._coerce_autoreg_batch(batch)
+            n_seq = max(2, int(self._ceil_pow2(xs.shape[1])))
+            if self.fixed_length_n_seq is not None:
+                cap = int(self.fixed_length_n_seq)
+                if n_seq > cap:
+                    raise ValueError(
+                        "Autoregressive next_pow2 sequence exceeds fixed_length_n_seq cap: "
+                        f"batch_n_seq={xs.shape[1]}, bucket_n_seq={n_seq}, fixed_length_n_seq={cap}"
+                    )
+            return self._pad_autoreg_batch_to_length(batch, n_seq=n_seq)
+
+        raise ValueError(f"Unsupported fixed_length_mode={self.fixed_length_mode!r}")
 
 
 @dataclass(frozen=True)

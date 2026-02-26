@@ -240,6 +240,77 @@ def test_layer_fol_task_online_sampling_all_at_once() -> None:
     assert np.all(np.any(ys == task.tokenizer.eot_token_id, axis=1))
 
 
+def test_layer_fol_task_online_autoreg_next_pow2_buckets_length() -> None:
+    task = FOLLayerTask(
+        distance_range=(1, 2),
+        batch_size=4,
+        mode="online",
+        seed=13,
+        n_layers=6,
+        predicates_per_layer=4,
+        rules_per_transition=8,
+        arity_max=3,
+        vars_per_rule_max=4,
+        constants=("a", "b", "c"),
+        k_in_max=2,
+        k_out_max=2,
+        initial_ant_max=3,
+        fixed_length_mode="next_pow2",
+        online_prefetch_backend="sync",
+    )
+    try:
+        xs, ys = task._apply_autoreg_fixed_length(
+            (
+                np.ones((4, 30), dtype=np.int32),
+                np.ones((4, 30), dtype=np.int32),
+            )
+        )
+        assert xs.shape == (4, 32)
+        assert ys.shape == (4, 32)
+
+        xs2, ys2 = task._apply_autoreg_fixed_length(
+            (
+                np.ones((4, 100), dtype=np.int32),
+                np.ones((4, 100), dtype=np.int32),
+            )
+        )
+        assert xs2.shape == (4, 128)
+        assert ys2.shape == (4, 128)
+    finally:
+        task.close()
+
+
+def test_layer_fol_task_online_autoreg_next_pow2_respects_cap() -> None:
+    task = FOLLayerTask(
+        distance_range=(1, 2),
+        batch_size=4,
+        mode="online",
+        seed=13,
+        n_layers=6,
+        predicates_per_layer=4,
+        rules_per_transition=8,
+        arity_max=3,
+        vars_per_rule_max=4,
+        constants=("a", "b", "c"),
+        k_in_max=2,
+        k_out_max=2,
+        initial_ant_max=3,
+        fixed_length_mode="next_pow2",
+        fixed_length_n_seq=64,
+        online_prefetch_backend="sync",
+    )
+    try:
+        with pytest.raises(ValueError, match="next_pow2"):
+            task._apply_autoreg_fixed_length(
+                (
+                    np.ones((4, 65), dtype=np.int32),
+                    np.ones((4, 65), dtype=np.int32),
+                )
+            )
+    finally:
+        task.close()
+
+
 def test_layer_fol_task_rejects_unknown_prediction_objective() -> None:
     with pytest.raises(ValueError, match="prediction_objective"):
         FOLLayerTask(mode="online", prediction_objective="unknown")

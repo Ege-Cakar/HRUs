@@ -3,11 +3,13 @@
 # <codecell>
 from __future__ import annotations
 
+from collections import Counter
 import hashlib
 import itertools
 import json
 import re
 import sys
+import time
 from pathlib import Path
 
 import jax.numpy as jnp
@@ -61,7 +63,7 @@ TRAIN_MAX_DISTANCES = [3, 5, 10]
 EVAL_DISTANCES = list(range(1, 21))
 
 TRAIN_MAX_N_DEMOS = 8
-EVAL_MAX_N_DEMOS_SWEEP = [0, 4, 8, 16, 32, 64, 128]
+EVAL_MAX_N_DEMOS_SWEEP = [0, 4, 8, 16, 32, 64]
 SELECTION_EVAL_MAX_N_DEMOS = 8
 
 BATCH_SIZE = 64
@@ -71,7 +73,7 @@ TEST_ITERS = 3
 EVAL_ITERS_PER_DISTANCE = 3
 ROLLOUT_EXAMPLES_PER_DISTANCE = 64
 
-RUN_SPLIT = 72
+RUN_SPLIT = 36
 
 RULE_BANK_SEED = 2026
 N_LAYERS = 24
@@ -86,13 +88,18 @@ CONSTANTS = ("a", "b", "c", "d")
 SAMPLE_MAX_ATTEMPTS = 4096
 MAX_UNIFY_SOLUTIONS = 128
 
-TRANSFORMER_LAYERS = [4, 8]
+TRAIN_FIXED_LENGTH_MODE = "next_pow2"
+EVAL_FIXED_LENGTH_MODE = "next_pow2"
+
+# TRANSFORMER_LAYERS = [4, 8]
+TRANSFORMER_LAYERS = [4]
 TRANSFORMER_WIDTH_HEADS = [(128, 4), (256, 8)]
 TRANSFORMER_LRS = [3e-4, 1e-3]
 TRANSFORMER_POS = ["rope"]
 TRANSFORMER_SWIGLU = [True]
 
-MAMBA2_BONSAI_LAYERS = [4, 8]
+# MAMBA2_BONSAI_LAYERS = [4, 8]
+MAMBA2_BONSAI_LAYERS = [4]
 MAMBA2_BONSAI_WIDTH_HEADS = [(128, 4), (256, 8)]
 MAMBA2_BONSAI_D_STATE = [16, 32]
 MAMBA2_BONSAI_D_CONV = [4]
@@ -137,6 +144,13 @@ def _safe_mean(values: list[float]) -> float:
     return float(np.mean(values))
 
 
+def _ceil_pow2_int(n: int) -> int:
+    n = int(n)
+    if n <= 1:
+        return 1
+    return 1 << (n - 1).bit_length()
+
+
 def _mean_metrics(metrics_list):
     if not metrics_list:
         return {}
@@ -148,6 +162,65 @@ def _mean_metrics(metrics_list):
         if vals:
             out[key] = float(np.mean(vals))
     return out
+
+
+class _TaskProbe:
+    def __init__(self, name: str) -> None:
+        self.name = str(name)
+        self.n_batches = 0
+        self.total_fetch_s = 0.0
+        self.seq_len_counts: Counter[int] = Counter()
+
+    def observe(self, batch, fetch_s: float) -> None:
+        self.n_batches += 1
+        self.total_fetch_s += float(fetch_s)
+        if isinstance(batch, tuple) and len(batch) == 2:
+            xs = np.asarray(batch[0])
+            if xs.ndim == 2:
+                self.seq_len_counts[int(xs.shape[1])] += 1
+
+
+class _TaskProbeIterator:
+    def __init__(self, task, probe: _TaskProbe) -> None:
+        self._task = task
+        self.probe = probe
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        start = time.perf_counter()
+        batch = next(self._task)
+        self.probe.observe(batch, time.perf_counter() - start)
+        return batch
+
+    def close(self) -> None:
+        close = getattr(self._task, "close", None)
+        if callable(close):
+            close()
+
+    def __getattr__(self, name):
+        return getattr(self._task, name)
+
+
+def _summarize_task_probe(probe: _TaskProbe) -> dict:
+    top_seq_lens = [
+        {"seq_len": int(seq_len), "count": int(count)}
+        for seq_len, count in probe.seq_len_counts.most_common(10)
+    ]
+    seq_lens = list(probe.seq_len_counts.keys())
+    avg_fetch_ms = 1_000.0 * probe.total_fetch_s / probe.n_batches if probe.n_batches > 0 else 0.0
+
+    return {
+        "name": probe.name,
+        "n_batches": int(probe.n_batches),
+        "total_fetch_s": float(probe.total_fetch_s),
+        "avg_fetch_ms": float(avg_fetch_ms),
+        "n_unique_seq_lens": int(len(probe.seq_len_counts)),
+        "min_seq_len": int(min(seq_lens)) if seq_lens else None,
+        "max_seq_len": int(max(seq_lens)) if seq_lens else None,
+        "top_seq_lens": top_seq_lens,
+    }
 
 
 def _facts_key(facts: tuple[FOLAtom, ...]) -> tuple[str, ...]:
@@ -386,6 +459,8 @@ def _make_layer_task(
     drop_remainder: bool,
     shuffle: bool,
     max_n_demos: int,
+    fixed_length_mode: str = "batch_max",
+    fixed_length_n_seq: int | None = None,
 ):
     return FOLLayerTask(
         distance_range=distance_range,
@@ -405,7 +480,36 @@ def _make_layer_task(
         max_n_demos=int(max_n_demos),
         sample_max_attempts=SAMPLE_MAX_ATTEMPTS,
         max_unify_solutions=MAX_UNIFY_SOLUTIONS,
+        fixed_length_mode=str(fixed_length_mode),
+        fixed_length_n_seq=(
+            None if fixed_length_n_seq is None else int(fixed_length_n_seq)
+        ),
     )
+
+
+def make_ar_light_metrics_fn():
+    def _metrics(optimizer, batch, loss=None):
+        _ = loss
+        xs, labels = batch
+        logits = optimizer.model(xs)
+
+        loss_val = ce_mask(logits, labels)
+        preds = jnp.argmax(logits, axis=-1)
+        mask = labels != 0
+        total = jnp.maximum(jnp.sum(mask), 1)
+        token_acc = jnp.sum((preds == labels) & mask) / total
+        final_acc = final_token_accuracy(preds, labels)
+        seq_correct = (preds == labels) | (~mask)
+        seq_exact_acc = jnp.mean(jnp.all(seq_correct, axis=1))
+
+        return {
+            "loss": loss_val,
+            "token_acc": token_acc,
+            "final_token_acc": final_acc,
+            "seq_exact_acc": seq_exact_acc,
+        }
+
+    return _metrics
 
 
 def make_ar_metrics_fn(*, tokenizer, rule_bank, n_seq: int, max_completion_len: int):
@@ -556,6 +660,7 @@ def _evaluate_by_distance_for_demo(
     max_completion_len: int,
     n_iters: int,
     eval_max_n_demos: int,
+    perf_stats: dict | None = None,
 ):
     metrics_fn = make_ar_metrics_fn(
         tokenizer=tokenizer,
@@ -578,6 +683,12 @@ def _evaluate_by_distance_for_demo(
         max_unify_solutions=int(MAX_UNIFY_SOLUTIONS),
     )
 
+    eval_fetch_s = 0.0
+    eval_metrics_s = 0.0
+    eval_rollout_s = 0.0
+    seq_len_counts: Counter[int] = Counter()
+    n_eval_batches = 0
+
     metrics_by_distance = {}
     for distance in EVAL_DISTANCES:
         eval_task = _make_layer_task(
@@ -588,12 +699,30 @@ def _evaluate_by_distance_for_demo(
             drop_remainder=False,
             shuffle=True,
             max_n_demos=int(eval_max_n_demos),
+            fixed_length_mode=EVAL_FIXED_LENGTH_MODE,
+            fixed_length_n_seq=int(n_seq_ar),
         )
 
-        all_batch_metrics = []
-        for _ in range(int(n_iters)):
-            all_batch_metrics.append(metrics_fn(optimizer, next(eval_task)))
-        agg = _mean_metrics(all_batch_metrics)
+        try:
+            all_batch_metrics = []
+            for _ in range(int(n_iters)):
+                fetch_start = time.perf_counter()
+                batch = next(eval_task)
+                eval_fetch_s += time.perf_counter() - fetch_start
+
+                xs = np.asarray(batch[0])
+                if xs.ndim == 2:
+                    seq_len_counts[int(xs.shape[1])] += 1
+                n_eval_batches += 1
+
+                metrics_start = time.perf_counter()
+                all_batch_metrics.append(metrics_fn(optimizer, batch))
+                eval_metrics_s += time.perf_counter() - metrics_start
+            agg = _mean_metrics(all_batch_metrics)
+        finally:
+            close = getattr(eval_task, "close", None)
+            if callable(close):
+                close()
 
         rollout_examples = sample_rollout_examples(
             rule_bank=rule_bank,
@@ -606,6 +735,7 @@ def _evaluate_by_distance_for_demo(
                 int(RUN_ID) + 1000 * int(distance) + 100_000 * int(eval_max_n_demos)
             ),
         )
+        rollout_start = time.perf_counter()
         rollout_metrics = evaluate_layer_rollouts(
             rule_bank=rule_bank,
             examples=rollout_examples,
@@ -617,6 +747,7 @@ def _evaluate_by_distance_for_demo(
                 int(RUN_ID) + 2000 * int(distance) + 100_000 * int(eval_max_n_demos)
             ),
         )
+        eval_rollout_s += time.perf_counter() - rollout_start
 
         agg.update(
             {
@@ -633,6 +764,21 @@ def _evaluate_by_distance_for_demo(
         )
 
         metrics_by_distance[int(distance)] = agg
+
+    if perf_stats is not None:
+        perf_stats.update(
+            {
+                "n_eval_batches": int(n_eval_batches),
+                "eval_fetch_s": float(eval_fetch_s),
+                "eval_metrics_s": float(eval_metrics_s),
+                "eval_rollout_s": float(eval_rollout_s),
+                "n_unique_seq_lens": int(len(seq_len_counts)),
+                "top_seq_lens": [
+                    {"seq_len": int(seq_len), "count": int(count)}
+                    for seq_len, count in seq_len_counts.most_common(10)
+                ],
+            }
+        )
 
     return metrics_by_distance
 
@@ -661,23 +807,42 @@ save_dir.mkdir(parents=True, exist_ok=True)
 DIMS = _compute_dims(
     SHARED_RULE_BANK,
     SHARED_TOKENIZER,
+    max_n_demos_for_shapes=TRAIN_MAX_N_DEMOS,
+)
+EVAL_DIMS = _compute_dims(
+    SHARED_RULE_BANK,
+    SHARED_TOKENIZER,
     max_n_demos_for_shapes=max(EVAL_MAX_N_DEMOS_SWEEP),
 )
-N_VOCAB = DIMS["n_vocab"]
-MAX_COMPLETION_LEN = DIMS["max_completion_len"]
-N_SEQ_AR = DIMS["n_seq_ar"]
+N_VOCAB = max(int(DIMS["n_vocab"]), int(EVAL_DIMS["n_vocab"]))
+MAX_COMPLETION_LEN = max(int(DIMS["max_completion_len"]), int(EVAL_DIMS["max_completion_len"]))
+TRAIN_N_SEQ_AR_RAW = int(DIMS["n_seq_ar"])
+EVAL_N_SEQ_AR_RAW = int(EVAL_DIMS["n_seq_ar"])
+MODEL_N_SEQ_AR = int(max(2, _ceil_pow2_int(EVAL_N_SEQ_AR_RAW)))
+TRAIN_N_SEQ_AR = int(MODEL_N_SEQ_AR)
+N_SEQ_AR = int(MODEL_N_SEQ_AR)
+DIMS = {"train": DIMS, "eval": EVAL_DIMS}
 
-print("DATA DIMS", DIMS)
+print("TRAIN DIMS", DIMS["train"])
+print("EVAL DIMS", DIMS["eval"])
+print(
+    "SEQUENCE SHAPE POLICY",
+    {
+        "train_fixed_length_mode": TRAIN_FIXED_LENGTH_MODE,
+        "train_fixed_length_n_seq": TRAIN_N_SEQ_AR,
+        "eval_fixed_length_mode": EVAL_FIXED_LENGTH_MODE,
+        "eval_fixed_length_n_seq": N_SEQ_AR,
+        "train_raw_n_seq_ar": TRAIN_N_SEQ_AR_RAW,
+        "eval_raw_n_seq_ar": EVAL_N_SEQ_AR_RAW,
+        "model_n_seq": N_SEQ_AR,
+        "causal_mask_tokens": int(N_SEQ_AR) * int(N_SEQ_AR),
+    },
+)
 print("RULE BANK", {"path": str(SHARED_RULE_BANK_PATH), "sha256": SHARED_RULE_BANK_SHA256})
 
 all_cases = []
 
-ar_metrics_fn = make_ar_metrics_fn(
-    tokenizer=SHARED_TOKENIZER,
-    rule_bank=SHARED_RULE_BANK,
-    n_seq=N_SEQ_AR,
-    max_completion_len=MAX_COMPLETION_LEN,
-)
+ar_light_metrics_fn = make_ar_light_metrics_fn()
 
 for train_max_distance in TRAIN_MAX_DISTANCES:
     train_distances = _train_distances_for_k(train_max_distance)
@@ -713,28 +878,40 @@ for train_max_distance in TRAIN_MAX_DISTANCES:
             pad_token_id=0,
         )
 
-        train_task = _make_layer_task(
-            train_distances,
-            prediction_objective="autoregressive",
-            rule_bank_path=SHARED_RULE_BANK_PATH,
-            seed=new_seed(),
-            drop_remainder=True,
-            shuffle=True,
-            max_n_demos=int(TRAIN_MAX_N_DEMOS),
+        train_probe = _TaskProbe(name="train")
+        test_probe = _TaskProbe(name="test")
+        train_task = _TaskProbeIterator(
+            _make_layer_task(
+                train_distances,
+                prediction_objective="autoregressive",
+                rule_bank_path=SHARED_RULE_BANK_PATH,
+                seed=new_seed(),
+                drop_remainder=True,
+                shuffle=True,
+                max_n_demos=int(TRAIN_MAX_N_DEMOS),
+                fixed_length_mode=TRAIN_FIXED_LENGTH_MODE,
+                fixed_length_n_seq=TRAIN_N_SEQ_AR,
+            ),
+            train_probe,
         )
-        test_task = _make_layer_task(
-            ood_distances,
-            prediction_objective="autoregressive",
-            rule_bank_path=SHARED_RULE_BANK_PATH,
-            seed=new_seed(),
-            drop_remainder=False,
-            shuffle=True,
-            max_n_demos=int(TRAIN_MAX_N_DEMOS),
+        test_task = _TaskProbeIterator(
+            _make_layer_task(
+                ood_distances,
+                prediction_objective="autoregressive",
+                rule_bank_path=SHARED_RULE_BANK_PATH,
+                seed=new_seed(),
+                drop_remainder=False,
+                shuffle=True,
+                max_n_demos=int(TRAIN_MAX_N_DEMOS),
+                fixed_length_mode=EVAL_FIXED_LENGTH_MODE,
+                fixed_length_n_seq=N_SEQ_AR,
+            ),
+            test_probe,
         )
 
         train_args = {
             "loss": "ce_mask",
-            "eval_fns": [ar_metrics_fn],
+            "eval_fns": [ar_light_metrics_fn],
             "print_fn": make_print_fn("final_token_acc"),
             "train_iters": TRAIN_ITERS,
             "test_iters": TEST_ITERS,
@@ -759,18 +936,24 @@ for train_max_distance in TRAIN_MAX_DISTANCES:
             "lr": lr,
             "n_vocab": N_VOCAB,
             "n_seq": N_SEQ_AR,
+            "train_fixed_length_mode": TRAIN_FIXED_LENGTH_MODE,
+            "train_fixed_length_n_seq": TRAIN_N_SEQ_AR,
+            "eval_fixed_length_mode": EVAL_FIXED_LENGTH_MODE,
+            "eval_fixed_length_n_seq": N_SEQ_AR,
+            "train_eval_profile": "light",
         }
 
-        all_cases.append(
-            Case(
-                f"8_fol_icl_transformer_k{int(train_max_distance):02d}",
-                config,
-                train_task=train_task,
-                test_task=test_task,
-                train_args=train_args,
-                info=info,
-            )
+        case = Case(
+            f"8_fol_icl_transformer_k{int(train_max_distance):02d}",
+            config,
+            train_task=train_task,
+            test_task=test_task,
+            train_args=train_args,
+            info=info,
         )
+        case._train_probe = train_probe
+        case._test_probe = test_probe
+        all_cases.append(case)
 
     for n_layers, (n_hidden, n_heads), d_state, d_conv, scan_chunk_len, lr in itertools.product(
         MAMBA2_BONSAI_LAYERS,
@@ -799,28 +982,40 @@ for train_max_distance in TRAIN_MAX_DISTANCES:
             scan_chunk_len=scan_chunk_len,
         )
 
-        train_task = _make_layer_task(
-            train_distances,
-            prediction_objective="autoregressive",
-            rule_bank_path=SHARED_RULE_BANK_PATH,
-            seed=new_seed(),
-            drop_remainder=True,
-            shuffle=True,
-            max_n_demos=int(TRAIN_MAX_N_DEMOS),
+        train_probe = _TaskProbe(name="train")
+        test_probe = _TaskProbe(name="test")
+        train_task = _TaskProbeIterator(
+            _make_layer_task(
+                train_distances,
+                prediction_objective="autoregressive",
+                rule_bank_path=SHARED_RULE_BANK_PATH,
+                seed=new_seed(),
+                drop_remainder=True,
+                shuffle=True,
+                max_n_demos=int(TRAIN_MAX_N_DEMOS),
+                fixed_length_mode=TRAIN_FIXED_LENGTH_MODE,
+                fixed_length_n_seq=TRAIN_N_SEQ_AR,
+            ),
+            train_probe,
         )
-        test_task = _make_layer_task(
-            ood_distances,
-            prediction_objective="autoregressive",
-            rule_bank_path=SHARED_RULE_BANK_PATH,
-            seed=new_seed(),
-            drop_remainder=False,
-            shuffle=True,
-            max_n_demos=int(TRAIN_MAX_N_DEMOS),
+        test_task = _TaskProbeIterator(
+            _make_layer_task(
+                ood_distances,
+                prediction_objective="autoregressive",
+                rule_bank_path=SHARED_RULE_BANK_PATH,
+                seed=new_seed(),
+                drop_remainder=False,
+                shuffle=True,
+                max_n_demos=int(TRAIN_MAX_N_DEMOS),
+                fixed_length_mode=EVAL_FIXED_LENGTH_MODE,
+                fixed_length_n_seq=N_SEQ_AR,
+            ),
+            test_probe,
         )
 
         train_args = {
             "loss": "ce_mask",
-            "eval_fns": [ar_metrics_fn],
+            "eval_fns": [ar_light_metrics_fn],
             "print_fn": make_print_fn("final_token_acc"),
             "train_iters": TRAIN_ITERS,
             "test_iters": TEST_ITERS,
@@ -846,18 +1041,24 @@ for train_max_distance in TRAIN_MAX_DISTANCES:
             "lr": lr,
             "n_vocab": N_VOCAB,
             "n_seq": N_SEQ_AR,
+            "train_fixed_length_mode": TRAIN_FIXED_LENGTH_MODE,
+            "train_fixed_length_n_seq": TRAIN_N_SEQ_AR,
+            "eval_fixed_length_mode": EVAL_FIXED_LENGTH_MODE,
+            "eval_fixed_length_n_seq": N_SEQ_AR,
+            "train_eval_profile": "light",
         }
 
-        all_cases.append(
-            Case(
-                f"8_fol_icl_mamba2_k{int(train_max_distance):02d}",
-                config,
-                train_task=train_task,
-                test_task=test_task,
-                train_args=train_args,
-                info=info,
-            )
+        case = Case(
+            f"8_fol_icl_mamba2_k{int(train_max_distance):02d}",
+            config,
+            train_task=train_task,
+            test_task=test_task,
+            train_args=train_args,
+            info=info,
         )
+        case._train_probe = train_probe
+        case._test_probe = test_probe
+        all_cases.append(case)
 
 print("TOTAL CASES:", len(all_cases))
 all_cases = split_cases(all_cases, RUN_SPLIT, shuffle_seed=200)
@@ -869,10 +1070,19 @@ print("CASE NAMES", [case.name for case in all_cases])
 rows = []
 for case in tqdm(all_cases):
     print("RUNNING", case.name, case.info)
+    train_start = time.perf_counter()
     case.run()
+    train_wall_s = time.perf_counter() - train_start
+
+    train_probe_summary = _summarize_task_probe(case._train_probe)
+    test_probe_summary = _summarize_task_probe(case._test_probe)
 
     metrics_by_eval_demo = {}
+    eval_perf_by_demo = {}
+    post_eval_start = time.perf_counter()
     for eval_max_n_demos in EVAL_MAX_N_DEMOS_SWEEP:
+        demo_perf = {}
+        demo_start = time.perf_counter()
         metrics_by_eval_demo[int(eval_max_n_demos)] = _evaluate_by_distance_for_demo(
             case.optimizer,
             tokenizer=SHARED_TOKENIZER,
@@ -882,7 +1092,44 @@ for case in tqdm(all_cases):
             max_completion_len=MAX_COMPLETION_LEN,
             n_iters=EVAL_ITERS_PER_DISTANCE,
             eval_max_n_demos=int(eval_max_n_demos),
+            perf_stats=demo_perf,
         )
+        demo_perf["wall_s"] = float(time.perf_counter() - demo_start)
+        eval_perf_by_demo[int(eval_max_n_demos)] = demo_perf
+    post_eval_wall_s = time.perf_counter() - post_eval_start
+
+    eval_fetch_s = float(sum(v.get("eval_fetch_s", 0.0) for v in eval_perf_by_demo.values()))
+    eval_metrics_s = float(sum(v.get("eval_metrics_s", 0.0) for v in eval_perf_by_demo.values()))
+    eval_rollout_s = float(sum(v.get("eval_rollout_s", 0.0) for v in eval_perf_by_demo.values()))
+    train_fetch_s = float(train_probe_summary["total_fetch_s"])
+    test_fetch_s = float(test_probe_summary["total_fetch_s"])
+    train_non_fetch_s_est = float(max(0.0, train_wall_s - train_fetch_s - test_fetch_s))
+    perf = {
+        "train_wall_s": float(train_wall_s),
+        "train_fetch_s": train_fetch_s,
+        "test_fetch_s": test_fetch_s,
+        "train_non_fetch_s_est": train_non_fetch_s_est,
+        "post_eval_wall_s": float(post_eval_wall_s),
+        "eval_fetch_s": eval_fetch_s,
+        "eval_metrics_s": eval_metrics_s,
+        "eval_rollout_s": eval_rollout_s,
+        "train_task": train_probe_summary,
+        "test_task": test_probe_summary,
+        "eval_by_demo": eval_perf_by_demo,
+    }
+
+    print(
+        "PERF SUMMARY",
+        {
+            "case": case.name,
+            "train_wall_s": round(float(train_wall_s), 2),
+            "train_fetch_s": round(train_fetch_s, 2),
+            "train_non_fetch_s_est": round(train_non_fetch_s_est, 2),
+            "post_eval_wall_s": round(float(post_eval_wall_s), 2),
+            "train_unique_seq_lens": train_probe_summary["n_unique_seq_lens"],
+            "test_unique_seq_lens": test_probe_summary["n_unique_seq_lens"],
+        },
+    )
 
     selected_distance_metrics = metrics_by_eval_demo[int(SELECTION_EVAL_MAX_N_DEMOS)]
     ood_distances = case.info.get("ood_distances", [])
@@ -898,9 +1145,11 @@ for case in tqdm(all_cases):
             "test_iters": case.train_args["test_iters"],
             "test_every": case.train_args["test_every"],
             "lr": case.train_args["lr"],
+            "eval_profile": case.info.get("train_eval_profile", "light"),
         },
         "metrics_final": case.hist["test"][-1] if case.hist and case.hist.get("test") else {},
         "metrics_by_eval_demo": metrics_by_eval_demo,
+        "perf": perf,
         "metrics_by_distance": selected_distance_metrics,
         "selection_eval_max_n_demos": int(SELECTION_EVAL_MAX_N_DEMOS),
         "selection_metric_name": "ood_rollout_success_avg",
@@ -968,6 +1217,10 @@ for case in tqdm(all_cases):
     }
     rows.append(row)
 
+    for task in (case.train_task, case.test_task):
+        close = getattr(task, "close", None)
+        if callable(close):
+            close()
     case.optimizer = None
     case.hist = None
     case.train_task = None
