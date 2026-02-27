@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from flax import nnx
+import jax.numpy as jnp
 import numpy as np
 
+from model.eval_adapters import make_model_callable
 from task.layer import (
     AutoregressiveLogitsAdapter,
     CompletionLogitsAdapter,
@@ -328,6 +331,149 @@ def test_autoregressive_logits_adapter_decodes_greedy() -> None:
     adapter = AutoregressiveLogitsAdapter(n_seq=16, max_completion_len=4)
     decoded = adapter.predict_completion(
         model=model,
+        prompt_tokens=prompt,
+        tokenizer=tokenizer,
+    )
+    assert decoded.tolist() == target
+
+
+def test_autoregressive_logits_adapter_uses_cache_when_supported() -> None:
+    _, tokenizer, _ = _sampled_bank(seed=43)
+    target = [tokenizer.char_to_id("p0_1"), tokenizer.eot_token_id]
+    vocab = tokenizer.vocab_size
+    calls: list[tuple[tuple[int, ...], int | None, bool]] = []
+
+    def model(xs, *, cache=None, return_cache=False):
+        calls.append((xs.shape, cache, return_cache))
+        assert return_cache
+        step = 0 if cache is None else int(cache)
+        logits = np.zeros((xs.shape[0], xs.shape[1], vocab), dtype=np.float32)
+        tok = target[min(step, len(target) - 1)]
+        logits[0, -1, int(tok)] = 9.0
+        return logits, step + 1
+
+    prompt = np.asarray([tokenizer.char_to_id("p0_1"), tokenizer.sep_token_id], dtype=np.int32)
+    adapter = AutoregressiveLogitsAdapter(n_seq=16, max_completion_len=4)
+    decoded = adapter.predict_completion(
+        model=model,
+        prompt_tokens=prompt,
+        tokenizer=tokenizer,
+    )
+
+    assert decoded.tolist() == target
+    assert calls[0] == ((1, prompt.shape[0]), None, True)
+    assert calls[1][0] == (1, 1)
+    assert calls[1][1] == 1
+    assert calls[1][2] is True
+
+
+def test_autoregressive_logits_adapter_jit_step_uses_cache_when_supported() -> None:
+    _, tokenizer, _ = _sampled_bank(seed=44)
+    first_tok = tokenizer.char_to_id("p0_1")
+    target = [int(first_tok), int(tokenizer.eot_token_id)]
+    vocab = int(tokenizer.vocab_size)
+
+    class _CacheAwareModel(nnx.Module):
+        def __init__(self, *, vocab_size: int):
+            self.vocab_size = int(vocab_size)
+
+        def __call__(self, xs, *, cache=None, return_cache=False):
+            if not return_cache:
+                raise RuntimeError("jit_step cache path should call return_cache=True.")
+            step = jnp.asarray(0, dtype=jnp.int32) if cache is None else jnp.asarray(cache, dtype=jnp.int32)
+            logits = jnp.zeros((xs.shape[0], xs.shape[1], self.vocab_size), dtype=jnp.float32)
+            tok = jnp.where(step == 0, first_tok, tokenizer.eot_token_id)
+            logits = logits.at[0, -1, tok].set(8.0)
+            return logits, step + 1
+
+    prompt = np.asarray([tokenizer.char_to_id("p0_1"), tokenizer.sep_token_id], dtype=np.int32)
+    adapter = AutoregressiveLogitsAdapter(
+        n_seq=16,
+        max_completion_len=4,
+        jit_step=True,
+    )
+    decoded = adapter.predict_completion(
+        model=_CacheAwareModel(vocab_size=vocab),
+        prompt_tokens=prompt,
+        tokenizer=tokenizer,
+    )
+    assert decoded.tolist() == target
+
+
+def test_autoregressive_logits_adapter_jit_step_sampling_deterministic_with_seeded_rng() -> None:
+    _, tokenizer, _ = _sampled_bank(seed=46)
+    vocab = int(tokenizer.vocab_size)
+
+    class _SamplingModel(nnx.Module):
+        def __init__(self, *, vocab_size: int):
+            self.vocab_size = int(vocab_size)
+
+        def __call__(self, xs, *, cache=None, return_cache=False):
+            if not return_cache:
+                raise RuntimeError("jit_step cache path should call return_cache=True.")
+            step = jnp.asarray(0, dtype=jnp.int32) if cache is None else jnp.asarray(cache, dtype=jnp.int32)
+            logits = jnp.full((xs.shape[0], xs.shape[1], self.vocab_size), -3.0, dtype=jnp.float32)
+            logits = logits.at[0, -1, 3].set(0.0)
+            logits = logits.at[0, -1, 4].set(0.2)
+            logits = logits.at[0, -1, 5].set(0.4 + 0.1 * step.astype(jnp.float32))
+            return logits, step + 1
+
+    prompt = np.asarray([tokenizer.char_to_id("p0_1"), tokenizer.sep_token_id], dtype=np.int32)
+    adapter = AutoregressiveLogitsAdapter(
+        n_seq=16,
+        max_completion_len=3,
+        jit_step=True,
+    )
+
+    out1 = adapter.predict_completion(
+        model=_SamplingModel(vocab_size=vocab),
+        prompt_tokens=prompt,
+        tokenizer=tokenizer,
+        temperature=1.0,
+        rng=np.random.default_rng(123),
+    )
+    out2 = adapter.predict_completion(
+        model=_SamplingModel(vocab_size=vocab),
+        prompt_tokens=prompt,
+        tokenizer=tokenizer,
+        temperature=1.0,
+        rng=np.random.default_rng(123),
+    )
+    assert out1.tolist() == out2.tolist()
+    assert len(out1) == 3
+
+
+def test_autoregressive_logits_adapter_jit_step_supports_wrapped_model_callable() -> None:
+    _, tokenizer, _ = _sampled_bank(seed=45)
+    first_tok = tokenizer.char_to_id("p0_1")
+    target = [int(first_tok), int(tokenizer.eot_token_id)]
+    vocab = int(tokenizer.vocab_size)
+
+    class _Model(nnx.Module):
+        def __init__(self, *, vocab_size: int):
+            self.vocab_size = int(vocab_size)
+
+        def __call__(self, xs):
+            logits = jnp.zeros((xs.shape[0], xs.shape[1], self.vocab_size), dtype=jnp.float32)
+            nonpad = xs[0] != 0
+            last_idx = jnp.maximum(jnp.sum(nonpad) - 1, 0)
+            last_tok = xs[0, last_idx]
+            next_tok = jnp.where(last_tok == first_tok, tokenizer.eot_token_id, first_tok)
+            return logits.at[0, last_idx, next_tok].set(8.0)
+
+    class _Opt:
+        def __init__(self, model):
+            self.model = model
+
+    model_fn = make_model_callable(_Opt(_Model(vocab_size=vocab)), to_numpy=False)
+    prompt = np.asarray([tokenizer.char_to_id("p0_1"), tokenizer.sep_token_id], dtype=np.int32)
+    adapter = AutoregressiveLogitsAdapter(
+        n_seq=16,
+        max_completion_len=4,
+        jit_step=True,
+    )
+    decoded = adapter.predict_completion(
+        model=model_fn,
         prompt_tokens=prompt,
         tokenizer=tokenizer,
     )

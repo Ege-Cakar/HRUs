@@ -17,6 +17,7 @@ sys.path.append(str(ROOT))
 
 from common import new_seed
 from experiment.utils.metrics_utils import final_token_accuracy
+from model.eval_adapters import make_model_callable
 from model.transformer import TransformerConfig
 from task.layer import (
     AutoregressiveLogitsAdapter,
@@ -312,14 +313,6 @@ def make_print_fn(metric_key: str):
     return _print
 
 
-def _make_model_callable(optimizer):
-    def _model(batch_tokens: np.ndarray):
-        out = optimizer.model(jnp.asarray(batch_tokens, dtype=jnp.int32))
-        return np.asarray(out)
-
-    return _model
-
-
 def _match_error_label(match_result) -> str:
     if bool(match_result.decode_error):
         return "decode_error"
@@ -368,11 +361,12 @@ def inspect_examples(
     max_batches: int,
     min_target_examples: int,
 ) -> tuple[list[dict[str, object]], int]:
-    model_fn = _make_model_callable(optimizer)
+    model_fn = make_model_callable(optimizer, to_numpy=False)
     adapter = AutoregressiveLogitsAdapter(
         n_seq=int(n_seq_ar),
         max_completion_len=int(max_completion_len),
         pad_token_id=0,
+        jit_step=True,
     )
     rng = np.random.default_rng(int(RUN_ID) + 73_001)
 
@@ -514,11 +508,12 @@ def evaluate_rollout_summary(
     max_completion_len: int,
     rollout_examples: int,
 ) -> dict[str, object]:
-    model_fn = _make_model_callable(optimizer)
+    model_fn = make_model_callable(optimizer, to_numpy=False)
     adapter = AutoregressiveLogitsAdapter(
         n_seq=int(n_seq_ar),
         max_completion_len=int(max_completion_len),
         pad_token_id=0,
+        jit_step=True,
     )
     examples = sample_rollout_examples(
         rule_bank=rule_bank,

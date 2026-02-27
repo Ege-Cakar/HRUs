@@ -23,6 +23,7 @@ from task.prop_ar import ImplyAutoregSizeTask
 from task.prop_gen.util.tokenize_ar import eot_token_id, sep_token_id
 from train import Case, ce_mask
 
+from experiment.utils.batch_adapters import MixerBatchAdapter
 from experiment.utils.data_utils import build_completion_targets, build_prompt_only_inputs
 from experiment.utils.metrics_utils import final_token_accuracy
 
@@ -132,33 +133,6 @@ def _make_task(size_range, *, drop_remainder, shuffle):
     )
 
 
-class MixerBatchAdapter:
-    """Wrap AR batches into prompt-only inputs and fixed completion targets."""
-
-    def __init__(self, base_task, *, n_seq: int, max_out_len: int):
-        self.base_task = base_task
-        self.n_seq = n_seq
-        self.max_out_len = max_out_len
-
-    def __iter__(self):
-        return self
-
-    def __next__(self):
-        xs, ys = next(self.base_task)
-        prompt_xs = build_prompt_only_inputs(
-            xs,
-            n_seq=self.n_seq,
-            sep_token_id=sep_token_id,
-            pad_token_id=0,
-        )
-        targets, _ = build_completion_targets(
-            ys,
-            max_out_len=self.max_out_len,
-            eot_token_id=eot_token_id,
-        )
-        return prompt_xs, targets
-
-
 def _mean_metrics(metrics_list):
     if not metrics_list:
         return {}
@@ -258,7 +232,20 @@ def _evaluate_by_size(optimizer, *, family: str, n_seq: int, max_out_len: int, n
     for size in EVAL_SIZES:
         base_task = _make_task((size, size), drop_remainder=False, shuffle=True)
         eval_task = (
-            MixerBatchAdapter(base_task, n_seq=n_seq, max_out_len=max_out_len)
+            MixerBatchAdapter(
+                base_task,
+                prompt_builder=lambda xs: build_prompt_only_inputs(
+                    xs,
+                    n_seq=n_seq,
+                    sep_token_id=sep_token_id,
+                    pad_token_id=0,
+                ),
+                target_builder=lambda ys: build_completion_targets(
+                    ys,
+                    max_out_len=max_out_len,
+                    eot_token_id=eot_token_id,
+                )[0],
+            )
             if family == "mixer_completion"
             else base_task
         )
@@ -459,8 +446,34 @@ for train_max_size in TRAIN_MAX_SIZES:
         train_base = _make_task(train_sizes, drop_remainder=True, shuffle=True)
         test_base = _make_task(ood_sizes, drop_remainder=False, shuffle=True)
 
-        train_task = MixerBatchAdapter(train_base, n_seq=n_seq, max_out_len=max_out_len)
-        test_task = MixerBatchAdapter(test_base, n_seq=n_seq, max_out_len=max_out_len)
+        train_task = MixerBatchAdapter(
+            train_base,
+            prompt_builder=lambda xs: build_prompt_only_inputs(
+                xs,
+                n_seq=n_seq,
+                sep_token_id=sep_token_id,
+                pad_token_id=0,
+            ),
+            target_builder=lambda ys: build_completion_targets(
+                ys,
+                max_out_len=max_out_len,
+                eot_token_id=eot_token_id,
+            )[0],
+        )
+        test_task = MixerBatchAdapter(
+            test_base,
+            prompt_builder=lambda xs: build_prompt_only_inputs(
+                xs,
+                n_seq=n_seq,
+                sep_token_id=sep_token_id,
+                pad_token_id=0,
+            ),
+            target_builder=lambda ys: build_completion_targets(
+                ys,
+                max_out_len=max_out_len,
+                eot_token_id=eot_token_id,
+            )[0],
+        )
 
         train_args = {
             "loss": "ce",

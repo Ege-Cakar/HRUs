@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from flax import nnx
+import jax.numpy as jnp
 import numpy as np
 import pytest
 
@@ -349,6 +351,69 @@ def test_autoregressive_logits_adapter_decodes_greedy_fol() -> None:
     adapter = AutoregressiveLogitsAdapter(n_seq=16, max_completion_len=4)
     decoded = adapter.predict_completion(
         model=model,
+        prompt_tokens=prompt,
+        tokenizer=tokenizer,
+    )
+    assert decoded.tolist() == target
+
+
+def test_autoregressive_logits_adapter_uses_cache_when_supported_fol() -> None:
+    tokenizer = tok.build_tokenizer_from_identifiers(["r0_1", "a", "b", "x1"])
+    target = [tokenizer.char_to_id("r0_1"), tokenizer.eot_token_id]
+    vocab = tokenizer.vocab_size
+    calls: list[tuple[tuple[int, ...], int | None, bool]] = []
+
+    def model(xs, *, cache=None, return_cache=False):
+        calls.append((xs.shape, cache, return_cache))
+        assert return_cache
+        step = 0 if cache is None else int(cache)
+        logits = np.zeros((xs.shape[0], xs.shape[1], vocab), dtype=np.float32)
+        tok_id = target[min(step, len(target) - 1)]
+        logits[0, -1, int(tok_id)] = 9.0
+        return logits, step + 1
+
+    prompt = np.asarray([tokenizer.char_to_id("a"), tokenizer.sep_token_id], dtype=np.int32)
+    adapter = AutoregressiveLogitsAdapter(n_seq=16, max_completion_len=4)
+    decoded = adapter.predict_completion(
+        model=model,
+        prompt_tokens=prompt,
+        tokenizer=tokenizer,
+    )
+
+    assert decoded.tolist() == target
+    assert calls[0] == ((1, prompt.shape[0]), None, True)
+    assert calls[1][0] == (1, 1)
+    assert calls[1][1] == 1
+    assert calls[1][2] is True
+
+
+def test_autoregressive_logits_adapter_jit_step_uses_cache_when_supported_fol() -> None:
+    tokenizer = tok.build_tokenizer_from_identifiers(["r0_1", "a", "b", "x1"])
+    first_tok = tokenizer.char_to_id("r0_1")
+    target = [int(first_tok), int(tokenizer.eot_token_id)]
+    vocab = int(tokenizer.vocab_size)
+
+    class _CacheAwareModel(nnx.Module):
+        def __init__(self, *, vocab_size: int):
+            self.vocab_size = int(vocab_size)
+
+        def __call__(self, xs, *, cache=None, return_cache=False):
+            if not return_cache:
+                raise RuntimeError("jit_step cache path should call return_cache=True.")
+            step = jnp.asarray(0, dtype=jnp.int32) if cache is None else jnp.asarray(cache, dtype=jnp.int32)
+            logits = jnp.zeros((xs.shape[0], xs.shape[1], self.vocab_size), dtype=jnp.float32)
+            tok = jnp.where(step == 0, first_tok, tokenizer.eot_token_id)
+            logits = logits.at[0, -1, tok].set(8.0)
+            return logits, step + 1
+
+    prompt = np.asarray([tokenizer.char_to_id("a"), tokenizer.sep_token_id], dtype=np.int32)
+    adapter = AutoregressiveLogitsAdapter(
+        n_seq=16,
+        max_completion_len=4,
+        jit_step=True,
+    )
+    decoded = adapter.predict_completion(
+        model=_CacheAwareModel(vocab_size=vocab),
         prompt_tokens=prompt,
         tokenizer=tokenizer,
     )

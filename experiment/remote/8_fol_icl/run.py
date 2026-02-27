@@ -23,6 +23,7 @@ sys.path.append(str(ROOT))
 sys.path.append(str(LOCAL_DIR))
 
 from common import new_seed, split_cases
+from model.eval_adapters import make_model_callable
 from model.ssm_bonsai import Mamba2BonsaiConfig
 from model.transformer import TransformerConfig
 from task.layer_fol import (
@@ -63,7 +64,7 @@ TRAIN_MAX_DISTANCES = [4]
 EVAL_DISTANCES = list(range(1, 9))
 
 TRAIN_MAX_N_DEMOS = 8
-EVAL_MAX_N_DEMOS_SWEEP = [0, 4, 8, 16, 32, 64]
+EVAL_MAX_N_DEMOS_SWEEP = [0, 4, 8, 16, 32]
 SELECTION_EVAL_MAX_N_DEMOS = 8
 
 BATCH_SIZE = 32
@@ -516,6 +517,13 @@ def make_ar_light_metrics_fn():
 
 
 def make_ar_metrics_fn(*, tokenizer, rule_bank, n_seq: int, max_completion_len: int):
+    adapter = AutoregressiveLogitsAdapter(
+        n_seq=int(n_seq),
+        max_completion_len=int(max_completion_len),
+        pad_token_id=0,
+        jit_step=True,
+    )
+
     def _metrics(optimizer, batch, loss=None):
         _ = loss
         xs, labels = batch
@@ -551,12 +559,7 @@ def make_ar_metrics_fn(*, tokenizer, rule_bank, n_seq: int, max_completion_len: 
             xs=np.asarray(xs),
             tokenizer=tokenizer,
         )
-        model_fn = _make_model_callable(optimizer)
-        adapter = AutoregressiveLogitsAdapter(
-            n_seq=int(n_seq),
-            max_completion_len=int(max_completion_len),
-            pad_token_id=0,
-        )
+        model_fn = make_model_callable(optimizer, to_numpy=False)
 
         n_examples = len(prompt_tokens)
         n_valid = 0
@@ -645,14 +648,6 @@ def make_print_fn(metric_key: str):
     return _print
 
 
-def _make_model_callable(optimizer):
-    def _model(batch_tokens: np.ndarray):
-        out = optimizer.model(jnp.asarray(batch_tokens, dtype=jnp.int32))
-        return np.asarray(out)
-
-    return _model
-
-
 def _evaluate_by_distance_for_demo(
     optimizer,
     *,
@@ -671,12 +666,13 @@ def _evaluate_by_distance_for_demo(
         n_seq=int(n_seq_ar),
         max_completion_len=int(max_completion_len),
     )
-    model_fn = _make_model_callable(optimizer)
+    model_fn = make_model_callable(optimizer, to_numpy=False)
 
     base_rollout_adapter = AutoregressiveLogitsAdapter(
         n_seq=int(n_seq_ar),
         max_completion_len=int(max_completion_len),
         pad_token_id=0,
+        jit_step=True,
     )
     rollout_adapter = DemoAugmentedAdapter(
         base_adapter=base_rollout_adapter,

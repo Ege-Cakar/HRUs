@@ -21,6 +21,7 @@ sys.path.append(str(ROOT))
 sys.path.append(str(LOCAL_DIR))
 
 from common import new_seed, split_cases
+from model.eval_adapters import make_model_callable
 from model.mlp import CompletionMixerConfig
 from model.ssm_bonsai import Mamba2BonsaiConfig
 from model.transformer import TransformerConfig
@@ -36,6 +37,7 @@ from task.layer_gen.util import tokenize_layer
 from task.layer_gen.util.rule_bank import build_random_rule_bank, save_rule_bank
 from train import Case, ce_mask
 
+from experiment.utils.batch_adapters import MixerBatchAdapter
 from experiment.utils.data_utils import (
     build_prompt_only_inputs,
     pad_completion_targets,
@@ -191,43 +193,6 @@ def _make_layer_task(
     )
 
 
-class MixerBatchAdapter:
-    """Wrap Layer all-at-once batches into fixed input/output lengths."""
-
-    def __init__(
-        self,
-        base_task,
-        *,
-        n_seq: int,
-        max_out_len: int,
-        sep_token_id: int,
-        eot_token_id: int,
-    ):
-        self.base_task = base_task
-        self.n_seq = int(n_seq)
-        self.max_out_len = int(max_out_len)
-        self.sep_token_id = int(sep_token_id)
-        self.eot_token_id = int(eot_token_id)
-
-    def __iter__(self):
-        return self
-
-    def __next__(self):
-        xs, ys = next(self.base_task)
-        prompt_xs = build_prompt_only_inputs(
-            xs,
-            n_seq=self.n_seq,
-            sep_token_id=self.sep_token_id,
-            pad_token_id=0,
-        )
-        targets = pad_completion_targets(
-            ys,
-            max_out_len=self.max_out_len,
-            eot_token_id=self.eot_token_id,
-        )
-        return prompt_xs, targets
-
-
 def _safe_mean(values: list[float]) -> float:
     if not values:
         return float("nan")
@@ -363,14 +328,6 @@ def make_print_fn(metric_key: str):
     return _print
 
 
-def _make_model_callable(optimizer):
-    def _model(batch_tokens: np.ndarray):
-        out = optimizer.model(jnp.asarray(batch_tokens, dtype=jnp.int32))
-        return np.asarray(out)
-
-    return _model
-
-
 def _evaluate_by_distance(
     optimizer,
     *,
@@ -393,7 +350,7 @@ def _evaluate_by_distance(
         else make_ar_metrics_fn(tokenizer=tokenizer, rule_bank=rule_bank)
     )
 
-    model_fn = _make_model_callable(optimizer)
+    model_fn = make_model_callable(optimizer, to_numpy=False)
     rollout_adapter = (
         CompletionLogitsAdapter(n_seq=n_seq_completion, pad_token_id=0)
         if family == "mixer_completion"
@@ -401,6 +358,7 @@ def _evaluate_by_distance(
             n_seq=n_seq_ar,
             max_completion_len=max_completion_len,
             pad_token_id=0,
+            jit_step=True,
         )
     )
 
@@ -417,10 +375,17 @@ def _evaluate_by_distance(
             )
             eval_task = MixerBatchAdapter(
                 base_task,
-                n_seq=n_seq_completion,
-                max_out_len=max_completion_len,
-                sep_token_id=int(tokenizer.sep_token_id),
-                eot_token_id=int(tokenizer.eot_token_id),
+                prompt_builder=lambda xs: build_prompt_only_inputs(
+                    xs,
+                    n_seq=n_seq_completion,
+                    sep_token_id=int(tokenizer.sep_token_id),
+                    pad_token_id=0,
+                ),
+                target_builder=lambda ys: pad_completion_targets(
+                    ys,
+                    max_out_len=max_completion_len,
+                    eot_token_id=int(tokenizer.eot_token_id),
+                ),
             )
         else:
             eval_task = _make_layer_task(
@@ -723,17 +688,31 @@ for train_max_distance in TRAIN_MAX_DISTANCES:
 
         train_task = MixerBatchAdapter(
             train_base,
-            n_seq=N_SEQ_COMPLETION,
-            max_out_len=MAX_COMPLETION_LEN,
-            sep_token_id=int(SHARED_TOKENIZER.sep_token_id),
-            eot_token_id=int(SHARED_TOKENIZER.eot_token_id),
+            prompt_builder=lambda xs: build_prompt_only_inputs(
+                xs,
+                n_seq=N_SEQ_COMPLETION,
+                sep_token_id=int(SHARED_TOKENIZER.sep_token_id),
+                pad_token_id=0,
+            ),
+            target_builder=lambda ys: pad_completion_targets(
+                ys,
+                max_out_len=MAX_COMPLETION_LEN,
+                eot_token_id=int(SHARED_TOKENIZER.eot_token_id),
+            ),
         )
         test_task = MixerBatchAdapter(
             test_base,
-            n_seq=N_SEQ_COMPLETION,
-            max_out_len=MAX_COMPLETION_LEN,
-            sep_token_id=int(SHARED_TOKENIZER.sep_token_id),
-            eot_token_id=int(SHARED_TOKENIZER.eot_token_id),
+            prompt_builder=lambda xs: build_prompt_only_inputs(
+                xs,
+                n_seq=N_SEQ_COMPLETION,
+                sep_token_id=int(SHARED_TOKENIZER.sep_token_id),
+                pad_token_id=0,
+            ),
+            target_builder=lambda ys: pad_completion_targets(
+                ys,
+                max_out_len=MAX_COMPLETION_LEN,
+                eot_token_id=int(SHARED_TOKENIZER.eot_token_id),
+            ),
         )
 
         train_args = {

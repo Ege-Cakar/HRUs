@@ -5,9 +5,113 @@ from dataclasses import dataclass
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from flax import nnx
 
 from model.mup import MuReadout, mup_attention_scale
+
+
+@jax.tree_util.register_pytree_node_class
+@dataclass
+class TransformerKVCache:
+    """Per-layer key/value tensors for incremental Transformer decoding."""
+
+    keys: list[jnp.ndarray]
+    values: list[jnp.ndarray]
+    length: jnp.ndarray
+
+    def tree_flatten(self):
+        return (self.keys, self.values, self.length), None
+
+    @classmethod
+    def tree_unflatten(cls, aux_data, children):
+        del aux_data
+        return cls(
+            keys=list(children[0]),
+            values=list(children[1]),
+            length=children[2],
+        )
+
+
+def create_empty_kv_cache(
+    config: "TransformerConfig",
+    batch_size: int,
+    *,
+    dtype: jnp.dtype = jnp.float32,
+) -> TransformerKVCache:
+    """Create an empty KV cache matching the Transformer config."""
+    if config.n_hidden % config.n_heads != 0:
+        raise ValueError(
+            f"n_hidden ({config.n_hidden}) must be divisible by n_heads ({config.n_heads})"
+        )
+    if config.n_layers < 1:
+        raise ValueError(f"n_layers must be >= 1, got {config.n_layers}")
+
+    head_dim = config.n_hidden // config.n_heads
+    empty_shape = (int(batch_size), config.n_heads, config.n_seq, head_dim)
+    keys = [jnp.zeros(empty_shape, dtype=dtype) for _ in range(config.n_layers)]
+    values = [jnp.zeros(empty_shape, dtype=dtype) for _ in range(config.n_layers)]
+    return TransformerKVCache(
+        keys=keys,
+        values=values,
+        length=jnp.asarray(0, dtype=jnp.int32),
+    )
+
+
+def _validate_kv_cache(
+    cache: TransformerKVCache,
+    *,
+    n_layers: int,
+    batch_size: int,
+    n_heads: int,
+    n_seq: int,
+    head_dim: int,
+) -> jnp.ndarray:
+    if len(cache.keys) != n_layers:
+        raise ValueError(
+            f"cache.keys length must equal n_layers ({n_layers}), got {len(cache.keys)}"
+        )
+    if len(cache.values) != n_layers:
+        raise ValueError(
+            f"cache.values length must equal n_layers ({n_layers}), got {len(cache.values)}"
+        )
+
+    expected_shape = (batch_size, n_heads, n_seq, head_dim)
+    for layer_idx, (k, v) in enumerate(zip(cache.keys, cache.values)):
+        if k.ndim != 4 or v.ndim != 4:
+            raise ValueError(
+                f"cache tensors must be rank-4, got key={k.shape}, value={v.shape}"
+            )
+        if k.shape != expected_shape:
+            raise ValueError(
+                f"cache key layer {layer_idx} expected shape {expected_shape}, got {k.shape}"
+            )
+        if v.shape != expected_shape:
+            raise ValueError(
+                f"cache value layer {layer_idx} expected shape {expected_shape}, got {v.shape}"
+            )
+
+    cache_len = jnp.asarray(cache.length, dtype=jnp.int32)
+    if cache_len.ndim != 0:
+        raise ValueError(f"cache.length must be a scalar, got shape {cache_len.shape}")
+    cache_len_int = _try_int_scalar(cache_len)
+    if cache_len_int is not None and (cache_len_int < 0 or cache_len_int > n_seq):
+        raise ValueError(f"cache.length must be in [0, {n_seq}], got {cache_len_int}")
+    return cache_len
+
+
+def _try_int_scalar(x: jnp.ndarray | int) -> int | None:
+    try:
+        arr = np.asarray(x)
+    except Exception:
+        return None
+    if arr.ndim != 0:
+        return None
+    try:
+        return int(arr)
+    except (TypeError, ValueError):
+        return None
+
 
 def sinusoidal_pos_embedding(seq_len: int, dim: int) -> jnp.ndarray:
     """Generate sinusoidal positional embeddings.
@@ -148,7 +252,16 @@ class MultiHeadAttention(nnx.Module):
         else:
             self.dropout = None
 
-    def __call__(self, x: jnp.ndarray, mask: jnp.ndarray | None = None) -> jnp.ndarray:
+    def __call__(
+        self,
+        x: jnp.ndarray,
+        mask: jnp.ndarray | None = None,
+        *,
+        past_key: jnp.ndarray | None = None,
+        past_value: jnp.ndarray | None = None,
+        pos_offset: int | jnp.ndarray = 0,
+        return_kv: bool = False,
+    ) -> jnp.ndarray | tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
         """
         Args:
             x: Input tensor of shape (batch, seq_len, n_hidden)
@@ -166,9 +279,53 @@ class MultiHeadAttention(nnx.Module):
         q, k, v = qkv[0], qkv[1], qkv[2]
 
         if self.rotary_cos is not None and self.rotary_sin is not None:
-            cos = self.rotary_cos[:seq_len]
-            sin = self.rotary_sin[:seq_len]
+            pos_offset_i32 = jnp.asarray(pos_offset, dtype=jnp.int32)
+            pos_offset_int = _try_int_scalar(pos_offset)
+            if pos_offset_int is not None:
+                pos_end = pos_offset_int + seq_len
+                if pos_offset_int < 0 or pos_end > self.rotary_cos.shape[0]:
+                    raise ValueError(
+                        "RoPE position range "
+                        f"[{pos_offset_int}, {pos_end}) exceeds cache size {self.rotary_cos.shape[0]}"
+                    )
+            cos = jax.lax.dynamic_slice_in_dim(
+                self.rotary_cos,
+                start_index=pos_offset_i32,
+                slice_size=seq_len,
+                axis=0,
+            )
+            sin = jax.lax.dynamic_slice_in_dim(
+                self.rotary_sin,
+                start_index=pos_offset_i32,
+                slice_size=seq_len,
+                axis=0,
+            )
             q, k = apply_rotary_pos_embedding(q, k, cos=cos, sin=sin)
+
+        if (past_key is None) != (past_value is None):
+            raise ValueError("past_key and past_value must both be provided or both be None")
+
+        if past_key is not None and past_value is not None:
+            if past_key.ndim != 4 or past_value.ndim != 4:
+                raise ValueError(
+                    f"past_key and past_value must be rank-4, got {past_key.shape} and {past_value.shape}"
+                )
+            expected_prefix = (batch_size, self.n_heads)
+            if past_key.shape[:2] != expected_prefix:
+                raise ValueError(
+                    f"past_key expected prefix {expected_prefix}, got {past_key.shape[:2]}"
+                )
+            if past_value.shape[:2] != expected_prefix:
+                raise ValueError(
+                    f"past_value expected prefix {expected_prefix}, got {past_value.shape[:2]}"
+                )
+            if past_key.shape[3] != self.head_dim or past_value.shape[3] != self.head_dim:
+                raise ValueError(
+                    f"past head_dim mismatch; expected {self.head_dim}, got {past_key.shape[3]} and {past_value.shape[3]}"
+                )
+            past_len_i32 = jnp.asarray(pos_offset, dtype=jnp.int32)
+            k = jax.lax.dynamic_update_slice(past_key, k, (0, 0, past_len_i32, 0))
+            v = jax.lax.dynamic_update_slice(past_value, v, (0, 0, past_len_i32, 0))
         
         # Scaled dot-product attention
         attn_weights = jnp.einsum('bhqd,bhkd->bhqk', q, k) * self.scale
@@ -189,7 +346,10 @@ class MultiHeadAttention(nnx.Module):
         out = jnp.transpose(out, (0, 2, 1, 3))  # (batch, seq, heads, head_dim)
         out = out.reshape(batch_size, seq_len, self.n_hidden)
         
-        return self.out_proj(out)
+        out = self.out_proj(out)
+        if return_kv:
+            return out, k, v
+        return out
 
 
 class TransformerBlock(nnx.Module):
@@ -247,12 +407,37 @@ class TransformerBlock(nnx.Module):
         else:
             self.dropout = None
 
-    def __call__(self, x: jnp.ndarray, mask: jnp.ndarray | None = None) -> jnp.ndarray:
+    def __call__(
+        self,
+        x: jnp.ndarray,
+        mask: jnp.ndarray | None = None,
+        *,
+        past_key: jnp.ndarray | None = None,
+        past_value: jnp.ndarray | None = None,
+        pos_offset: int | jnp.ndarray = 0,
+        return_kv: bool = False,
+    ) -> jnp.ndarray | tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
         # Self-attention with residual
         residual = x
         if self.layer_norm:
             x = self.ln1(x)
-        x = self.attn(x, mask=mask)
+        if return_kv:
+            x, new_key, new_value = self.attn(
+                x,
+                mask=mask,
+                past_key=past_key,
+                past_value=past_value,
+                pos_offset=pos_offset,
+                return_kv=True,
+            )
+        else:
+            x = self.attn(
+                x,
+                mask=mask,
+                past_key=past_key,
+                past_value=past_value,
+                pos_offset=pos_offset,
+            )
         if self.dropout is not None:
             x = self.dropout(x)
         x = x + residual
@@ -274,6 +459,8 @@ class TransformerBlock(nnx.Module):
             x = self.dropout(x)
         x = x + residual
         
+        if return_kv:
+            return x, new_key, new_value
         return x
 
 
@@ -366,7 +553,13 @@ class Transformer(nnx.Module):
         # Precompute causal mask for max sequence length
         self._causal_mask = jnp.tril(jnp.ones((config.n_seq, config.n_seq), dtype=bool))
 
-    def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
+    def __call__(
+        self,
+        x: jnp.ndarray,
+        *,
+        cache: TransformerKVCache | None = None,
+        return_cache: bool = False,
+    ):
         """
         Args:
             x: Input tensor
@@ -398,17 +591,86 @@ class Transformer(nnx.Module):
                 raise ValueError("output_mode='last_nonpad' requires token indices (n_vocab must be set)")
         
         batch_size, seq_len, _ = x.shape
-        
+        head_dim = config.n_hidden // config.n_heads
+
+        use_cache = cache is not None or return_cache
+
+        if use_cache:
+            if config.output_mode == "last_nonpad":
+                raise ValueError("output_mode='last_nonpad' does not support cache-based inference")
+            if cache is None:
+                cache = create_empty_kv_cache(config, batch_size=batch_size, dtype=x.dtype)
+            past_len = _validate_kv_cache(
+                cache,
+                n_layers=config.n_layers,
+                batch_size=batch_size,
+                n_heads=config.n_heads,
+                n_seq=config.n_seq,
+                head_dim=head_dim,
+            )
+            past_len_int = _try_int_scalar(past_len)
+            if past_len_int is not None and past_len_int + seq_len > config.n_seq:
+                raise ValueError(
+                    f"cache length ({past_len_int}) + input seq_len ({seq_len}) exceeds n_seq ({config.n_seq})"
+                )
+            past_keys = cache.keys
+            past_values = cache.values
+        else:
+            if seq_len > config.n_seq:
+                raise ValueError(
+                    f"input seq_len ({seq_len}) exceeds configured n_seq ({config.n_seq})"
+                )
+            past_len = jnp.asarray(0, dtype=jnp.int32)
+            past_keys = [None] * config.n_layers
+            past_values = [None] * config.n_layers
+
         # Add positional embeddings
         if self.pos_embedding is not None:
-            x = x + self.pos_embedding[:seq_len]
-        
-        # Use precomputed causal mask (sliced to actual sequence length)
-        mask = self._causal_mask[:seq_len, :seq_len]
+            if use_cache:
+                pos = jax.lax.dynamic_slice_in_dim(
+                    self.pos_embedding,
+                    start_index=jnp.asarray(past_len, dtype=jnp.int32),
+                    slice_size=seq_len,
+                    axis=0,
+                )
+            else:
+                pos = self.pos_embedding[:seq_len]
+            x = x + pos
+
+        # Use precomputed causal mask (sliced to actual sequence length).
+        if use_cache:
+            mask = jax.lax.dynamic_slice(
+                self._causal_mask,
+                (jnp.asarray(past_len, dtype=jnp.int32), 0),
+                (seq_len, config.n_seq),
+            )
+        else:
+            mask = self._causal_mask[:seq_len, :seq_len]
         
         # Apply transformer blocks
-        for block in self.blocks:
-            x = block(x, mask=mask)
+        if return_cache:
+            new_keys = []
+            new_values = []
+            for block, past_key, past_value in zip(self.blocks, past_keys, past_values):
+                x, new_key, new_value = block(
+                    x,
+                    mask=mask,
+                    past_key=past_key,
+                    past_value=past_value,
+                    pos_offset=past_len,
+                    return_kv=True,
+                )
+                new_keys.append(new_key)
+                new_values.append(new_value)
+        else:
+            for block, past_key, past_value in zip(self.blocks, past_keys, past_values):
+                x = block(
+                    x,
+                    mask=mask,
+                    past_key=past_key,
+                    past_value=past_value,
+                    pos_offset=past_len,
+                )
         
         # Final RMS norm
         if self.final_ln is not None:
@@ -435,5 +697,11 @@ class Transformer(nnx.Module):
         # Squeeze single output dimension
         if config.n_out == 1:
             out = out.squeeze(-1)
-        
+
+        if return_cache:
+            return out, TransformerKVCache(
+                keys=new_keys,
+                values=new_values,
+                length=jnp.asarray(past_len, dtype=jnp.int32) + jnp.asarray(seq_len, dtype=jnp.int32),
+            )
         return out

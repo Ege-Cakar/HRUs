@@ -10,6 +10,7 @@ from model.transformer import (
     TransformerConfig, 
     MultiHeadAttention, 
     TransformerBlock,
+    create_empty_kv_cache,
     sinusoidal_pos_embedding
 )
 
@@ -430,3 +431,76 @@ class TestTransformer:
         expected_hidden = int(4 * config.n_hidden * 2 / 3)
         after_gate = block.mlp_gate(x)
         assert after_gate.shape == (1, 10, expected_hidden)
+
+    def test_create_empty_kv_cache_shapes(self):
+        config = TransformerConfig(n_hidden=32, n_heads=4, n_layers=3, n_seq=16)
+        cache = create_empty_kv_cache(config, batch_size=2)
+        assert len(cache.keys) == 3
+        assert len(cache.values) == 3
+        assert cache.keys[0].shape == (2, 4, 16, 8)
+        assert cache.values[0].shape == (2, 4, 16, 8)
+        assert int(cache.length) == 0
+
+    @pytest.mark.parametrize("pos_encoding", ["absolute", "rope"])
+    def test_cached_incremental_matches_full_sequence(self, pos_encoding):
+        config = TransformerConfig(
+            n_vocab=64,
+            n_hidden=32,
+            n_seq=16,
+            n_layers=2,
+            n_heads=4,
+            n_out=7,
+            output_mode="full_sequence",
+            pos_encoding=pos_encoding,
+        )
+        model = Transformer(config, rngs=nnx.Rngs(42))
+        x = jnp.array(
+            [
+                [1, 2, 3, 4, 5, 6, 0, 0],
+                [7, 8, 9, 1, 2, 0, 0, 0],
+            ],
+            dtype=jnp.int32,
+        )
+
+        y_full = model(x)
+
+        cache = create_empty_kv_cache(config, batch_size=x.shape[0], dtype=jnp.float32)
+        y_parts = []
+        for t in range(x.shape[1]):
+            y_t, cache = model(x[:, t : t + 1], cache=cache, return_cache=True)
+            y_parts.append(y_t)
+            assert int(cache.length) == (t + 1)
+        y_incr = jnp.concatenate(y_parts, axis=1)
+
+        np.testing.assert_allclose(y_full, y_incr, rtol=2e-3, atol=2e-3)
+
+    def test_cache_overflow_raises(self):
+        config = TransformerConfig(
+            n_vocab=32,
+            n_hidden=32,
+            n_seq=4,
+            n_layers=2,
+            n_heads=4,
+            output_mode="full_sequence",
+        )
+        model = Transformer(config, rngs=nnx.Rngs(0))
+        cache = create_empty_kv_cache(config, batch_size=1, dtype=jnp.float32)
+        x = jnp.array([[1, 2, 3, 4]], dtype=jnp.int32)
+        _, cache = model(x, cache=cache, return_cache=True)
+        with pytest.raises(ValueError, match="exceeds n_seq"):
+            model(jnp.array([[5]], dtype=jnp.int32), cache=cache, return_cache=True)
+
+    def test_last_nonpad_with_cache_raises(self):
+        config = TransformerConfig(
+            n_vocab=32,
+            n_hidden=32,
+            n_seq=8,
+            n_layers=2,
+            n_heads=4,
+            n_out=3,
+            output_mode="last_nonpad",
+        )
+        model = Transformer(config, rngs=nnx.Rngs(0))
+        cache = create_empty_kv_cache(config, batch_size=1, dtype=jnp.float32)
+        with pytest.raises(ValueError, match="does not support cache-based inference"):
+            model(jnp.array([[1, 2]], dtype=jnp.int32), cache=cache)
