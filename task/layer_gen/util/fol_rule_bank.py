@@ -203,6 +203,7 @@ class FOLRuleBank:
     vars_per_rule_max: int
     predicate_arities: dict[str, int]
     transitions: dict[int, tuple[FOLLayerRule, ...]]
+    layer_predicates: dict[int, tuple[str, ...]] | None = None
 
     def transition_rules(self, src_layer: int) -> tuple[FOLLayerRule, ...]:
         return self.transitions.get(src_layer, ())
@@ -211,6 +212,8 @@ class FOLRuleBank:
         return {rule.statement_text for rule in self.transition_rules(src_layer)}
 
     def predicates_for_layer(self, layer: int) -> tuple[str, ...]:
+        if self.layer_predicates is not None and int(layer) in self.layer_predicates:
+            return tuple(self.layer_predicates[int(layer)])
         return tuple(f"r{int(layer)}_{idx}" for idx in range(1, int(self.predicates_per_layer) + 1))
 
     def to_dict(self) -> dict:
@@ -229,6 +232,16 @@ class FOLRuleBank:
                 for pred, arity in sorted(self.predicate_arities.items())
             },
             "transitions": transitions,
+            **(
+                {
+                    "layer_predicates": {
+                        str(layer): [str(pred) for pred in preds]
+                        for layer, preds in sorted(self.layer_predicates.items())
+                    }
+                }
+                if self.layer_predicates is not None
+                else {}
+            ),
         }
 
     @classmethod
@@ -239,14 +252,17 @@ class FOLRuleBank:
             transitions[src] = tuple(
                 sorted(
                     (FOLLayerRule.from_dict(rule) for rule in rules),
-                    key=lambda rule: (
-                        len(rule.lhs),
-                        tuple(atom.text for atom in rule.lhs),
-                        len(rule.rhs),
-                        tuple(atom.text for atom in rule.rhs),
-                    ),
+                    key=_rule_sort_key,
                 )
             )
+
+        layer_predicates_payload = payload.get("layer_predicates")
+        layer_predicates = None
+        if layer_predicates_payload is not None:
+            layer_predicates = {
+                int(layer): tuple(str(pred) for pred in preds)
+                for layer, preds in layer_predicates_payload.items()
+            }
 
         return cls(
             n_layers=int(payload["n_layers"]),
@@ -259,6 +275,51 @@ class FOLRuleBank:
                 for pred, arity in payload["predicate_arities"].items()
             },
             transitions=transitions,
+            layer_predicates=layer_predicates,
+        )
+
+
+@dataclass(frozen=True)
+class FOLDepth3ICLSplitBundle:
+    train_bank: FOLRuleBank
+    eval_bank: FOLRuleBank
+    train_layer0_predicates: tuple[str, ...]
+    eval_layer0_predicates: tuple[str, ...]
+    shared_layer1_predicates: tuple[str, ...]
+    shared_layer2_predicates: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        _validate_depth3_icl_split_bundle(self)
+
+    def to_dict(self) -> dict:
+        return {
+            "version": "fol_depth3_icl_split_v1",
+            "train_bank": self.train_bank.to_dict(),
+            "eval_bank": self.eval_bank.to_dict(),
+            "train_layer0_predicates": [str(pred) for pred in self.train_layer0_predicates],
+            "eval_layer0_predicates": [str(pred) for pred in self.eval_layer0_predicates],
+            "shared_layer1_predicates": [str(pred) for pred in self.shared_layer1_predicates],
+            "shared_layer2_predicates": [str(pred) for pred in self.shared_layer2_predicates],
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict) -> "FOLDepth3ICLSplitBundle":
+        version = str(payload.get("version", ""))
+        if version != "fol_depth3_icl_split_v1":
+            raise ValueError(
+                f"Unsupported split bundle version {version!r}; expected 'fol_depth3_icl_split_v1'."
+            )
+        return cls(
+            train_bank=FOLRuleBank.from_dict(payload["train_bank"]),
+            eval_bank=FOLRuleBank.from_dict(payload["eval_bank"]),
+            train_layer0_predicates=tuple(str(pred) for pred in payload["train_layer0_predicates"]),
+            eval_layer0_predicates=tuple(str(pred) for pred in payload["eval_layer0_predicates"]),
+            shared_layer1_predicates=tuple(
+                str(pred) for pred in payload["shared_layer1_predicates"]
+            ),
+            shared_layer2_predicates=tuple(
+                str(pred) for pred in payload["shared_layer2_predicates"]
+            ),
         )
 
 
@@ -276,6 +337,15 @@ class FOLSampledProblem:
 
 def _atom_sort_key(atom: FOLAtom) -> tuple[str, tuple[str, ...]]:
     return atom.predicate, tuple(atom.args)
+
+
+def _rule_sort_key(rule: FOLLayerRule) -> tuple:
+    return (
+        len(rule.lhs),
+        tuple(atom.text for atom in rule.lhs),
+        len(rule.rhs),
+        tuple(atom.text for atom in rule.rhs),
+    )
 
 
 def _sorted_atoms(atoms: Iterable[FOLAtom]) -> tuple[FOLAtom, ...]:
@@ -408,6 +478,114 @@ def _build_random_atom(
     return FOLAtom(predicate=predicate, args=args)
 
 
+def _sample_transition_rules(
+    *,
+    src_layer: int,
+    lhs_predicates: tuple[str, ...],
+    rhs_predicates: tuple[str, ...],
+    rules_per_transition: int,
+    k_in_max: int,
+    k_out_max: int,
+    predicate_arities: dict[str, int],
+    var_pool: tuple[str, ...],
+    rng: np.random.Generator,
+) -> tuple[FOLLayerRule, ...]:
+    lhs_predicates_arr = np.asarray(lhs_predicates, dtype=object)
+    rhs_predicates_arr = np.asarray(rhs_predicates, dtype=object)
+    if lhs_predicates_arr.size < 1 or rhs_predicates_arr.size < 1:
+        raise ValueError(
+            f"Transition {src_layer}->{src_layer + 1} requires non-empty predicate pools."
+        )
+
+    max_lhs = min(int(k_in_max), int(lhs_predicates_arr.size))
+    max_rhs = min(int(k_out_max), int(rhs_predicates_arr.size))
+    if max_lhs < 1 or max_rhs < 1:
+        raise ValueError("k_in_max and k_out_max must allow at least one predicate per side.")
+
+    seen: set[tuple[tuple[str, ...], tuple[str, ...]]] = set()
+    rules: list[FOLLayerRule] = []
+    attempts = 0
+    max_attempts = max(1_000, int(rules_per_transition) * 250)
+
+    while len(rules) < int(rules_per_transition) and attempts < max_attempts:
+        attempts += 1
+        lhs_size = int(rng.integers(1, max_lhs + 1))
+        rhs_size = int(rng.integers(1, max_rhs + 1))
+
+        lhs_chosen = [
+            str(tok)
+            for tok in rng.choice(lhs_predicates_arr, size=lhs_size, replace=False)
+        ]
+        rhs_chosen = [
+            str(tok)
+            for tok in rng.choice(rhs_predicates_arr, size=rhs_size, replace=False)
+        ]
+
+        lhs_atoms = tuple(
+            _build_random_atom(
+                predicate=pred,
+                predicate_arities=predicate_arities,
+                term_pool=var_pool,
+                rng=rng,
+            )
+            for pred in lhs_chosen
+        )
+        lhs_vars = {
+            term
+            for atom in lhs_atoms
+            for term in atom.args
+            if _is_variable(term)
+        }
+        if not lhs_vars:
+            continue
+
+        rhs_atoms = tuple(
+            _build_random_atom(
+                predicate=pred,
+                predicate_arities=predicate_arities,
+                term_pool=tuple(sorted(lhs_vars)),
+                rng=rng,
+            )
+            for pred in rhs_chosen
+        )
+
+        lhs = _sorted_atoms(lhs_atoms)
+        rhs = _sorted_atoms(rhs_atoms)
+
+        rhs_vars = {
+            term
+            for atom in rhs
+            for term in atom.args
+            if _is_variable(term)
+        }
+        if not rhs_vars.issubset(lhs_vars):
+            continue
+
+        sig = (
+            tuple(atom.text for atom in lhs),
+            tuple(atom.text for atom in rhs),
+        )
+        if sig in seen:
+            continue
+        seen.add(sig)
+
+        rules.append(
+            _canonicalize_rule(
+                src_layer=src_layer,
+                lhs=lhs,
+                rhs=rhs,
+            )
+        )
+
+    if len(rules) < int(rules_per_transition):
+        raise RuntimeError(
+            "Could not sample enough unique FOL rules for transition "
+            f"{src_layer}->{src_layer + 1}."
+        )
+
+    return tuple(sorted(rules, key=_rule_sort_key))
+
+
 def build_random_fol_rule_bank(
     *,
     n_layers: int,
@@ -446,110 +624,27 @@ def build_random_fol_rule_bank(
 
     predicate_arities: dict[str, int] = {}
     transitions: dict[int, tuple[FOLLayerRule, ...]] = {}
+    layer_predicates = {
+        int(layer): _layer_predicates(layer, int(predicates_per_layer))
+        for layer in range(int(n_layers))
+    }
     var_pool = tuple(f"x{idx}" for idx in range(1, vars_per_rule_max + 1))
 
     for layer in range(n_layers):
-        for predicate in _layer_predicates(layer, predicates_per_layer):
+        for predicate in layer_predicates[int(layer)]:
             predicate_arities[predicate] = int(rng.integers(1, arity_max + 1))
 
     for src_layer in range(n_layers - 1):
-        lhs_predicates = np.asarray(_layer_predicates(src_layer, predicates_per_layer), dtype=object)
-        rhs_predicates = np.asarray(_layer_predicates(src_layer + 1, predicates_per_layer), dtype=object)
-
-        max_lhs = min(k_in_max, len(lhs_predicates))
-        max_rhs = min(k_out_max, len(rhs_predicates))
-
-        seen: set[tuple[tuple[str, ...], tuple[str, ...]]] = set()
-        rules: list[FOLLayerRule] = []
-        attempts = 0
-        max_attempts = max(1_000, rules_per_transition * 250)
-
-        while len(rules) < rules_per_transition and attempts < max_attempts:
-            attempts += 1
-            lhs_size = int(rng.integers(1, max_lhs + 1))
-            rhs_size = int(rng.integers(1, max_rhs + 1))
-
-            lhs_chosen = [
-                str(tok)
-                for tok in rng.choice(lhs_predicates, size=lhs_size, replace=False)
-            ]
-            rhs_chosen = [
-                str(tok)
-                for tok in rng.choice(rhs_predicates, size=rhs_size, replace=False)
-            ]
-
-            lhs_atoms = tuple(
-                _build_random_atom(
-                    predicate=pred,
-                    predicate_arities=predicate_arities,
-                    term_pool=var_pool,
-                    rng=rng,
-                )
-                for pred in lhs_chosen
-            )
-            lhs_vars = {
-                term
-                for atom in lhs_atoms
-                for term in atom.args
-                if _is_variable(term)
-            }
-            if not lhs_vars:
-                continue
-
-            rhs_atoms = tuple(
-                _build_random_atom(
-                    predicate=pred,
-                    predicate_arities=predicate_arities,
-                    term_pool=tuple(sorted(lhs_vars)),
-                    rng=rng,
-                )
-                for pred in rhs_chosen
-            )
-
-            lhs = _sorted_atoms(lhs_atoms)
-            rhs = _sorted_atoms(rhs_atoms)
-
-            rhs_vars = {
-                term
-                for atom in rhs
-                for term in atom.args
-                if _is_variable(term)
-            }
-            if not rhs_vars.issubset(lhs_vars):
-                continue
-
-            sig = (
-                tuple(atom.text for atom in lhs),
-                tuple(atom.text for atom in rhs),
-            )
-            if sig in seen:
-                continue
-            seen.add(sig)
-
-            rules.append(
-                _canonicalize_rule(
-                    src_layer=src_layer,
-                    lhs=lhs,
-                    rhs=rhs,
-                )
-            )
-
-        if len(rules) < rules_per_transition:
-            raise RuntimeError(
-                "Could not sample enough unique FOL rules for transition "
-                f"{src_layer}->{src_layer + 1}."
-            )
-
-        transitions[src_layer] = tuple(
-            sorted(
-                rules,
-                key=lambda rule: (
-                    len(rule.lhs),
-                    tuple(atom.text for atom in rule.lhs),
-                    len(rule.rhs),
-                    tuple(atom.text for atom in rule.rhs),
-                ),
-            )
+        transitions[src_layer] = _sample_transition_rules(
+            src_layer=int(src_layer),
+            lhs_predicates=tuple(layer_predicates[int(src_layer)]),
+            rhs_predicates=tuple(layer_predicates[int(src_layer) + 1]),
+            rules_per_transition=int(rules_per_transition),
+            k_in_max=int(k_in_max),
+            k_out_max=int(k_out_max),
+            predicate_arities=predicate_arities,
+            var_pool=var_pool,
+            rng=rng,
         )
 
     return FOLRuleBank(
@@ -560,6 +655,202 @@ def build_random_fol_rule_bank(
         vars_per_rule_max=int(vars_per_rule_max),
         predicate_arities=predicate_arities,
         transitions=transitions,
+        layer_predicates=layer_predicates,
+    )
+
+
+def _validate_depth3_icl_split_bundle(bundle: FOLDepth3ICLSplitBundle) -> None:
+    train_bank = bundle.train_bank
+    eval_bank = bundle.eval_bank
+
+    if int(train_bank.n_layers) != 3 or int(eval_bank.n_layers) != 3:
+        raise ValueError("Depth-3 ICL split requires train/eval banks with n_layers=3.")
+
+    train_l0 = tuple(str(pred) for pred in bundle.train_layer0_predicates)
+    eval_l0 = tuple(str(pred) for pred in bundle.eval_layer0_predicates)
+    shared_l1 = tuple(str(pred) for pred in bundle.shared_layer1_predicates)
+    shared_l2 = tuple(str(pred) for pred in bundle.shared_layer2_predicates)
+
+    if not train_l0 or not eval_l0 or not shared_l1 or not shared_l2:
+        raise ValueError("Split bundle predicate pools must all be non-empty.")
+    if set(train_l0) & set(eval_l0):
+        raise ValueError("Train/eval layer-0 predicate pools must be disjoint.")
+
+    if tuple(train_bank.predicates_for_layer(0)) != train_l0:
+        raise ValueError("train_bank layer-0 predicates do not match train_layer0_predicates.")
+    if tuple(eval_bank.predicates_for_layer(0)) != eval_l0:
+        raise ValueError("eval_bank layer-0 predicates do not match eval_layer0_predicates.")
+    if tuple(train_bank.predicates_for_layer(1)) != shared_l1:
+        raise ValueError("train_bank layer-1 predicates do not match shared_layer1_predicates.")
+    if tuple(eval_bank.predicates_for_layer(1)) != shared_l1:
+        raise ValueError("eval_bank layer-1 predicates do not match shared_layer1_predicates.")
+    if tuple(train_bank.predicates_for_layer(2)) != shared_l2:
+        raise ValueError("train_bank layer-2 predicates do not match shared_layer2_predicates.")
+    if tuple(eval_bank.predicates_for_layer(2)) != shared_l2:
+        raise ValueError("eval_bank layer-2 predicates do not match shared_layer2_predicates.")
+
+    if train_bank.statement_set(1) != eval_bank.statement_set(1):
+        raise ValueError("Depth-3 split requires identical layer-1->2 transitions in train/eval.")
+
+    for rule in train_bank.transition_rules(0):
+        if not all(atom.predicate in set(train_l0) for atom in rule.lhs):
+            raise ValueError("train_bank 0->1 rule uses non-train layer-0 predicate.")
+        if not all(atom.predicate in set(shared_l1) for atom in rule.rhs):
+            raise ValueError("train_bank 0->1 rule uses non-shared layer-1 predicate.")
+    for rule in eval_bank.transition_rules(0):
+        if not all(atom.predicate in set(eval_l0) for atom in rule.lhs):
+            raise ValueError("eval_bank 0->1 rule uses non-eval layer-0 predicate.")
+        if not all(atom.predicate in set(shared_l1) for atom in rule.rhs):
+            raise ValueError("eval_bank 0->1 rule uses non-shared layer-1 predicate.")
+
+    shared_predicates = set(shared_l1) | set(shared_l2)
+    for pred in shared_predicates:
+        train_arity = train_bank.predicate_arities.get(pred)
+        eval_arity = eval_bank.predicate_arities.get(pred)
+        if train_arity is None or eval_arity is None or int(train_arity) != int(eval_arity):
+            raise ValueError("Shared predicates must keep identical arities in train/eval banks.")
+
+    if tuple(train_bank.constants) != tuple(eval_bank.constants):
+        raise ValueError("Train/eval split banks must use identical constants.")
+
+
+def build_depth3_icl_split_bundle(
+    *,
+    predicates_per_layer: int,
+    rules_01_train: int,
+    rules_01_eval: int,
+    rules_12_shared: int,
+    arity_max: int,
+    vars_per_rule_max: int,
+    k_in_max: int,
+    k_out_max: int,
+    constants: Iterable[str],
+    rng: np.random.Generator,
+) -> FOLDepth3ICLSplitBundle:
+    if int(predicates_per_layer) < 1:
+        raise ValueError(
+            f"predicates_per_layer must be >= 1, got {predicates_per_layer}"
+        )
+    if int(rules_01_train) < 1 or int(rules_01_eval) < 1 or int(rules_12_shared) < 1:
+        raise ValueError("All split transition rule counts must be >= 1.")
+    if int(arity_max) < 1:
+        raise ValueError(f"arity_max must be >= 1, got {arity_max}")
+    if int(vars_per_rule_max) < 1:
+        raise ValueError(f"vars_per_rule_max must be >= 1, got {vars_per_rule_max}")
+    if int(k_in_max) < 1 or int(k_out_max) < 1:
+        raise ValueError("k_in_max and k_out_max must be >= 1")
+
+    constants = tuple(str(tok) for tok in constants)
+    if not constants:
+        raise ValueError("constants must contain at least one symbol")
+    for token in constants:
+        if not _is_identifier(token):
+            raise ValueError(f"Invalid constant symbol: {token!r}")
+
+    predicates_per_layer = int(predicates_per_layer)
+    arity_max = int(arity_max)
+    vars_per_rule_max = int(vars_per_rule_max)
+    k_in_max = int(k_in_max)
+    k_out_max = int(k_out_max)
+
+    train_layer0 = tuple(f"r0_{idx}" for idx in range(1, predicates_per_layer + 1))
+    eval_layer0 = tuple(
+        f"r0_{idx}" for idx in range(predicates_per_layer + 1, 2 * predicates_per_layer + 1)
+    )
+    shared_layer1 = _layer_predicates(1, predicates_per_layer)
+    shared_layer2 = _layer_predicates(2, predicates_per_layer)
+
+    predicate_arities_all: dict[str, int] = {}
+    for predicate in train_layer0 + eval_layer0 + shared_layer1 + shared_layer2:
+        if predicate in predicate_arities_all:
+            continue
+        predicate_arities_all[predicate] = int(rng.integers(1, arity_max + 1))
+
+    train_predicate_arities = {
+        predicate: int(predicate_arities_all[predicate])
+        for predicate in train_layer0 + shared_layer1 + shared_layer2
+    }
+    eval_predicate_arities = {
+        predicate: int(predicate_arities_all[predicate])
+        for predicate in eval_layer0 + shared_layer1 + shared_layer2
+    }
+
+    var_pool = tuple(f"x{idx}" for idx in range(1, vars_per_rule_max + 1))
+    shared_rules_12 = _sample_transition_rules(
+        src_layer=1,
+        lhs_predicates=tuple(shared_layer1),
+        rhs_predicates=tuple(shared_layer2),
+        rules_per_transition=int(rules_12_shared),
+        k_in_max=int(k_in_max),
+        k_out_max=int(k_out_max),
+        predicate_arities=train_predicate_arities,
+        var_pool=var_pool,
+        rng=rng,
+    )
+    train_rules_01 = _sample_transition_rules(
+        src_layer=0,
+        lhs_predicates=tuple(train_layer0),
+        rhs_predicates=tuple(shared_layer1),
+        rules_per_transition=int(rules_01_train),
+        k_in_max=int(k_in_max),
+        k_out_max=int(k_out_max),
+        predicate_arities=train_predicate_arities,
+        var_pool=var_pool,
+        rng=rng,
+    )
+    eval_rules_01 = _sample_transition_rules(
+        src_layer=0,
+        lhs_predicates=tuple(eval_layer0),
+        rhs_predicates=tuple(shared_layer1),
+        rules_per_transition=int(rules_01_eval),
+        k_in_max=int(k_in_max),
+        k_out_max=int(k_out_max),
+        predicate_arities=eval_predicate_arities,
+        var_pool=var_pool,
+        rng=rng,
+    )
+
+    train_bank = FOLRuleBank(
+        n_layers=3,
+        predicates_per_layer=predicates_per_layer,
+        arity_max=arity_max,
+        constants=constants,
+        vars_per_rule_max=vars_per_rule_max,
+        predicate_arities=train_predicate_arities,
+        transitions={
+            0: tuple(train_rules_01),
+            1: tuple(shared_rules_12),
+        },
+        layer_predicates={
+            0: tuple(train_layer0),
+            1: tuple(shared_layer1),
+            2: tuple(shared_layer2),
+        },
+    )
+    eval_bank = FOLRuleBank(
+        n_layers=3,
+        predicates_per_layer=predicates_per_layer,
+        arity_max=arity_max,
+        constants=constants,
+        vars_per_rule_max=vars_per_rule_max,
+        predicate_arities=eval_predicate_arities,
+        transitions={
+            0: tuple(eval_rules_01),
+            1: tuple(shared_rules_12),
+        },
+        layer_predicates={
+            0: tuple(eval_layer0),
+            1: tuple(shared_layer1),
+            2: tuple(shared_layer2),
+        },
+    )
+    return FOLDepth3ICLSplitBundle(
+        train_bank=train_bank,
+        eval_bank=eval_bank,
+        train_layer0_predicates=tuple(train_layer0),
+        eval_layer0_predicates=tuple(eval_layer0),
+        shared_layer1_predicates=tuple(shared_layer1),
+        shared_layer2_predicates=tuple(shared_layer2),
     )
 
 
@@ -656,13 +947,15 @@ def sample_fol_problem(
             f"No valid start layer for distance {distance} with n_layers={bank.n_layers}."
         )
 
-    initial_ant_max = max(1, min(int(initial_ant_max), int(bank.predicates_per_layer)))
     constants = np.asarray(bank.constants, dtype=object)
 
     for _ in range(max_attempts):
         start_layer = int(rng.integers(0, max_start + 1))
-        initial_size = int(rng.integers(1, initial_ant_max + 1))
         predicates = np.asarray(bank.predicates_for_layer(start_layer), dtype=object)
+        if predicates.size < 1:
+            continue
+        max_initial = max(1, min(int(initial_ant_max), int(predicates.size)))
+        initial_size = int(rng.integers(1, max_initial + 1))
         picked = [
             str(tok)
             for tok in rng.choice(predicates, size=initial_size, replace=False)
@@ -763,3 +1056,16 @@ def save_fol_rule_bank(path: Path, bank: FOLRuleBank) -> None:
 def load_fol_rule_bank(path: Path) -> FOLRuleBank:
     payload = json.loads(path.read_text())
     return FOLRuleBank.from_dict(payload)
+
+
+def save_fol_depth3_icl_split_bundle(
+    path: Path,
+    bundle: FOLDepth3ICLSplitBundle,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(bundle.to_dict(), indent=2))
+
+
+def load_fol_depth3_icl_split_bundle(path: Path) -> FOLDepth3ICLSplitBundle:
+    payload = json.loads(path.read_text())
+    return FOLDepth3ICLSplitBundle.from_dict(payload)

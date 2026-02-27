@@ -335,7 +335,7 @@ def test_completion_logits_adapter_decodes_greedy_fol() -> None:
 
 def test_autoregressive_logits_adapter_decodes_greedy_fol() -> None:
     tokenizer = tok.build_tokenizer_from_identifiers(["r0_1", "a", "b", "x1"])
-    target = [tokenizer.char_to_id("r0_1"), tokenizer.eot_token_id]
+    target = [tokenizer.char_to_id("r"), tokenizer.eot_token_id]
     vocab = tokenizer.vocab_size
     call_idx = {"value": 0}
 
@@ -359,7 +359,7 @@ def test_autoregressive_logits_adapter_decodes_greedy_fol() -> None:
 
 def test_autoregressive_logits_adapter_uses_cache_when_supported_fol() -> None:
     tokenizer = tok.build_tokenizer_from_identifiers(["r0_1", "a", "b", "x1"])
-    target = [tokenizer.char_to_id("r0_1"), tokenizer.eot_token_id]
+    target = [tokenizer.char_to_id("r"), tokenizer.eot_token_id]
     vocab = tokenizer.vocab_size
     calls: list[tuple[tuple[int, ...], int | None, bool]] = []
 
@@ -389,7 +389,7 @@ def test_autoregressive_logits_adapter_uses_cache_when_supported_fol() -> None:
 
 def test_autoregressive_logits_adapter_jit_step_uses_cache_when_supported_fol() -> None:
     tokenizer = tok.build_tokenizer_from_identifiers(["r0_1", "a", "b", "x1"])
-    first_tok = tokenizer.char_to_id("r0_1")
+    first_tok = tokenizer.char_to_id("r")
     target = [int(first_tok), int(tokenizer.eot_token_id)]
     vocab = int(tokenizer.vocab_size)
 

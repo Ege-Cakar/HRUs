@@ -22,10 +22,12 @@ from task.layer_gen.util import tokenize_layer_fol
 from task.layer_gen.util import online_prefetch as online_prefetch_util
 from task.layer_gen.util.fol_rule_bank import (
     FOLAtom,
+    FOLDepth3ICLSplitBundle,
     FOLLayerRule,
     FOLRuleBank,
     FOLSequent,
     build_random_fol_rule_bank,
+    load_fol_depth3_icl_split_bundle,
     load_fol_rule_bank,
     parse_atom_text,
     parse_clause_text,
@@ -36,17 +38,59 @@ from task.layer_gen.util.fol_rule_bank import (
 _FOL_ONLINE_WORKER_LOCAL = threading.local()
 
 
+def _build_tokenizer_for_split_bundle(
+    bundle: FOLDepth3ICLSplitBundle,
+) -> tokenize_layer_fol.FOLLayerTokenizer:
+    max_vars = max(
+        int(bundle.train_bank.vars_per_rule_max),
+        int(bundle.eval_bank.vars_per_rule_max),
+    )
+    identifiers: set[str] = set(bundle.train_bank.constants) | set(bundle.eval_bank.constants)
+    identifiers.update(bundle.train_bank.predicate_arities)
+    identifiers.update(bundle.eval_bank.predicate_arities)
+    identifiers.update(f"x{idx}" for idx in range(1, int(max_vars) + 1))
+    predicate_identifiers = set(bundle.train_bank.predicate_arities)
+    predicate_identifiers.update(bundle.eval_bank.predicate_arities)
+    return tokenize_layer_fol.build_tokenizer_from_identifiers(
+        sorted(identifiers),
+        predicate_identifiers=sorted(predicate_identifiers),
+    )
+
+
+def _pick_sampled_step_index(
+    *,
+    rng: np.random.Generator,
+    n_steps: int,
+    forced_step_idx: int | None,
+) -> int:
+    if int(n_steps) < 1:
+        raise ValueError(f"n_steps must be >= 1, got {n_steps}")
+    if forced_step_idx is None:
+        return int(rng.integers(0, int(n_steps)))
+    forced = int(forced_step_idx)
+    if forced < 0 or forced >= int(n_steps):
+        raise ValueError(
+            f"forced_step_idx={forced} is out of range for sampled problem with {n_steps} steps."
+        )
+    return forced
+
+
 def _init_fol_online_worker(
     seed_base: int,
     bank_payload: dict,
+    tokenizer_payload: dict | None,
     distances: tuple[int, ...],
     initial_ant_max: int,
     sample_max_attempts: int,
     max_unify_solutions: int,
     max_n_demos: int,
+    forced_step_idx: int | None,
 ) -> None:
     bank = FOLRuleBank.from_dict(bank_payload)
-    tokenizer = tokenize_layer_fol.build_tokenizer_from_rule_bank(bank)
+    if tokenizer_payload is None:
+        tokenizer = tokenize_layer_fol.build_tokenizer_from_rule_bank(bank)
+    else:
+        tokenizer = tokenize_layer_fol.FOLLayerTokenizer.from_dict(tokenizer_payload)
     worker_seed = (
         int(seed_base)
         + int(os.getpid()) * 1_000_003
@@ -60,6 +104,9 @@ def _init_fol_online_worker(
         "sample_max_attempts": int(sample_max_attempts),
         "max_unify_solutions": int(max_unify_solutions),
         "max_n_demos": int(max_n_demos),
+        "forced_step_idx": (
+            None if forced_step_idx is None else int(forced_step_idx)
+        ),
         "rng": np.random.default_rng(worker_seed),
     }
 
@@ -96,7 +143,11 @@ def _sample_fol_online_worker_record() -> dict:
             f"after 3 retries with max_attempts={state['sample_max_attempts']}."
         ) from last_err
 
-    step_idx = int(rng.integers(0, len(sampled.step_rules)))
+    step_idx = _pick_sampled_step_index(
+        rng=rng,
+        n_steps=len(sampled.step_rules),
+        forced_step_idx=state["forced_step_idx"],
+    )
     src_layer = sampled.step_layers[step_idx]
     ants = sampled.step_ants[step_idx]
     rule = sampled.step_rules[step_idx]
@@ -307,6 +358,9 @@ class FOLLayerTask:
         prediction_objective="autoregressive",
         fixed_length_mode="batch_max",
         fixed_length_n_seq=None,
+        task_split="none",
+        split_role="train",
+        split_rule_bundle_path=None,
         # online mode / rule bank config
         rule_bank_path=None,
         n_layers=16,
@@ -348,7 +402,39 @@ class FOLLayerTask:
             raise ValueError(
                 f"fixed_length_n_seq must be >= 2, got {self.fixed_length_n_seq}"
             )
-        if rule_bank_path is None:
+        self.task_split = str(task_split)
+        if self.task_split not in {"none", "depth3_icl_transfer"}:
+            raise ValueError(
+                "task_split must be 'none' or 'depth3_icl_transfer', "
+                f"got {self.task_split!r}"
+            )
+        self.split_role = str(split_role)
+        if self.split_role not in {"train", "eval"}:
+            raise ValueError(
+                "split_role must be 'train' or 'eval', "
+                f"got {self.split_role!r}"
+            )
+        self.split_rule_bundle_path = (
+            None
+            if split_rule_bundle_path is None
+            else Path(split_rule_bundle_path)
+        )
+        self._split_bundle: FOLDepth3ICLSplitBundle | None = None
+        self._online_forced_step_idx: int | None = None
+        if self.task_split == "depth3_icl_transfer":
+            if self.mode != "online":
+                raise ValueError("task_split='depth3_icl_transfer' requires mode='online'.")
+            if self.split_rule_bundle_path is None:
+                raise ValueError(
+                    "split_rule_bundle_path is required when task_split='depth3_icl_transfer'."
+                )
+            if rule_bank_path is not None:
+                raise ValueError(
+                    "rule_bank_path cannot be combined with task_split='depth3_icl_transfer'; "
+                    "use split_rule_bundle_path."
+                )
+
+        if self.task_split == "none" and rule_bank_path is None:
             if ds_path is not None:
                 rule_bank_path = Path(ds_path) / "rule_bank.json"
                 if not rule_bank_path.exists():
@@ -357,6 +443,13 @@ class FOLLayerTask:
 
         self.distance_range = distance_range
         self._distances = self._normalize_distances(distance_range)
+        if self.task_split == "depth3_icl_transfer":
+            if self._distances != [2]:
+                raise ValueError(
+                    "task_split='depth3_icl_transfer' requires distance_range to resolve "
+                    f"to [2], got {self._distances}."
+                )
+            self._online_forced_step_idx = 0 if self.split_role == "eval" else None
         self.batch_size = int(batch_size)
         self.shuffle = bool(shuffle)
         self.seed = seed if seed is not None else int(
@@ -413,7 +506,18 @@ class FOLLayerTask:
         self._rule_bank: FOLRuleBank | None = None
         self._tokenizer: tokenize_layer_fol.FOLLayerTokenizer | None = None
         if self.mode == "online" or rule_bank_path is not None:
-            if rule_bank_path is not None:
+            if self.task_split == "depth3_icl_transfer":
+                if self.split_rule_bundle_path is None:
+                    raise RuntimeError("split_rule_bundle_path must be set for split mode.")
+                self._split_bundle = load_fol_depth3_icl_split_bundle(
+                    Path(self.split_rule_bundle_path)
+                )
+                if self.split_role == "train":
+                    self._rule_bank = self._split_bundle.train_bank
+                else:
+                    self._rule_bank = self._split_bundle.eval_bank
+                self._tokenizer = _build_tokenizer_for_split_bundle(self._split_bundle)
+            elif rule_bank_path is not None:
                 self._rule_bank = load_fol_rule_bank(Path(rule_bank_path))
             else:
                 self._rule_bank = build_random_fol_rule_bank(
@@ -427,7 +531,10 @@ class FOLLayerTask:
                     k_out_max=int(k_out_max),
                     rng=self._rng,
                 )
-            self._tokenizer = tokenize_layer_fol.build_tokenizer_from_rule_bank(self._rule_bank)
+            if self._tokenizer is None:
+                self._tokenizer = tokenize_layer_fol.build_tokenizer_from_rule_bank(
+                    self._rule_bank
+                )
 
         if self.mode == "offline":
             if self.ds_path is None:
@@ -607,11 +714,21 @@ class FOLLayerTask:
         initargs = (
             int(self.seed),
             self._rule_bank.to_dict(),
+            (
+                None
+                if self.task_split == "none"
+                else self._tokenizer.to_dict()
+            ),
             tuple(self._distances),
             int(self.initial_ant_max),
             int(self.sample_max_attempts),
             int(self.max_unify_solutions),
             int(self.max_n_demos),
+            (
+                None
+                if self._online_forced_step_idx is None
+                else int(self._online_forced_step_idx)
+            ),
         )
 
         def _make_process_executor():
@@ -721,7 +838,11 @@ class FOLLayerTask:
                 f"after 3 retries with max_attempts={self.sample_max_attempts}."
             ) from last_err
 
-        step_idx = int(self._rng.integers(0, len(sampled.step_rules)))
+        step_idx = _pick_sampled_step_index(
+            rng=self._rng,
+            n_steps=len(sampled.step_rules),
+            forced_step_idx=self._online_forced_step_idx,
+        )
         src_layer = sampled.step_layers[step_idx]
         ants = sampled.step_ants[step_idx]
         rule = sampled.step_rules[step_idx]
@@ -783,7 +904,17 @@ class FOLLayerTask:
                 for rule in rules
             )
             max_prompt_facts = max(int(self.initial_ant_max), int(max_rhs_atoms))
-            max_atom_len = 2 * int(self._rule_bank.arity_max) + 2
+            max_atom_len = 1
+            first_const = str(self._rule_bank.constants[0])
+            for predicate, arity in self._rule_bank.predicate_arities.items():
+                atom = FOLAtom(
+                    predicate=str(predicate),
+                    args=tuple(first_const for _ in range(int(arity))),
+                )
+                max_atom_len = max(
+                    int(max_atom_len),
+                    len(self._tokenizer.encode_completion(atom.text)) - 1,
+                )
             max_prompt_len = (
                 max_prompt_facts * max_atom_len
                 + max(0, max_prompt_facts - 1)

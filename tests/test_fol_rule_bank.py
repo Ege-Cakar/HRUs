@@ -4,11 +4,16 @@ import numpy as np
 
 from task.layer_gen.util.fol_rule_bank import (
     FOLAtom,
+    FOLDepth3ICLSplitBundle,
+    FOLRuleBank,
     FOLSequent,
+    build_depth3_icl_split_bundle,
     build_random_fol_rule_bank,
+    load_fol_depth3_icl_split_bundle,
     parse_clause_text,
     parse_sequent_text,
     sample_fol_problem,
+    save_fol_depth3_icl_split_bundle,
 )
 
 
@@ -84,3 +89,87 @@ def test_sample_problem_outputs_ground_instantiations() -> None:
         assert set(rule.lhs).issubset(set(ants))
         for atom in rule.lhs + rule.rhs:
             assert not any(term.startswith("x") for term in atom.args)
+
+
+def test_build_depth3_split_bundle_disjoint_layer0_predicates() -> None:
+    bundle = build_depth3_icl_split_bundle(
+        predicates_per_layer=4,
+        rules_01_train=8,
+        rules_01_eval=8,
+        rules_12_shared=8,
+        arity_max=3,
+        vars_per_rule_max=4,
+        k_in_max=2,
+        k_out_max=2,
+        constants=("a", "b", "c"),
+        rng=np.random.default_rng(7),
+    )
+    assert isinstance(bundle, FOLDepth3ICLSplitBundle)
+    assert bundle.train_bank.n_layers == 3
+    assert bundle.eval_bank.n_layers == 3
+    assert set(bundle.train_layer0_predicates).isdisjoint(set(bundle.eval_layer0_predicates))
+
+
+def test_build_depth3_split_bundle_shared_1_to_2_transitions_identical() -> None:
+    bundle = build_depth3_icl_split_bundle(
+        predicates_per_layer=4,
+        rules_01_train=8,
+        rules_01_eval=8,
+        rules_12_shared=8,
+        arity_max=3,
+        vars_per_rule_max=4,
+        k_in_max=2,
+        k_out_max=2,
+        constants=("a", "b", "c"),
+        rng=np.random.default_rng(11),
+    )
+    assert bundle.train_bank.statement_set(1) == bundle.eval_bank.statement_set(1)
+
+
+def test_split_bundle_roundtrip_save_load_preserves_banks_and_sets(tmp_path) -> None:
+    bundle = build_depth3_icl_split_bundle(
+        predicates_per_layer=3,
+        rules_01_train=4,
+        rules_01_eval=5,
+        rules_12_shared=6,
+        arity_max=3,
+        vars_per_rule_max=4,
+        k_in_max=2,
+        k_out_max=2,
+        constants=("a", "b", "c"),
+        rng=np.random.default_rng(13),
+    )
+    path = tmp_path / "split_bundle.json"
+    save_fol_depth3_icl_split_bundle(path, bundle)
+    loaded = load_fol_depth3_icl_split_bundle(path)
+
+    assert loaded.train_bank.to_dict() == bundle.train_bank.to_dict()
+    assert loaded.eval_bank.to_dict() == bundle.eval_bank.to_dict()
+    assert loaded.train_layer0_predicates == bundle.train_layer0_predicates
+    assert loaded.eval_layer0_predicates == bundle.eval_layer0_predicates
+    assert loaded.shared_layer1_predicates == bundle.shared_layer1_predicates
+    assert loaded.shared_layer2_predicates == bundle.shared_layer2_predicates
+
+
+def test_fol_rule_bank_layer_predicates_override_predicates_for_layer() -> None:
+    bank = FOLRuleBank(
+        n_layers=3,
+        predicates_per_layer=2,
+        arity_max=1,
+        constants=("a",),
+        vars_per_rule_max=1,
+        predicate_arities={
+            "r0_9": 1,
+            "r1_9": 1,
+            "r2_9": 1,
+        },
+        transitions={},
+        layer_predicates={
+            0: ("r0_9",),
+            1: ("r1_9",),
+            2: ("r2_9",),
+        },
+    )
+    assert bank.predicates_for_layer(0) == ("r0_9",)
+    assert bank.predicates_for_layer(1) == ("r1_9",)
+    assert bank.predicates_for_layer(2) == ("r2_9",)

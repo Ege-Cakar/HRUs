@@ -26,6 +26,19 @@ def test_layer_fol_tokenize_roundtrip_prompt_and_completion() -> None:
     assert completion[-1] == tokenizer.eot_token_id
 
 
+def test_layered_predicates_are_char_tokenized_and_arg_commas_are_omitted() -> None:
+    tokenizer = tok.build_tokenizer_from_identifiers(
+        ["r3_20", "r4_1", "alice", "bob", "x1"]
+    )
+    completion = tokenizer.encode_completion("r3_20(alice,bob) → r4_1(alice,bob)")
+    decoded = tokenizer.decode_batch_ids([completion], include_special_tokens=False)[0]
+
+    assert "r3_20" not in tokenizer.token_to_id
+    for ch in "r3_20":
+        assert ch in tokenizer.token_to_id
+    assert "," not in decoded
+
+
 def test_decode_prompt_requires_sep() -> None:
     tokenizer = tok.build_tokenizer_from_identifiers(["r0_1", "r1_1", "a", "b"])
     sequent = FOLSequent(

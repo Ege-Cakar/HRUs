@@ -157,7 +157,14 @@ def _compute_dims(rule_bank, tokenizer):
         for rule in rules
     )
     max_prompt_facts = max(int(INITIAL_ANT_MAX), int(max_rhs_atoms))
-    max_atom_len = 2 * int(rule_bank.arity_max) + 2
+    max_atom_len = 1
+    first_const = str(rule_bank.constants[0])
+    for predicate, arity in rule_bank.predicate_arities.items():
+        atom_text = f"{str(predicate)}({','.join(first_const for _ in range(int(arity)))})"
+        max_atom_len = max(
+            int(max_atom_len),
+            len(tokenizer.encode_completion(atom_text)) - 1,
+        )
     max_prompt_len = (
         max_prompt_facts * max_atom_len
         + max(0, max_prompt_facts - 1)

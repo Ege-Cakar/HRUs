@@ -14,7 +14,12 @@ from task.layer_fol import (
     _find_instantiation_for_rule,
 )
 from task.layer_gen.util import tokenize_layer_fol as tok
-from task.layer_gen.util.fol_rule_bank import FOLAtom, FOLSequent
+from task.layer_gen.util.fol_rule_bank import (
+    FOLAtom,
+    FOLSequent,
+    build_depth3_icl_split_bundle,
+    save_fol_depth3_icl_split_bundle,
+)
 
 
 def _write_array_record(path: Path, records) -> None:
@@ -93,6 +98,24 @@ def _constants_from_atoms(atoms) -> set[str]:
         for term in atom.args
         if isinstance(term, str) and not term.startswith("x")
     }
+
+
+def _write_depth3_split_bundle(tmp_path: Path, seed: int = 0) -> Path:
+    bundle = build_depth3_icl_split_bundle(
+        predicates_per_layer=4,
+        rules_01_train=8,
+        rules_01_eval=8,
+        rules_12_shared=8,
+        arity_max=3,
+        vars_per_rule_max=4,
+        k_in_max=2,
+        k_out_max=2,
+        constants=("a", "b", "c"),
+        rng=np.random.default_rng(seed),
+    )
+    path = tmp_path / "depth3_icl_split.json"
+    save_fol_depth3_icl_split_bundle(path, bundle)
+    return path
 
 
 def test_layer_fol_task_offline_autoreg(tmp_path: Path) -> None:
@@ -658,3 +681,173 @@ def test_layer_fol_task_online_autoreg_global_max_accounts_for_demos() -> None:
         assert xs.shape == ys.shape
         widths.add(xs.shape[1])
     assert widths == {task_with_demo._global_autoreg_seq_len}
+
+
+def test_layer_fol_task_split_mode_requires_online_and_bundle_path(tmp_path: Path) -> None:
+    split_path = _write_depth3_split_bundle(tmp_path, seed=201)
+    with pytest.raises(ValueError, match="requires mode='online'"):
+        FOLLayerTask(
+            mode="offline",
+            task_split="depth3_icl_transfer",
+            split_rule_bundle_path=split_path,
+        )
+
+    with pytest.raises(ValueError, match="split_rule_bundle_path"):
+        FOLLayerTask(
+            mode="online",
+            task_split="depth3_icl_transfer",
+            distance_range=(2, 2),
+        )
+
+
+def test_layer_fol_task_split_mode_requires_distance_2_only(tmp_path: Path) -> None:
+    split_path = _write_depth3_split_bundle(tmp_path, seed=202)
+    with pytest.raises(ValueError, match="resolve to \\[2\\]"):
+        FOLLayerTask(
+            mode="online",
+            task_split="depth3_icl_transfer",
+            split_role="train",
+            split_rule_bundle_path=split_path,
+            distance_range=(1, 2),
+        )
+
+
+def test_layer_fol_task_split_train_samples_both_src_layers(tmp_path: Path) -> None:
+    split_path = _write_depth3_split_bundle(tmp_path, seed=203)
+    task = FOLLayerTask(
+        mode="online",
+        task_split="depth3_icl_transfer",
+        split_role="train",
+        split_rule_bundle_path=split_path,
+        distance_range=(2, 2),
+        batch_size=1,
+        seed=203,
+        initial_ant_max=3,
+        max_n_demos=0,
+        online_prefetch_backend="sync",
+    )
+    seen = set()
+    for _ in range(80):
+        rec = task._sample_online_record()
+        seen.add(int(rec["src_layer"]))
+        if seen == {0, 1}:
+            break
+    assert seen == {0, 1}
+
+
+def test_layer_fol_task_split_eval_samples_only_src_layer_0(tmp_path: Path) -> None:
+    split_path = _write_depth3_split_bundle(tmp_path, seed=204)
+    task = FOLLayerTask(
+        mode="online",
+        task_split="depth3_icl_transfer",
+        split_role="eval",
+        split_rule_bundle_path=split_path,
+        distance_range=(2, 2),
+        batch_size=1,
+        seed=204,
+        initial_ant_max=3,
+        max_n_demos=0,
+        online_prefetch_backend="sync",
+    )
+    for _ in range(40):
+        rec = task._sample_online_record()
+        assert int(rec["src_layer"]) == 0
+
+
+def test_layer_fol_task_split_train_tokenizer_contains_eval_only_predicates(tmp_path: Path) -> None:
+    split_path = _write_depth3_split_bundle(tmp_path, seed=205)
+    train_task = FOLLayerTask(
+        mode="online",
+        task_split="depth3_icl_transfer",
+        split_role="train",
+        split_rule_bundle_path=split_path,
+        distance_range=(2, 2),
+        batch_size=1,
+        seed=205,
+        max_n_demos=0,
+        online_prefetch_backend="sync",
+    )
+    eval_only_predicate = train_task._split_bundle.eval_layer0_predicates[0]
+    assert eval_only_predicate not in set(train_task.rule_bank.predicates_for_layer(0))
+    assert eval_only_predicate not in train_task.tokenizer.token_to_id
+    for ch in eval_only_predicate:
+        assert ch in train_task.tokenizer.token_to_id
+
+
+def test_layer_fol_task_split_eval_demo_schemas_are_applicable(tmp_path: Path) -> None:
+    split_path = _write_depth3_split_bundle(tmp_path, seed=206)
+    task = FOLLayerTask(
+        mode="online",
+        task_split="depth3_icl_transfer",
+        split_role="eval",
+        split_rule_bundle_path=split_path,
+        distance_range=(2, 2),
+        batch_size=1,
+        seed=206,
+        initial_ant_max=3,
+        max_n_demos=3,
+        online_prefetch_backend="sync",
+    )
+
+    saw_demo = False
+    for _ in range(40):
+        rec = task._sample_online_record()
+        assert int(rec["src_layer"]) == 0
+        prompt = np.asarray(rec["prompt"], dtype=np.int32)
+        segments = _split_prompt_segments(prompt, task.tokenizer.sep_token_id)
+        demo_segments = segments[:-1]
+        if not demo_segments:
+            continue
+        saw_demo = True
+
+        main_prompt = list(segments[-1]) + [int(task.tokenizer.sep_token_id)]
+        sequent = task.tokenizer.decode_prompt(main_prompt)
+        applicable = _collect_applicable_demo_schemas(
+            rule_bank=task.rule_bank,
+            src_layer=0,
+            ants=sequent.ants,
+            max_unify_solutions=task.max_unify_solutions,
+        )
+        assert applicable
+
+        for demo in demo_segments:
+            lhs_atoms, rhs_atoms = task.tokenizer.decode_completion_clause(
+                list(demo) + [int(task.tokenizer.eot_token_id)]
+            )
+            is_from_applicable_schema = any(
+                _find_instantiation_for_rule(
+                    template=schema,
+                    lhs_ground=lhs_atoms,
+                    rhs_ground=rhs_atoms,
+                )
+                is not None
+                for schema in applicable
+            )
+            assert is_from_applicable_schema
+    assert saw_demo
+
+
+def test_layer_fol_task_split_eval_prefetch_thread_forces_src_layer_0(tmp_path: Path) -> None:
+    split_path = _write_depth3_split_bundle(tmp_path, seed=207)
+    with FOLLayerTask(
+        mode="online",
+        task_split="depth3_icl_transfer",
+        split_role="eval",
+        split_rule_bundle_path=split_path,
+        distance_range=(2, 2),
+        batch_size=2,
+        seed=207,
+        initial_ant_max=3,
+        max_n_demos=1,
+        online_prefetch_backend="thread",
+        online_prefetch_workers=1,
+        online_prefetch_buffer_size=4,
+    ) as task:
+        assert task.online_prefetch_enabled
+        assert task._online_prefetch_buffer is not None
+        records = task._online_prefetch_buffer.take(6)
+        assert records
+        assert all(int(rec["src_layer"]) == 0 for rec in records)
+        xs, ys = next(task)
+        assert xs.shape[0] == 2
+        assert ys.shape[0] == 2

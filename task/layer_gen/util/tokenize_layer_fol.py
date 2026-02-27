@@ -16,7 +16,7 @@ from .fol_rule_bank import (
 )
 
 pad_idx = 0
-TOKENIZER_VERSION = "layer_fol_v2_unified"
+TOKENIZER_VERSION = "layer_fol_v3_predicate_chars"
 
 PAD_TOKEN = "<PAD>"
 SEP_TOKEN = "<SEP>"
@@ -25,6 +25,8 @@ EOT_TOKEN = "<EOT>"
 _LOGIC_TOKENS = ("⊢", "∧", "→", "(", ")", ",")
 _RESERVED_TOKENS = (PAD_TOKEN, SEP_TOKEN, EOT_TOKEN)
 _IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_PREDICATE_RE = re.compile(r"r\d+_\d+$")
+_PREDICATE_CHAR_RE = re.compile(r"[A-Za-z0-9_]")
 
 
 def _format_conjunction(atoms: tuple[FOLAtom, ...]) -> str:
@@ -33,13 +35,27 @@ def _format_conjunction(atoms: tuple[FOLAtom, ...]) -> str:
 
 def _build_vocab(
     identifiers: Iterable[str],
+    *,
+    predicate_identifiers: Iterable[str] | None = None,
 ) -> tuple[dict[str, int], dict[int, str], int, int]:
-    unique_sorted = sorted(set(str(tok) for tok in identifiers))
+    all_identifiers = {str(tok) for tok in identifiers}
+    if predicate_identifiers is None:
+        predicate_tokens = {
+            token for token in all_identifiers if _PREDICATE_RE.fullmatch(token) is not None
+        }
+    else:
+        predicate_tokens = {str(tok) for tok in predicate_identifiers}
+        all_identifiers.update(predicate_tokens)
+
+    unique_sorted = sorted(all_identifiers)
     for token in unique_sorted:
         if token in _RESERVED_TOKENS:
             raise ValueError(f"Identifier token is reserved for special use: {token!r}")
         if _IDENTIFIER_RE.fullmatch(token) is None:
             raise ValueError(f"Invalid identifier token: {token!r}")
+    for predicate in sorted(predicate_tokens):
+        if _IDENTIFIER_RE.fullmatch(predicate) is None:
+            raise ValueError(f"Invalid predicate token: {predicate!r}")
 
     token_to_id: dict[str, int] = {PAD_TOKEN: pad_idx}
     next_id = pad_idx + 1
@@ -56,12 +72,35 @@ def _build_vocab(
     token_to_id[EOT_TOKEN] = eot_token_id
     next_id += 1
 
-    for token in unique_sorted:
+    # Non-predicate identifiers are represented as single tokens.
+    for token in (tok for tok in unique_sorted if tok not in predicate_tokens):
+        if token in token_to_id:
+            continue
         token_to_id[token] = next_id
+        next_id += 1
+
+    # Layered predicates are represented by character tokens.
+    predicate_chars = sorted({ch for token in predicate_tokens for ch in token})
+    for ch in predicate_chars:
+        if _PREDICATE_CHAR_RE.fullmatch(ch) is None:
+            raise ValueError(f"Unsupported predicate character token: {ch!r}")
+        if ch in token_to_id:
+            continue
+        if ch in _RESERVED_TOKENS or ch in _LOGIC_TOKENS:
+            raise ValueError(f"Predicate character collides with reserved/logic token: {ch!r}")
+        token_to_id[ch] = next_id
         next_id += 1
 
     id_to_token = {idx: token for token, idx in token_to_id.items()}
     return token_to_id, id_to_token, sep_token_id, eot_token_id
+
+
+def _predicate_is_char_tokenized(predicate: str) -> bool:
+    return _PREDICATE_RE.fullmatch(str(predicate)) is not None
+
+
+def _is_identifier_symbol(symbol: str) -> bool:
+    return _IDENTIFIER_RE.fullmatch(symbol) is not None
 
 
 @dataclass(frozen=True)
@@ -73,8 +112,16 @@ class FOLLayerTokenizer:
     version: str = TOKENIZER_VERSION
 
     @classmethod
-    def from_identifiers(cls, identifiers: Iterable[str]) -> "FOLLayerTokenizer":
-        token_to_id, id_to_token, sep_token_id, eot_token_id = _build_vocab(identifiers)
+    def from_identifiers(
+        cls,
+        identifiers: Iterable[str],
+        *,
+        predicate_identifiers: Iterable[str] | None = None,
+    ) -> "FOLLayerTokenizer":
+        token_to_id, id_to_token, sep_token_id, eot_token_id = _build_vocab(
+            identifiers,
+            predicate_identifiers=predicate_identifiers,
+        )
         return cls(
             token_to_id=token_to_id,
             id_to_token=id_to_token,
@@ -87,7 +134,10 @@ class FOLLayerTokenizer:
         identifiers: set[str] = set(rule_bank.constants)
         identifiers.update(rule_bank.predicate_arities)
         identifiers.update(f"x{idx}" for idx in range(1, int(rule_bank.vars_per_rule_max) + 1))
-        return cls.from_identifiers(sorted(identifiers))
+        return cls.from_identifiers(
+            sorted(identifiers),
+            predicate_identifiers=sorted(rule_bank.predicate_arities),
+        )
 
     @classmethod
     def from_dict(cls, payload: dict) -> "FOLLayerTokenizer":
@@ -136,8 +186,10 @@ class FOLLayerTokenizer:
             token = id_to_token[tok_id]
             if token in _RESERVED_TOKENS or token in _LOGIC_TOKENS:
                 raise ValueError(f"Unexpected reserved token in identifier range: {token!r}")
-            if _IDENTIFIER_RE.fullmatch(token) is None:
-                raise ValueError(f"Invalid identifier token in metadata: {token!r}")
+            if _IDENTIFIER_RE.fullmatch(token) is None and not (
+                len(token) == 1 and _PREDICATE_CHAR_RE.fullmatch(token) is not None
+            ):
+                raise ValueError(f"Invalid identifier/predicate-char token in metadata: {token!r}")
 
         vocab_size = int(payload.get("vocab_size", len(sorted_ids)))
         if vocab_size != len(sorted_ids):
@@ -183,40 +235,49 @@ class FOLLayerTokenizer:
             return self.id_to_token[token_id]
         raise ValueError(f"Unknown token id: {token_id}")
 
-    def _tokenize_text(self, text: str) -> list[int]:
+    def _encode_predicate(self, predicate: str) -> list[int]:
+        if _predicate_is_char_tokenized(predicate):
+            return [self.char_to_id(ch) for ch in predicate]
+        return [self.char_to_id(predicate)]
+
+    def _encode_atom(self, atom: FOLAtom) -> list[int]:
         tokens: list[int] = []
-        idx = 0
-        while idx < len(text):
-            ch = text[idx]
-            if ch.isspace():
-                idx += 1
-                continue
-
-            if ch in _LOGIC_TOKENS:
-                tokens.append(self.char_to_id(ch))
-                idx += 1
-                continue
-
-            match = _IDENTIFIER_RE.match(text, idx)
-            if match is None:
-                raise ValueError(f"Invalid symbol at index {idx} in {text!r}")
-            ident = match.group(0)
-            tokens.append(self.char_to_id(ident))
-            idx = match.end()
-
+        tokens.extend(self._encode_predicate(atom.predicate))
+        tokens.append(self.char_to_id("("))
+        for arg in atom.args:
+            tokens.append(self.char_to_id(arg))
+        tokens.append(self.char_to_id(")"))
         return tokens
 
     def tokenize_prompt(self, sequent: FOLSequent) -> list[int]:
-        return self._tokenize_text(sequent.text) + [self.sep_token_id]
+        tokens: list[int] = []
+        for idx, atom in enumerate(sequent.ants):
+            if idx > 0:
+                tokens.append(self.char_to_id(","))
+            tokens.extend(self._encode_atom(atom))
+        tokens.append(self.char_to_id("⊢"))
+        tokens.extend(self._encode_atom(sequent.cons))
+        tokens.append(self.sep_token_id)
+        return tokens
+
+    def _encode_conjunction(self, atoms: tuple[FOLAtom, ...]) -> list[int]:
+        tokens: list[int] = []
+        for idx, atom in enumerate(atoms):
+            if idx > 0:
+                tokens.append(self.char_to_id("∧"))
+            tokens.extend(self._encode_atom(atom))
+        return tokens
 
     def encode_completion(self, statement_text: str) -> list[int]:
         try:
             lhs, rhs = parse_clause_text(statement_text)
-            canonical = f"{_format_conjunction(lhs)} → {_format_conjunction(rhs)}"
+            tokens = self._encode_conjunction(lhs)
+            tokens.append(self.char_to_id("→"))
+            tokens.extend(self._encode_conjunction(rhs))
         except ValueError:
             atoms = parse_conjunction_text(statement_text)
-            canonical = _format_conjunction(atoms)
-        return self._tokenize_text(canonical) + [self.eot_token_id]
+            tokens = self._encode_conjunction(atoms)
+        return tokens + [self.eot_token_id]
 
     def tokenize_example(self, sequent: FOLSequent, statement_text: str) -> tuple[list[int], list[int]]:
         return self.tokenize_prompt(sequent), self.encode_completion(statement_text)
@@ -228,7 +289,10 @@ class FOLLayerTokenizer:
             raise ValueError("Prompt must terminate with SEP token.")
 
         symbols = [self.id_to_char(int(tok)) for tok in prompt_tokens[:-1]]
-        return parse_sequent_text("".join(symbols))
+        if any(sym in _RESERVED_TOKENS for sym in symbols):
+            raise ValueError("Prompt body contains reserved special tokens.")
+        sequent = _decode_prompt_symbols_to_sequent(symbols)
+        return parse_sequent_text(sequent.text)
 
     def decode_completion_clause(self, completion_tokens: list[int]) -> tuple[tuple[FOLAtom, ...], tuple[FOLAtom, ...]]:
         if len(completion_tokens) < 2:
@@ -237,7 +301,11 @@ class FOLLayerTokenizer:
             raise ValueError("Completion must terminate with EOT token.")
 
         symbols = [self.id_to_char(int(tok)) for tok in completion_tokens[:-1]]
-        return parse_clause_text("".join(symbols))
+        if any(sym in _RESERVED_TOKENS for sym in symbols):
+            raise ValueError("Completion body contains reserved special tokens.")
+        lhs, rhs = _decode_completion_symbols_to_clause(symbols)
+        canonical = f"{_format_conjunction(lhs)} → {_format_conjunction(rhs)}"
+        return parse_clause_text(canonical)
 
     def decode_completion_text(self, completion_tokens: list[int]) -> str:
         if len(completion_tokens) < 2:
@@ -246,12 +314,16 @@ class FOLLayerTokenizer:
             raise ValueError("Completion must terminate with EOT token.")
 
         symbols = [self.id_to_char(int(tok)) for tok in completion_tokens[:-1]]
-        text = "".join(symbols)
+        if any(sym in _RESERVED_TOKENS for sym in symbols):
+            raise ValueError("Completion body contains reserved special tokens.")
         try:
-            lhs, rhs = parse_clause_text(text)
+            lhs, rhs = _decode_completion_symbols_to_clause(symbols)
+            canonical = f"{_format_conjunction(lhs)} → {_format_conjunction(rhs)}"
+            lhs, rhs = parse_clause_text(canonical)
             return f"{_format_conjunction(lhs)} → {_format_conjunction(rhs)}"
         except ValueError:
-            atoms = parse_conjunction_text(text)
+            atoms = _decode_completion_symbols_to_conjunction(symbols)
+            atoms = parse_conjunction_text(_format_conjunction(atoms))
             return _format_conjunction(atoms)
 
     def decode_batch_ids(
@@ -292,8 +364,114 @@ def _normalize_batch_rows(batch_ids) -> list[list[int]]:
     return [list(int(tok) for tok in batch_ids)]
 
 
-def build_tokenizer_from_identifiers(identifiers: Iterable[str]) -> FOLLayerTokenizer:
-    return FOLLayerTokenizer.from_identifiers(identifiers)
+def _parse_atom_from_symbols(
+    symbols: list[str],
+    idx: int,
+) -> tuple[FOLAtom, int]:
+    start = int(idx)
+    while idx < len(symbols) and symbols[idx] != "(":
+        sym = symbols[idx]
+        if sym in {"⊢", "∧", "→", ")", ","}:
+            raise ValueError(f"Invalid predicate token {sym!r} in atom symbol stream.")
+        idx += 1
+
+    if idx <= start or idx >= len(symbols) or symbols[idx] != "(":
+        raise ValueError("Malformed atom: missing predicate or opening parenthesis.")
+    predicate = "".join(symbols[start:idx])
+    if _IDENTIFIER_RE.fullmatch(predicate) is None:
+        raise ValueError(f"Invalid predicate {predicate!r} in atom symbol stream.")
+    idx += 1
+
+    args: list[str] = []
+    while idx < len(symbols):
+        sym = symbols[idx]
+        if sym == ")":
+            if not args:
+                raise ValueError("Atom must contain at least one argument.")
+            idx += 1
+            return FOLAtom(predicate=predicate, args=tuple(args)), idx
+        if sym == ",":
+            idx += 1
+            continue
+        if not _is_identifier_symbol(sym):
+            raise ValueError(f"Invalid atom argument token {sym!r}.")
+        args.append(sym)
+        idx += 1
+
+    raise ValueError("Malformed atom: missing closing parenthesis.")
+
+
+def _parse_conjunction_from_symbols(
+    symbols: list[str],
+    idx: int,
+) -> tuple[tuple[FOLAtom, ...], int]:
+    atoms: list[FOLAtom] = []
+    atom, idx = _parse_atom_from_symbols(symbols, idx)
+    atoms.append(atom)
+    while idx < len(symbols) and symbols[idx] == "∧":
+        idx += 1
+        atom, idx = _parse_atom_from_symbols(symbols, idx)
+        atoms.append(atom)
+    return tuple(atoms), idx
+
+
+def _decode_prompt_symbols_to_sequent(symbols: list[str]) -> FOLSequent:
+    turnstile_idxs = [idx for idx, sym in enumerate(symbols) if sym == "⊢"]
+    if len(turnstile_idxs) != 1:
+        raise ValueError("Prompt must contain exactly one top-level turnstile token.")
+    turnstile_idx = int(turnstile_idxs[0])
+    ant_symbols = symbols[:turnstile_idx]
+    cons_symbols = symbols[turnstile_idx + 1 :]
+    if not cons_symbols:
+        raise ValueError("Prompt must contain consequent atom symbols.")
+
+    ants: list[FOLAtom] = []
+    idx = 0
+    while idx < len(ant_symbols):
+        atom, idx = _parse_atom_from_symbols(ant_symbols, idx)
+        ants.append(atom)
+        if idx >= len(ant_symbols):
+            break
+        if ant_symbols[idx] != ",":
+            raise ValueError("Antecedent atoms must be separated by top-level commas.")
+        idx += 1
+
+    cons, cons_end = _parse_atom_from_symbols(cons_symbols, 0)
+    if cons_end != len(cons_symbols):
+        raise ValueError("Consequent atom must consume all prompt consequent tokens.")
+    return FOLSequent(ants=tuple(ants), cons=cons)
+
+
+def _decode_completion_symbols_to_clause(
+    symbols: list[str],
+) -> tuple[tuple[FOLAtom, ...], tuple[FOLAtom, ...]]:
+    lhs, idx = _parse_conjunction_from_symbols(symbols, 0)
+    if idx >= len(symbols) or symbols[idx] != "→":
+        raise ValueError("Completion clause must include top-level implication arrow.")
+    rhs, end = _parse_conjunction_from_symbols(symbols, idx + 1)
+    if end != len(symbols):
+        raise ValueError("Trailing symbols after completion clause.")
+    return lhs, rhs
+
+
+def _decode_completion_symbols_to_conjunction(
+    symbols: list[str],
+) -> tuple[FOLAtom, ...]:
+    atoms, end = _parse_conjunction_from_symbols(symbols, 0)
+    if end != len(symbols):
+        raise ValueError("Trailing symbols after conjunction.")
+    return atoms
+
+
+def build_tokenizer_from_identifiers(
+    identifiers: Iterable[str],
+    *,
+    predicate_identifiers: Iterable[str] | None = None,
+) -> FOLLayerTokenizer:
+    return FOLLayerTokenizer.from_identifiers(
+        identifiers,
+        predicate_identifiers=predicate_identifiers,
+    )
 
 
 def build_tokenizer_from_rule_bank(rule_bank: FOLRuleBank) -> FOLLayerTokenizer:
