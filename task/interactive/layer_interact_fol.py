@@ -7,17 +7,17 @@ import time
 
 import numpy as np
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
-from layer_fol import FOLLayerTask
-from layer_gen.util.fol_rule_bank import (
+from task.layer_fol import FOLLayerTask
+from task.layer_gen.util.fol_rule_bank import (
     FOLSequent,
     build_random_fol_rule_bank,
     sample_fol_problem,
 )
-from layer_gen.util import tokenize_layer_fol as tok
+from task.layer_gen.util import tokenize_layer_fol as tok
 
 
 def preview_batch(task: FOLLayerTask, n_rows: int = 3) -> None:

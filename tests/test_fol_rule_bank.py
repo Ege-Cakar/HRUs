@@ -68,6 +68,27 @@ def test_generated_rules_are_range_restricted() -> None:
             assert rhs_vars.issubset(lhs_vars)
 
 
+def test_generated_rules_respect_k_in_out_min() -> None:
+    bank = build_random_fol_rule_bank(
+        n_layers=5,
+        predicates_per_layer=5,
+        rules_per_transition=8,
+        arity_max=3,
+        vars_per_rule_max=4,
+        k_in_max=4,
+        k_out_max=4,
+        k_in_min=2,
+        k_out_min=3,
+        constants=("a", "b", "c"),
+        rng=np.random.default_rng(23),
+    )
+
+    for rules in bank.transitions.values():
+        for rule in rules:
+            assert len(rule.lhs) >= 2
+            assert len(rule.rhs) >= 3
+
+
 def test_sample_problem_outputs_ground_instantiations() -> None:
     bank = _sample_bank(seed=11)
     rng = np.random.default_rng(11)
@@ -107,6 +128,16 @@ def test_build_depth3_split_bundle_disjoint_layer0_predicates() -> None:
     assert isinstance(bundle, FOLDepth3ICLSplitBundle)
     assert bundle.train_bank.n_layers == 3
     assert bundle.eval_bank.n_layers == 3
+    assert len(bundle.train_layer0_indices) == 4
+    assert len(bundle.eval_layer0_indices) == 4
+    assert set(bundle.train_layer0_indices).isdisjoint(set(bundle.eval_layer0_indices))
+    assert set(bundle.train_layer0_indices) | set(bundle.eval_layer0_indices) == set(
+        range(1, 9)
+    )
+    assert any(idx <= 4 for idx in bundle.train_layer0_indices)
+    assert any(idx > 4 for idx in bundle.train_layer0_indices)
+    assert any(idx <= 4 for idx in bundle.eval_layer0_indices)
+    assert any(idx > 4 for idx in bundle.eval_layer0_indices)
     assert set(bundle.train_layer0_predicates).isdisjoint(set(bundle.eval_layer0_predicates))
 
 
@@ -145,10 +176,37 @@ def test_split_bundle_roundtrip_save_load_preserves_banks_and_sets(tmp_path) -> 
 
     assert loaded.train_bank.to_dict() == bundle.train_bank.to_dict()
     assert loaded.eval_bank.to_dict() == bundle.eval_bank.to_dict()
+    assert loaded.train_layer0_indices == bundle.train_layer0_indices
+    assert loaded.eval_layer0_indices == bundle.eval_layer0_indices
     assert loaded.train_layer0_predicates == bundle.train_layer0_predicates
     assert loaded.eval_layer0_predicates == bundle.eval_layer0_predicates
     assert loaded.shared_layer1_predicates == bundle.shared_layer1_predicates
     assert loaded.shared_layer2_predicates == bundle.shared_layer2_predicates
+
+
+def test_split_bundle_from_dict_v1_backfills_layer0_indices() -> None:
+    bundle = build_depth3_icl_split_bundle(
+        predicates_per_layer=3,
+        rules_01_train=4,
+        rules_01_eval=4,
+        rules_12_shared=4,
+        arity_max=3,
+        vars_per_rule_max=4,
+        k_in_max=2,
+        k_out_max=2,
+        constants=("a", "b", "c"),
+        rng=np.random.default_rng(17),
+    )
+    payload = bundle.to_dict()
+    payload["version"] = "fol_depth3_icl_split_v1"
+    payload.pop("train_layer0_indices")
+    payload.pop("eval_layer0_indices")
+
+    loaded = FOLDepth3ICLSplitBundle.from_dict(payload)
+    assert loaded.train_layer0_indices == bundle.train_layer0_indices
+    assert loaded.eval_layer0_indices == bundle.eval_layer0_indices
+    assert loaded.train_layer0_predicates == bundle.train_layer0_predicates
+    assert loaded.eval_layer0_predicates == bundle.eval_layer0_predicates
 
 
 def test_fol_rule_bank_layer_predicates_override_predicates_for_layer() -> None:

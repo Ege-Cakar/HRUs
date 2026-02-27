@@ -2,11 +2,12 @@
 from pathlib import Path
 import sys
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.append(str(ROOT))
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.append(str(ROOT))
 
-from layer import LayerTask
-from layer_gen.util.rule_bank import *
+from task.layer import LayerTask
+from task.layer_gen.util.rule_bank import *
 
 rule_bank = build_random_rule_bank(n_layers=24, props_per_layer=16, rules_per_transition=32, k_in_max=3, k_out_max=6, rng=np.random.default_rng())
 problem = sample_problem(max_attempts=1024, bank=rule_bank, distance=20, initial_ant_max=3, rng=np.random.default_rng())
@@ -21,7 +22,11 @@ a = set({'1', '2', '3'})
 a.update({'4', '5'})
 a
 # <codecell>
-task = LayerTask(ds_path="layer_gen/data/toy_layer", batch_size=8, mode='online')
+task = LayerTask(
+    ds_path=ROOT / "task" / "layer_gen" / "data" / "toy_layer",
+    batch_size=8,
+    mode='online',
+)
 tokenizer = task.tokenizer
 
 xs, ys = next(task)
@@ -39,7 +44,7 @@ task.rule_bank.transitions[1]
 # <codecell>
 import time
 
-DS_PATH = "layer_gen/data/toy_layer"
+DS_PATH = ROOT / "task" / "layer_gen" / "data" / "toy_layer"
 BATCH_SIZE = 64
 N_BATCHES = 500
 
@@ -56,4 +61,3 @@ for mode in ("online", "offline"):
 print(f"\nonline/offline ratio: {results['online'] / results['offline']:.2f}x")
 
 # <codecell>
-

@@ -11,6 +11,7 @@ from typing import Iterable
 import numpy as np
 
 _IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_LAYERED_PREDICATE_RE = re.compile(r"r(\d+)_(\d+)$")
 
 
 def _is_identifier(token: str) -> bool:
@@ -283,6 +284,8 @@ class FOLRuleBank:
 class FOLDepth3ICLSplitBundle:
     train_bank: FOLRuleBank
     eval_bank: FOLRuleBank
+    train_layer0_indices: tuple[int, ...]
+    eval_layer0_indices: tuple[int, ...]
     train_layer0_predicates: tuple[str, ...]
     eval_layer0_predicates: tuple[str, ...]
     shared_layer1_predicates: tuple[str, ...]
@@ -293,9 +296,11 @@ class FOLDepth3ICLSplitBundle:
 
     def to_dict(self) -> dict:
         return {
-            "version": "fol_depth3_icl_split_v1",
+            "version": "fol_depth3_icl_split_v2",
             "train_bank": self.train_bank.to_dict(),
             "eval_bank": self.eval_bank.to_dict(),
+            "train_layer0_indices": [int(idx) for idx in self.train_layer0_indices],
+            "eval_layer0_indices": [int(idx) for idx in self.eval_layer0_indices],
             "train_layer0_predicates": [str(pred) for pred in self.train_layer0_predicates],
             "eval_layer0_predicates": [str(pred) for pred in self.eval_layer0_predicates],
             "shared_layer1_predicates": [str(pred) for pred in self.shared_layer1_predicates],
@@ -305,15 +310,32 @@ class FOLDepth3ICLSplitBundle:
     @classmethod
     def from_dict(cls, payload: dict) -> "FOLDepth3ICLSplitBundle":
         version = str(payload.get("version", ""))
-        if version != "fol_depth3_icl_split_v1":
+        if version not in {"fol_depth3_icl_split_v1", "fol_depth3_icl_split_v2"}:
             raise ValueError(
-                f"Unsupported split bundle version {version!r}; expected 'fol_depth3_icl_split_v1'."
+                "Unsupported split bundle version "
+                f"{version!r}; expected one of ('fol_depth3_icl_split_v1', 'fol_depth3_icl_split_v2')."
+            )
+        train_layer0_predicates = tuple(str(pred) for pred in payload["train_layer0_predicates"])
+        eval_layer0_predicates = tuple(str(pred) for pred in payload["eval_layer0_predicates"])
+        if version == "fol_depth3_icl_split_v2":
+            train_layer0_indices = tuple(int(idx) for idx in payload["train_layer0_indices"])
+            eval_layer0_indices = tuple(int(idx) for idx in payload["eval_layer0_indices"])
+        else:
+            train_layer0_indices = tuple(
+                _parse_layered_predicate_index(pred, expected_layer=0)
+                for pred in train_layer0_predicates
+            )
+            eval_layer0_indices = tuple(
+                _parse_layered_predicate_index(pred, expected_layer=0)
+                for pred in eval_layer0_predicates
             )
         return cls(
             train_bank=FOLRuleBank.from_dict(payload["train_bank"]),
             eval_bank=FOLRuleBank.from_dict(payload["eval_bank"]),
-            train_layer0_predicates=tuple(str(pred) for pred in payload["train_layer0_predicates"]),
-            eval_layer0_predicates=tuple(str(pred) for pred in payload["eval_layer0_predicates"]),
+            train_layer0_indices=train_layer0_indices,
+            eval_layer0_indices=eval_layer0_indices,
+            train_layer0_predicates=train_layer0_predicates,
+            eval_layer0_predicates=eval_layer0_predicates,
             shared_layer1_predicates=tuple(
                 str(pred) for pred in payload["shared_layer1_predicates"]
             ),
@@ -464,6 +486,23 @@ def _layer_predicates(layer: int, predicates_per_layer: int) -> tuple[str, ...]:
     return tuple(f"r{int(layer)}_{idx}" for idx in range(1, predicates_per_layer + 1))
 
 
+def _parse_layered_predicate_index(
+    predicate: str,
+    *,
+    expected_layer: int | None = None,
+) -> int:
+    match = _LAYERED_PREDICATE_RE.fullmatch(str(predicate))
+    if match is None:
+        raise ValueError(f"Unsupported layered predicate name: {predicate!r}")
+    layer = int(match.group(1))
+    index = int(match.group(2))
+    if expected_layer is not None and layer != int(expected_layer):
+        raise ValueError(
+            f"Expected predicate from layer {int(expected_layer)}, got {predicate!r}."
+        )
+    return int(index)
+
+
 def _build_random_atom(
     *,
     predicate: str,
@@ -484,7 +523,9 @@ def _sample_transition_rules(
     lhs_predicates: tuple[str, ...],
     rhs_predicates: tuple[str, ...],
     rules_per_transition: int,
+    k_in_min: int,
     k_in_max: int,
+    k_out_min: int,
     k_out_max: int,
     predicate_arities: dict[str, int],
     var_pool: tuple[str, ...],
@@ -497,10 +538,17 @@ def _sample_transition_rules(
             f"Transition {src_layer}->{src_layer + 1} requires non-empty predicate pools."
         )
 
+    min_lhs = int(k_in_min)
     max_lhs = min(int(k_in_max), int(lhs_predicates_arr.size))
+    min_rhs = int(k_out_min)
     max_rhs = min(int(k_out_max), int(rhs_predicates_arr.size))
-    if max_lhs < 1 or max_rhs < 1:
-        raise ValueError("k_in_max and k_out_max must allow at least one predicate per side.")
+    if min_lhs > max_lhs or min_rhs > max_rhs:
+        raise ValueError(
+            "k_in_min/k_out_min exceed available predicates or configured maxima for "
+            f"transition {src_layer}->{src_layer + 1}: "
+            f"k_in_min={min_lhs}, k_in_max={int(k_in_max)}, lhs_pool={int(lhs_predicates_arr.size)}, "
+            f"k_out_min={min_rhs}, k_out_max={int(k_out_max)}, rhs_pool={int(rhs_predicates_arr.size)}."
+        )
 
     seen: set[tuple[tuple[str, ...], tuple[str, ...]]] = set()
     rules: list[FOLLayerRule] = []
@@ -509,8 +557,8 @@ def _sample_transition_rules(
 
     while len(rules) < int(rules_per_transition) and attempts < max_attempts:
         attempts += 1
-        lhs_size = int(rng.integers(1, max_lhs + 1))
-        rhs_size = int(rng.integers(1, max_rhs + 1))
+        lhs_size = int(rng.integers(min_lhs, max_lhs + 1))
+        rhs_size = int(rng.integers(min_rhs, max_rhs + 1))
 
         lhs_chosen = [
             str(tok)
@@ -597,6 +645,8 @@ def build_random_fol_rule_bank(
     k_out_max: int,
     constants: Iterable[str],
     rng: np.random.Generator,
+    k_in_min: int = 1,
+    k_out_min: int = 1,
 ) -> FOLRuleBank:
     if n_layers < 2:
         raise ValueError(f"n_layers must be >= 2, got {n_layers}")
@@ -612,8 +662,24 @@ def build_random_fol_rule_bank(
         raise ValueError(f"arity_max must be >= 1, got {arity_max}")
     if vars_per_rule_max < 1:
         raise ValueError(f"vars_per_rule_max must be >= 1, got {vars_per_rule_max}")
+    if k_in_min < 1 or k_out_min < 1:
+        raise ValueError("k_in_min and k_out_min must be >= 1")
     if k_in_max < 1 or k_out_max < 1:
         raise ValueError("k_in_max and k_out_max must be >= 1")
+    if k_in_min > k_in_max:
+        raise ValueError(
+            f"k_in_min must be <= k_in_max, got k_in_min={k_in_min}, k_in_max={k_in_max}"
+        )
+    if k_out_min > k_out_max:
+        raise ValueError(
+            f"k_out_min must be <= k_out_max, got k_out_min={k_out_min}, k_out_max={k_out_max}"
+        )
+    if k_in_min > int(predicates_per_layer) or k_out_min > int(predicates_per_layer):
+        raise ValueError(
+            "k_in_min and k_out_min cannot exceed predicates_per_layer for random bank "
+            f"generation; got predicates_per_layer={predicates_per_layer}, "
+            f"k_in_min={k_in_min}, k_out_min={k_out_min}."
+        )
 
     constants = tuple(str(tok) for tok in constants)
     if not constants:
@@ -640,7 +706,9 @@ def build_random_fol_rule_bank(
             lhs_predicates=tuple(layer_predicates[int(src_layer)]),
             rhs_predicates=tuple(layer_predicates[int(src_layer) + 1]),
             rules_per_transition=int(rules_per_transition),
+            k_in_min=int(k_in_min),
             k_in_max=int(k_in_max),
+            k_out_min=int(k_out_min),
             k_out_max=int(k_out_max),
             predicate_arities=predicate_arities,
             var_pool=var_pool,
@@ -668,13 +736,52 @@ def _validate_depth3_icl_split_bundle(bundle: FOLDepth3ICLSplitBundle) -> None:
 
     train_l0 = tuple(str(pred) for pred in bundle.train_layer0_predicates)
     eval_l0 = tuple(str(pred) for pred in bundle.eval_layer0_predicates)
+    train_l0_indices = tuple(int(idx) for idx in bundle.train_layer0_indices)
+    eval_l0_indices = tuple(int(idx) for idx in bundle.eval_layer0_indices)
     shared_l1 = tuple(str(pred) for pred in bundle.shared_layer1_predicates)
     shared_l2 = tuple(str(pred) for pred in bundle.shared_layer2_predicates)
 
-    if not train_l0 or not eval_l0 or not shared_l1 or not shared_l2:
+    if (
+        not train_l0
+        or not eval_l0
+        or not train_l0_indices
+        or not eval_l0_indices
+        or not shared_l1
+        or not shared_l2
+    ):
         raise ValueError("Split bundle predicate pools must all be non-empty.")
+    if len(train_l0_indices) != len(train_l0):
+        raise ValueError(
+            "train_layer0_indices length does not match train_layer0_predicates length."
+        )
+    if len(eval_l0_indices) != len(eval_l0):
+        raise ValueError(
+            "eval_layer0_indices length does not match eval_layer0_predicates length."
+        )
+    if any(int(idx) < 1 for idx in train_l0_indices + eval_l0_indices):
+        raise ValueError("Layer-0 predicate indices must be >= 1.")
+    if len(set(train_l0_indices)) != len(train_l0_indices):
+        raise ValueError("train_layer0_indices must be unique.")
+    if len(set(eval_l0_indices)) != len(eval_l0_indices):
+        raise ValueError("eval_layer0_indices must be unique.")
+    if set(train_l0_indices) & set(eval_l0_indices):
+        raise ValueError("train/eval layer-0 index pools must be disjoint.")
     if set(train_l0) & set(eval_l0):
         raise ValueError("Train/eval layer-0 predicate pools must be disjoint.")
+    parsed_train_indices = tuple(
+        _parse_layered_predicate_index(pred, expected_layer=0) for pred in train_l0
+    )
+    parsed_eval_indices = tuple(
+        _parse_layered_predicate_index(pred, expected_layer=0) for pred in eval_l0
+    )
+    if set(parsed_train_indices) != set(train_l0_indices):
+        raise ValueError(
+            "train_layer0_indices must match layer-0 predicate indices in train_layer0_predicates."
+        )
+    if set(parsed_eval_indices) != set(eval_l0_indices):
+        raise ValueError(
+            "eval_layer0_indices must match layer-0 predicate indices in eval_layer0_predicates."
+        )
 
     if tuple(train_bank.predicates_for_layer(0)) != train_l0:
         raise ValueError("train_bank layer-0 predicates do not match train_layer0_predicates.")
@@ -726,6 +833,8 @@ def build_depth3_icl_split_bundle(
     k_out_max: int,
     constants: Iterable[str],
     rng: np.random.Generator,
+    k_in_min: int = 1,
+    k_out_min: int = 1,
 ) -> FOLDepth3ICLSplitBundle:
     if int(predicates_per_layer) < 1:
         raise ValueError(
@@ -737,8 +846,24 @@ def build_depth3_icl_split_bundle(
         raise ValueError(f"arity_max must be >= 1, got {arity_max}")
     if int(vars_per_rule_max) < 1:
         raise ValueError(f"vars_per_rule_max must be >= 1, got {vars_per_rule_max}")
+    if int(k_in_min) < 1 or int(k_out_min) < 1:
+        raise ValueError("k_in_min and k_out_min must be >= 1")
     if int(k_in_max) < 1 or int(k_out_max) < 1:
         raise ValueError("k_in_max and k_out_max must be >= 1")
+    if int(k_in_min) > int(k_in_max):
+        raise ValueError(
+            f"k_in_min must be <= k_in_max, got k_in_min={k_in_min}, k_in_max={k_in_max}"
+        )
+    if int(k_out_min) > int(k_out_max):
+        raise ValueError(
+            f"k_out_min must be <= k_out_max, got k_out_min={k_out_min}, k_out_max={k_out_max}"
+        )
+    if int(k_in_min) > int(predicates_per_layer) or int(k_out_min) > int(predicates_per_layer):
+        raise ValueError(
+            "k_in_min and k_out_min cannot exceed predicates_per_layer for depth-3 split "
+            f"generation; got predicates_per_layer={predicates_per_layer}, "
+            f"k_in_min={k_in_min}, k_out_min={k_out_min}."
+        )
 
     constants = tuple(str(tok) for tok in constants)
     if not constants:
@@ -750,13 +875,21 @@ def build_depth3_icl_split_bundle(
     predicates_per_layer = int(predicates_per_layer)
     arity_max = int(arity_max)
     vars_per_rule_max = int(vars_per_rule_max)
+    k_in_min = int(k_in_min)
     k_in_max = int(k_in_max)
+    k_out_min = int(k_out_min)
     k_out_max = int(k_out_max)
 
-    train_layer0 = tuple(f"r0_{idx}" for idx in range(1, predicates_per_layer + 1))
-    eval_layer0 = tuple(
-        f"r0_{idx}" for idx in range(predicates_per_layer + 1, 2 * predicates_per_layer + 1)
+    all_layer0_indices = np.arange(1, 2 * predicates_per_layer + 1, dtype=np.int32)
+    shuffled_layer0_indices = rng.permutation(all_layer0_indices)
+    train_layer0_indices = tuple(
+        sorted(int(idx) for idx in shuffled_layer0_indices[:predicates_per_layer].tolist())
     )
+    eval_layer0_indices = tuple(
+        sorted(int(idx) for idx in shuffled_layer0_indices[predicates_per_layer:].tolist())
+    )
+    train_layer0 = tuple(f"r0_{idx}" for idx in train_layer0_indices)
+    eval_layer0 = tuple(f"r0_{idx}" for idx in eval_layer0_indices)
     shared_layer1 = _layer_predicates(1, predicates_per_layer)
     shared_layer2 = _layer_predicates(2, predicates_per_layer)
 
@@ -781,7 +914,9 @@ def build_depth3_icl_split_bundle(
         lhs_predicates=tuple(shared_layer1),
         rhs_predicates=tuple(shared_layer2),
         rules_per_transition=int(rules_12_shared),
+        k_in_min=int(k_in_min),
         k_in_max=int(k_in_max),
+        k_out_min=int(k_out_min),
         k_out_max=int(k_out_max),
         predicate_arities=train_predicate_arities,
         var_pool=var_pool,
@@ -792,7 +927,9 @@ def build_depth3_icl_split_bundle(
         lhs_predicates=tuple(train_layer0),
         rhs_predicates=tuple(shared_layer1),
         rules_per_transition=int(rules_01_train),
+        k_in_min=int(k_in_min),
         k_in_max=int(k_in_max),
+        k_out_min=int(k_out_min),
         k_out_max=int(k_out_max),
         predicate_arities=train_predicate_arities,
         var_pool=var_pool,
@@ -803,7 +940,9 @@ def build_depth3_icl_split_bundle(
         lhs_predicates=tuple(eval_layer0),
         rhs_predicates=tuple(shared_layer1),
         rules_per_transition=int(rules_01_eval),
+        k_in_min=int(k_in_min),
         k_in_max=int(k_in_max),
+        k_out_min=int(k_out_min),
         k_out_max=int(k_out_max),
         predicate_arities=eval_predicate_arities,
         var_pool=var_pool,
@@ -847,6 +986,8 @@ def build_depth3_icl_split_bundle(
     return FOLDepth3ICLSplitBundle(
         train_bank=train_bank,
         eval_bank=eval_bank,
+        train_layer0_indices=tuple(train_layer0_indices),
+        eval_layer0_indices=tuple(eval_layer0_indices),
         train_layer0_predicates=tuple(train_layer0),
         eval_layer0_predicates=tuple(eval_layer0),
         shared_layer1_predicates=tuple(shared_layer1),

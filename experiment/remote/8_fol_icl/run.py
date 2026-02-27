@@ -666,6 +666,7 @@ def _evaluate_by_distance_for_demo(
     n_iters: int,
     eval_max_n_demos: int,
     perf_stats: dict | None = None,
+    progress_desc_prefix: str = "",
 ):
     metrics_fn = make_ar_metrics_fn(
         tokenizer=tokenizer,
@@ -696,7 +697,12 @@ def _evaluate_by_distance_for_demo(
     n_eval_batches = 0
 
     metrics_by_distance = {}
-    for distance in EVAL_DISTANCES:
+    distance_iter = tqdm(
+        EVAL_DISTANCES,
+        desc=f"{progress_desc_prefix}distances@demos={int(eval_max_n_demos)}",
+        leave=False,
+    )
+    for distance in distance_iter:
         eval_task = _make_layer_task(
             (distance, distance),
             prediction_objective="autoregressive",
@@ -1076,7 +1082,7 @@ print("CASE NAMES", [case.name for case in all_cases])
 
 # <codecell>
 rows = []
-for case in tqdm(all_cases):
+for case in tqdm(all_cases, desc="cases", leave=True):
     print("RUNNING", case.name, case.info)
     train_start = time.perf_counter()
     case.run()
@@ -1088,7 +1094,12 @@ for case in tqdm(all_cases):
     metrics_by_eval_demo = {}
     eval_perf_by_demo = {}
     post_eval_start = time.perf_counter()
-    for eval_max_n_demos in EVAL_MAX_N_DEMOS_SWEEP:
+    eval_demo_iter = tqdm(
+        EVAL_MAX_N_DEMOS_SWEEP,
+        desc=f"{case.name} eval-demo sweep",
+        leave=False,
+    )
+    for eval_max_n_demos in eval_demo_iter:
         demo_perf = {}
         demo_start = time.perf_counter()
         metrics_by_eval_demo[int(eval_max_n_demos)] = _evaluate_by_distance_for_demo(
@@ -1101,6 +1112,7 @@ for case in tqdm(all_cases):
             n_iters=EVAL_ITERS_PER_DISTANCE,
             eval_max_n_demos=int(eval_max_n_demos),
             perf_stats=demo_perf,
+            progress_desc_prefix=f"{case.name} ",
         )
         demo_perf["wall_s"] = float(time.perf_counter() - demo_start)
         eval_perf_by_demo[int(eval_max_n_demos)] = demo_perf

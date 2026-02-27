@@ -211,6 +211,33 @@ def test_layer_fol_task_online_sampling_autoreg() -> None:
     assert np.any(ys == 0)
 
 
+def test_layer_fol_task_online_sampling_respects_k_in_out_min() -> None:
+    task = FOLLayerTask(
+        distance_range=(1, 2),
+        batch_size=4,
+        mode="online",
+        seed=111,
+        n_layers=6,
+        predicates_per_layer=5,
+        rules_per_transition=8,
+        arity_max=3,
+        vars_per_rule_max=4,
+        constants=("a", "b", "c"),
+        k_in_min=2,
+        k_in_max=3,
+        k_out_min=2,
+        k_out_max=4,
+        initial_ant_max=3,
+        online_prefetch_backend="sync",
+    )
+
+    assert task.rule_bank is not None
+    for rules in task.rule_bank.transitions.values():
+        for rule in rules:
+            assert len(rule.lhs) >= 2
+            assert len(rule.rhs) >= 2
+
+
 def test_layer_fol_task_online_autoreg_global_max_has_stable_length() -> None:
     task = FOLLayerTask(
         distance_range=(1, 2),
