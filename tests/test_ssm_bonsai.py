@@ -25,6 +25,7 @@ class TestMamba2BonsaiConfig:
         assert config.use_bias is True
         assert config.dropout_rate == 0.0
         assert config.use_mup is False
+        assert config.use_bf16 is True
         assert config.d_state == 16
         assert config.expand == 2
         assert config.d_conv == 4
@@ -52,6 +53,7 @@ def test_forward_with_embedding_shape():
     x = jnp.ones((4, 10), dtype=jnp.int32)
     out = model(x)
     assert out.shape == (4, 5)
+    assert out.dtype == jnp.bfloat16
 
 
 def test_forward_without_embedding_shape():
@@ -67,6 +69,24 @@ def test_forward_without_embedding_shape():
     x = jnp.ones((4, 10, 32))
     out = model(x)
     assert out.shape == (4, 3)
+    assert out.dtype == jnp.bfloat16
+
+
+def test_forward_without_embedding_fp32_opt_out():
+    config = Mamba2BonsaiConfig(
+        n_vocab=None,
+        n_hidden=32,
+        n_seq=16,
+        n_layers=2,
+        n_heads=4,
+        n_out=3,
+        use_bf16=False,
+    )
+    model = Mamba2Bonsai(config, rngs=nnx.Rngs(0))
+    x = jnp.ones((4, 10, 32), dtype=jnp.float32)
+    out = model(x)
+    assert out.shape == (4, 3)
+    assert out.dtype == jnp.float32
 
 
 def test_cache_shapes():
@@ -96,6 +116,7 @@ def test_cached_incremental_matches_full_sequence():
         output_mode="full_sequence",
         d_state=8,
         scan_chunk_len=8,
+        use_bf16=False,
     )
     model = Mamba2Bonsai(config, rngs=nnx.Rngs(42))
 

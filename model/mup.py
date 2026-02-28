@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import jax
+import jax.numpy as jnp
 from flax import nnx
 
 
@@ -18,6 +19,8 @@ class MuReadout(nnx.Module):
         in_features: int,
         out_features: int,
         use_bias: bool = True,
+        dtype: jnp.dtype | None = None,
+        param_dtype: jnp.dtype = jnp.float32,
         *,
         rngs: nnx.Rngs,
         scale: float | None = None,
@@ -28,6 +31,8 @@ class MuReadout(nnx.Module):
             out_features,
             use_bias=use_bias,
             kernel_init=jax.nn.initializers.normal(stddev=1.0),
+            dtype=dtype,
+            param_dtype=param_dtype,
             rngs=rngs,
         )
         self.scale = (1.0 / in_features) if scale is None else scale

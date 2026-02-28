@@ -478,3 +478,139 @@ def test_autoregressive_logits_adapter_jit_step_supports_wrapped_model_callable(
         tokenizer=tokenizer,
     )
     assert decoded.tolist() == target
+
+
+def test_make_model_callable_assigns_stable_random_key_per_model_instance() -> None:
+    _, tokenizer, _ = _sampled_bank(seed=47)
+    vocab = int(tokenizer.vocab_size)
+
+    class _Model(nnx.Module):
+        def __init__(self, *, vocab_size: int):
+            self.vocab_size = int(vocab_size)
+
+        def __call__(self, xs):
+            return jnp.zeros((xs.shape[0], xs.shape[1], self.vocab_size), dtype=jnp.float32)
+
+    class _Opt:
+        def __init__(self, model):
+            self.model = model
+
+    opt_a = _Opt(_Model(vocab_size=vocab))
+    fn_a1 = make_model_callable(opt_a, to_numpy=False)
+    fn_a2 = make_model_callable(opt_a, to_numpy=False)
+    fn_a_np = make_model_callable(opt_a, to_numpy=True)
+
+    key_a1 = getattr(fn_a1, "_decode_cache_key", None)
+    key_a2 = getattr(fn_a2, "_decode_cache_key", None)
+    key_a_np = getattr(fn_a_np, "_decode_cache_key", None)
+
+    assert isinstance(key_a1, str) and len(key_a1) > 0
+    assert key_a1 == key_a2
+    assert key_a1 != key_a_np
+
+    opt_b = _Opt(_Model(vocab_size=vocab))
+    fn_b = make_model_callable(opt_b, to_numpy=False)
+    key_b = getattr(fn_b, "_decode_cache_key", None)
+    assert isinstance(key_b, str) and len(key_b) > 0
+    assert key_b != key_a1
+
+
+def test_autoregressive_logits_adapter_jit_step_reuses_noncache_decode_fn_across_wrappers() -> None:
+    _, tokenizer, _ = _sampled_bank(seed=48)
+    first_tok = tokenizer.char_to_id("p0_1")
+    target = [int(first_tok), int(tokenizer.eot_token_id)]
+    vocab = int(tokenizer.vocab_size)
+
+    class _Model(nnx.Module):
+        def __init__(self, *, vocab_size: int):
+            self.vocab_size = int(vocab_size)
+
+        def __call__(self, xs):
+            logits = jnp.zeros((xs.shape[0], xs.shape[1], self.vocab_size), dtype=jnp.float32)
+            nonpad = xs[0] != 0
+            last_idx = jnp.maximum(jnp.sum(nonpad) - 1, 0)
+            last_tok = xs[0, last_idx]
+            next_tok = jnp.where(last_tok == first_tok, tokenizer.eot_token_id, first_tok)
+            return logits.at[0, last_idx, next_tok].set(8.0)
+
+    class _Opt:
+        def __init__(self, model):
+            self.model = model
+
+    opt = _Opt(_Model(vocab_size=vocab))
+    fn_1 = make_model_callable(opt, to_numpy=False)
+    fn_2 = make_model_callable(opt, to_numpy=False)
+    assert fn_1 is not fn_2
+
+    prompt = np.asarray([tokenizer.char_to_id("p0_1"), tokenizer.sep_token_id], dtype=np.int32)
+    adapter = AutoregressiveLogitsAdapter(
+        n_seq=16,
+        max_completion_len=4,
+        jit_step=True,
+    )
+
+    out_1 = adapter.predict_completion(
+        model=fn_1,
+        prompt_tokens=prompt,
+        tokenizer=tokenizer,
+    )
+    out_2 = adapter.predict_completion(
+        model=fn_2,
+        prompt_tokens=prompt,
+        tokenizer=tokenizer,
+    )
+
+    assert out_1.tolist() == target
+    assert out_2.tolist() == target
+    assert len(adapter._noncache_decode_fn_cache) == 1
+
+
+def test_autoregressive_logits_adapter_jit_step_reuses_cached_decode_fn_across_wrappers() -> None:
+    _, tokenizer, _ = _sampled_bank(seed=49)
+    first_tok = tokenizer.char_to_id("p0_1")
+    target = [int(first_tok), int(tokenizer.eot_token_id)]
+    vocab = int(tokenizer.vocab_size)
+
+    class _CacheAwareModel(nnx.Module):
+        def __init__(self, *, vocab_size: int):
+            self.vocab_size = int(vocab_size)
+
+        def __call__(self, xs, *, cache=None, return_cache=False):
+            if not return_cache:
+                raise RuntimeError("jit_step cache path should call return_cache=True.")
+            step = jnp.asarray(0, dtype=jnp.int32) if cache is None else jnp.asarray(cache, dtype=jnp.int32)
+            logits = jnp.zeros((xs.shape[0], xs.shape[1], self.vocab_size), dtype=jnp.float32)
+            tok = jnp.where(step == 0, first_tok, tokenizer.eot_token_id)
+            logits = logits.at[0, -1, tok].set(8.0)
+            return logits, step + 1
+
+    class _Opt:
+        def __init__(self, model):
+            self.model = model
+
+    opt = _Opt(_CacheAwareModel(vocab_size=vocab))
+    fn_1 = make_model_callable(opt, to_numpy=False)
+    fn_2 = make_model_callable(opt, to_numpy=False)
+    assert fn_1 is not fn_2
+
+    prompt = np.asarray([tokenizer.char_to_id("p0_1"), tokenizer.sep_token_id], dtype=np.int32)
+    adapter = AutoregressiveLogitsAdapter(
+        n_seq=16,
+        max_completion_len=4,
+        jit_step=True,
+    )
+
+    out_1 = adapter.predict_completion(
+        model=fn_1,
+        prompt_tokens=prompt,
+        tokenizer=tokenizer,
+    )
+    out_2 = adapter.predict_completion(
+        model=fn_2,
+        prompt_tokens=prompt,
+        tokenizer=tokenizer,
+    )
+
+    assert out_1.tolist() == target
+    assert out_2.tolist() == target
+    assert len(adapter._cached_decode_fn_cache) == 1

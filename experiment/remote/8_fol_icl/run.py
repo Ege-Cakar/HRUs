@@ -64,19 +64,19 @@ TRAIN_MAX_DISTANCES = [4]
 EVAL_DISTANCES = list(range(1, 9))
 
 TRAIN_MAX_N_DEMOS = 8
-EVAL_MAX_N_DEMOS_SWEEP = [0, 4, 8, 16, 32]
+EVAL_MAX_N_DEMOS_SWEEP = [0, 2, 4, 8, 12, 16, 24, 32]
 SELECTION_EVAL_MAX_N_DEMOS = 8
 
 BATCH_SIZE = 32
-TRAIN_ITERS = 10_000
+TRAIN_ITERS = 25_000
 TEST_EVERY = 1000
 TEST_ITERS = 3
 EVAL_ITERS_PER_DISTANCE = 3
 ROLLOUT_EXAMPLES_PER_DISTANCE = 64
 
-RUN_SPLIT = 4
+RUN_SPLIT = 2
 
-RULE_BANK_SEED = 2027
+RULE_BANK_SEED = 2029
 N_LAYERS = 12
 PREDICATES_PER_LAYER = 32
 RULES_PER_TRANSITION = 64
@@ -96,7 +96,8 @@ EVAL_FIXED_LENGTH_MODE = "next_pow2"
 TRANSFORMER_LAYERS = [4]
 # TRANSFORMER_WIDTH_HEADS = [(128, 4), (256, 8)]
 TRANSFORMER_WIDTH_HEADS = [(256, 8)]
-TRANSFORMER_LRS = [3e-4, 1e-3]
+# TRANSFORMER_LRS = [3e-4, 1e-3]
+TRANSFORMER_LRS = [5e-4]
 TRANSFORMER_POS = ["rope"]
 TRANSFORMER_SWIGLU = [True]
 
@@ -108,7 +109,8 @@ MAMBA2_BONSAI_WIDTH_HEADS = [(256, 8)]
 MAMBA2_BONSAI_D_STATE = [32]
 MAMBA2_BONSAI_D_CONV = [4]
 MAMBA2_BONSAI_SCAN_CHUNK_LEN = [64]
-MAMBA2_BONSAI_LRS = [3e-4, 1e-3]
+# MAMBA2_BONSAI_LRS = [3e-4, 1e-3]
+MAMBA2_BONSAI_LRS = [5e-4]
 
 ### START TEST CONFIGS
 # TRAIN_MAX_DISTANCES = [2]
@@ -523,7 +525,7 @@ def make_ar_light_metrics_fn():
     return _metrics
 
 
-def make_ar_metrics_fn(*, tokenizer, rule_bank, n_seq: int, max_completion_len: int):
+def make_ar_metrics_fn(*, tokenizer, rule_bank, model_fn, n_seq: int, max_completion_len: int):
     adapter = AutoregressiveLogitsAdapter(
         n_seq=int(n_seq),
         max_completion_len=int(max_completion_len),
@@ -566,8 +568,6 @@ def make_ar_metrics_fn(*, tokenizer, rule_bank, n_seq: int, max_completion_len: 
             xs=np.asarray(xs),
             tokenizer=tokenizer,
         )
-        model_fn = make_model_callable(optimizer, to_numpy=False)
-
         n_examples = len(prompt_tokens)
         n_valid = 0
         n_reachable = 0
@@ -668,13 +668,14 @@ def _evaluate_by_distance_for_demo(
     perf_stats: dict | None = None,
     progress_desc_prefix: str = "",
 ):
+    model_fn = make_model_callable(optimizer, to_numpy=False)
     metrics_fn = make_ar_metrics_fn(
         tokenizer=tokenizer,
         rule_bank=rule_bank,
+        model_fn=model_fn,
         n_seq=int(n_seq_ar),
         max_completion_len=int(max_completion_len),
     )
-    model_fn = make_model_callable(optimizer, to_numpy=False)
 
     base_rollout_adapter = AutoregressiveLogitsAdapter(
         n_seq=int(n_seq_ar),

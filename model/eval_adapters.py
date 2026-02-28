@@ -3,12 +3,36 @@
 from __future__ import annotations
 
 import inspect
+import uuid
+import weakref
 from typing import Any, Callable
 
 from flax import nnx
 import jax
 import jax.numpy as jnp
 import numpy as np
+
+_DECODE_CACHE_KEY_ATTR = "_decode_cache_key"
+_MODEL_INSTANCE_CACHE_IDS: weakref.WeakKeyDictionary[object, str] = weakref.WeakKeyDictionary()
+
+
+def _resolve_decode_cache_key(model: Callable[..., Any]) -> object:
+    key = getattr(model, _DECODE_CACHE_KEY_ATTR, None)
+    if key is not None:
+        return key
+    return int(id(model))
+
+
+def _random_model_instance_id(model_obj: object) -> str:
+    try:
+        cached = _MODEL_INSTANCE_CACHE_IDS.get(model_obj)
+        if cached is not None:
+            return str(cached)
+        out = uuid.uuid4().hex
+        _MODEL_INSTANCE_CACHE_IDS[model_obj] = out
+        return out
+    except TypeError:
+        return f"id_{int(id(model_obj))}"
 
 
 class CompletionLogitsAdapter:
@@ -65,8 +89,8 @@ class AutoregressiveLogitsAdapter:
         self.max_completion_len = int(max_completion_len)
         self.pad_token_id = int(pad_token_id)
         self.jit_step = bool(jit_step)
-        self._noncache_decode_fn_cache: dict[int, Callable[..., tuple[jnp.ndarray, jnp.ndarray]]] = {}
-        self._cached_decode_fn_cache: dict[int, Callable[..., tuple[jnp.ndarray, jnp.ndarray]]] = {}
+        self._noncache_decode_fn_cache: dict[object, Callable[..., tuple[jnp.ndarray, jnp.ndarray]]] = {}
+        self._cached_decode_fn_cache: dict[object, Callable[..., tuple[jnp.ndarray, jnp.ndarray]]] = {}
 
     def predict_completion(
         self,
@@ -194,7 +218,7 @@ class AutoregressiveLogitsAdapter:
         self,
         model: Callable[[np.ndarray], Any],
     ) -> Callable[..., tuple[jnp.ndarray, jnp.ndarray]]:
-        key = int(id(model))
+        key = _resolve_decode_cache_key(model)
         cached = self._noncache_decode_fn_cache.get(key)
         if cached is not None:
             return cached
@@ -297,7 +321,7 @@ class AutoregressiveLogitsAdapter:
         self,
         model: Callable[[np.ndarray], Any],
     ) -> Callable[..., tuple[jnp.ndarray, jnp.ndarray]]:
-        key = int(id(model))
+        key = _resolve_decode_cache_key(model)
         cached = self._cached_decode_fn_cache.get(key)
         if cached is not None:
             return cached
@@ -412,8 +436,9 @@ class AutoregressiveLogitsAdapter:
 
 def make_model_callable(optimizer, *, to_numpy: bool = True):
     """Wrap ``optimizer.model`` with optional cache forwarding and dtype normalization."""
+    model_obj = optimizer.model
     try:
-        sig = inspect.signature(optimizer.model)
+        sig = inspect.signature(model_obj)
     except (TypeError, ValueError):
         sig = None
 
@@ -423,10 +448,14 @@ def make_model_callable(optimizer, *, to_numpy: bool = True):
             param.kind == inspect.Parameter.VAR_KEYWORD
             for param in sig.parameters.values()
         ) or ("cache" in sig.parameters and "return_cache" in sig.parameters)
+    model_id = _random_model_instance_id(model_obj)
+    decode_cache_key = (
+        f"model={model_id}|supports_cache={int(bool(supports_cache))}|to_numpy={int(bool(to_numpy))}"
+    )
 
     if supports_cache:
         def _model(batch_tokens: np.ndarray, *, cache=None, return_cache: bool = False):
-            out = optimizer.model(
+            out = model_obj(
                 jnp.asarray(batch_tokens, dtype=jnp.int32),
                 cache=cache,
                 return_cache=return_cache,
@@ -439,14 +468,16 @@ def make_model_callable(optimizer, *, to_numpy: bool = True):
             if to_numpy:
                 return np.asarray(out)
             return out
+        setattr(_model, _DECODE_CACHE_KEY_ATTR, decode_cache_key)
         return _model
 
     def _model(batch_tokens: np.ndarray):
-        out = optimizer.model(jnp.asarray(batch_tokens, dtype=jnp.int32))
+        out = model_obj(jnp.asarray(batch_tokens, dtype=jnp.int32))
         if to_numpy:
             return np.asarray(out)
         return out
 
+    setattr(_model, _DECODE_CACHE_KEY_ATTR, decode_cache_key)
     return _model
 
 

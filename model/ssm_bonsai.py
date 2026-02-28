@@ -71,6 +71,7 @@ class Mamba2BonsaiConfig:
     use_bias: bool = True
     dropout_rate: float = 0.0
     use_mup: bool = False
+    use_bf16: bool = True
     d_state: int = 16
     expand: int = 2
     d_conv: int = 4
@@ -221,7 +222,16 @@ class _RMSNormGate(nnx.Module):
 
 
 class _DepthwiseConv1d(nnx.Module):
-    def __init__(self, features: int, kernel_size: int, use_bias: bool, *, rngs: nnx.Rngs):
+    def __init__(
+        self,
+        features: int,
+        kernel_size: int,
+        use_bias: bool,
+        dtype: jnp.dtype,
+        param_dtype: jnp.dtype,
+        *,
+        rngs: nnx.Rngs,
+    ):
         self.features = features
         self.kernel_size = kernel_size
         self.conv = nnx.Conv(
@@ -231,6 +241,8 @@ class _DepthwiseConv1d(nnx.Module):
             padding=((0, 0),),
             feature_group_count=features,
             use_bias=use_bias,
+            dtype=dtype,
+            param_dtype=param_dtype,
             rngs=rngs,
         )
 
@@ -265,7 +277,14 @@ def _inverse_softplus(x: jnp.ndarray) -> jnp.ndarray:
 
 
 class Mamba2BonsaiMixer(nnx.Module):
-    def __init__(self, config: Mamba2BonsaiConfig, *, rngs: nnx.Rngs):
+    def __init__(
+        self,
+        config: Mamba2BonsaiConfig,
+        *,
+        dtype: jnp.dtype,
+        param_dtype: jnp.dtype,
+        rngs: nnx.Rngs,
+    ):
         if config.n_hidden % config.n_heads != 0:
             raise ValueError(
                 f"n_hidden ({config.n_hidden}) must be divisible by n_heads ({config.n_heads})"
@@ -306,6 +325,8 @@ class Mamba2BonsaiMixer(nnx.Module):
             self.hidden_size,
             proj_size,
             use_bias=config.use_bias,
+            dtype=dtype,
+            param_dtype=param_dtype,
             rngs=rngs,
         )
 
@@ -314,6 +335,8 @@ class Mamba2BonsaiMixer(nnx.Module):
             conv_dim,
             config.d_conv,
             use_bias=config.use_bias,
+            dtype=dtype,
+            param_dtype=param_dtype,
             rngs=rngs,
         )
 
@@ -334,6 +357,8 @@ class Mamba2BonsaiMixer(nnx.Module):
             self.intermediate_size,
             self.hidden_size,
             use_bias=config.use_bias,
+            dtype=dtype,
+            param_dtype=param_dtype,
             rngs=rngs,
         )
 
@@ -345,6 +370,10 @@ class Mamba2BonsaiMixer(nnx.Module):
         ssm_state: jnp.ndarray | None,
     ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
         batch_size, seq_len, _ = hidden_states.shape
+        if conv_state is not None and conv_state.dtype != hidden_states.dtype:
+            conv_state = conv_state.astype(hidden_states.dtype)
+        if ssm_state is not None and ssm_state.dtype != hidden_states.dtype:
+            ssm_state = ssm_state.astype(hidden_states.dtype)
 
         zxbcdt = self.in_proj(hidden_states)
         d_mlp = (
@@ -409,9 +438,30 @@ class Mamba2BonsaiMixer(nnx.Module):
 
 
 class Mamba2BonsaiBlock(nnx.Module):
-    def __init__(self, config: Mamba2BonsaiConfig, *, rngs: nnx.Rngs):
-        self.pre_norm = nnx.RMSNorm(config.n_hidden, rngs=rngs) if config.layer_norm else None
-        self.mixer = Mamba2BonsaiMixer(config, rngs=rngs)
+    def __init__(
+        self,
+        config: Mamba2BonsaiConfig,
+        *,
+        dtype: jnp.dtype,
+        param_dtype: jnp.dtype,
+        rngs: nnx.Rngs,
+    ):
+        self.pre_norm = (
+            nnx.RMSNorm(
+                config.n_hidden,
+                dtype=dtype,
+                param_dtype=param_dtype,
+                rngs=rngs,
+            )
+            if config.layer_norm
+            else None
+        )
+        self.mixer = Mamba2BonsaiMixer(
+            config,
+            dtype=dtype,
+            param_dtype=param_dtype,
+            rngs=rngs,
+        )
         self.dropout = (
             nnx.Dropout(rate=config.dropout_rate, rngs=rngs)
             if config.dropout_rate > 0
@@ -452,6 +502,8 @@ class Mamba2Bonsai(nnx.Module):
                 f"scan_chunk_len must be >= 1, got {config.scan_chunk_len}"
             )
         self.config = config
+        self.compute_dtype = jnp.bfloat16 if config.use_bf16 else jnp.float32
+        self.param_dtype = jnp.float32
         self.inner = config.expand * config.n_hidden
         if self.inner % config.n_heads != 0:
             raise ValueError(
@@ -459,14 +511,37 @@ class Mamba2Bonsai(nnx.Module):
             )
 
         if config.n_vocab is not None:
-            self.embed = nnx.Embed(config.n_vocab, config.n_hidden, rngs=rngs)
+            self.embed = nnx.Embed(
+                config.n_vocab,
+                config.n_hidden,
+                dtype=self.compute_dtype,
+                param_dtype=self.param_dtype,
+                rngs=rngs,
+            )
         else:
             self.embed = None
 
         self.blocks = nnx.List(
-            [Mamba2BonsaiBlock(config, rngs=rngs) for _ in range(config.n_layers)]
+            [
+                Mamba2BonsaiBlock(
+                    config,
+                    dtype=self.compute_dtype,
+                    param_dtype=self.param_dtype,
+                    rngs=rngs,
+                )
+                for _ in range(config.n_layers)
+            ]
         )
-        self.final_ln = nnx.RMSNorm(config.n_hidden, rngs=rngs) if config.layer_norm else None
+        self.final_ln = (
+            nnx.RMSNorm(
+                config.n_hidden,
+                dtype=self.compute_dtype,
+                param_dtype=self.param_dtype,
+                rngs=rngs,
+            )
+            if config.layer_norm
+            else None
+        )
 
         out_features = config.n_out * config.n_pred_tokens
         if config.use_mup:
@@ -474,6 +549,8 @@ class Mamba2Bonsai(nnx.Module):
                 config.n_hidden,
                 out_features,
                 use_bias=config.use_bias,
+                dtype=self.compute_dtype,
+                param_dtype=self.param_dtype,
                 rngs=rngs,
             )
         else:
@@ -481,6 +558,8 @@ class Mamba2Bonsai(nnx.Module):
                 config.n_hidden,
                 out_features,
                 use_bias=config.use_bias,
+                dtype=self.compute_dtype,
+                param_dtype=self.param_dtype,
                 rngs=rngs,
             )
 
@@ -502,6 +581,8 @@ class Mamba2Bonsai(nnx.Module):
             assert x.ndim == 3, f"Expected 3D input (batch, seq, features), got {x.shape}"
             if config.output_mode == "last_nonpad":
                 raise ValueError("output_mode='last_nonpad' requires token indices (n_vocab must be set)")
+
+        x = x.astype(self.compute_dtype)
 
         if cache is None:
             conv_states = [None] * config.n_layers

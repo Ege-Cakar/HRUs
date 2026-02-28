@@ -60,6 +60,27 @@ SWEEP_METRICS = [
     "free_run_rule_reachable_rate",
 ]
 
+COMMON_CONFIG_COLS = [
+    "target_format",
+    "train_distances",
+    "eval_distances",
+    "ood_distances",
+    "train_max_n_demos",
+    "eval_max_n_demos_sweep",
+    "lr",
+    "n_layers",
+    "n_hidden",
+    "n_seq",
+    "n_vocab",
+]
+
+FAMILY_CONFIG_COLS = {
+    "transformer": ["n_heads", "pos_encoding", "use_swiglu"],
+    "mamba1": ["n_heads", "d_state", "d_conv", "scan_chunk_len"],
+    "mamba2": ["n_heads", "d_state", "d_conv", "scan_chunk_len"],
+    "mamba2_bonsai": ["n_heads", "d_state", "d_conv", "scan_chunk_len"],
+}
+
 
 def _as_int_list(value) -> list[int]:
     if isinstance(value, (list, tuple, np.ndarray)):
@@ -111,12 +132,15 @@ def _extract_final_row(row):
             "train_distances": str(train_distances),
             "eval_distances": str(eval_distances),
             "ood_distances": str(ood_distances),
+            "target_format": info.get("target_format"),
             "train_max_n_demos": info.get("train_max_n_demos", np.nan),
             "eval_max_n_demos_sweep": str(_as_int_list(info.get("eval_max_n_demos_sweep"))),
             "lr": info.get("lr", np.nan),
             "n_layers": info.get("n_layers", np.nan),
             "n_hidden": info.get("n_hidden", np.nan),
             "n_heads": info.get("n_heads", np.nan),
+            "pos_encoding": info.get("pos_encoding"),
+            "use_swiglu": info.get("use_swiglu"),
             "d_state": info.get("d_state", np.nan),
             "d_conv": info.get("d_conv", np.nan),
             "scan_chunk_len": info.get("scan_chunk_len", np.nan),
@@ -213,6 +237,83 @@ def _compute_ood_by_demo(
     return agg
 
 
+def _is_missing(value) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, (list, tuple, dict, np.ndarray)):
+        return False
+    try:
+        return bool(pd.isna(value))
+    except TypeError:
+        return False
+
+
+def _format_md_value(value) -> str:
+    if _is_missing(value):
+        return "-"
+    if isinstance(value, bool):
+        return str(value).lower()
+    if isinstance(value, (np.floating, float)):
+        return f"{float(value):.6g}"
+    if isinstance(value, (np.integer, int)):
+        return str(int(value))
+    return str(value)
+
+
+def _write_best_config_markdown(
+    *,
+    best_rows: pd.DataFrame,
+    train_max_distance: int,
+    out_path: Path,
+) -> None:
+    lines = [
+        f"# Best configurations for train_max_distance={int(train_max_distance)}",
+        "",
+        "Selection metric: `ood_rollout_success_avg` (higher is better).",
+        "",
+    ]
+
+    id_metric_cols = [
+        "run_id",
+        "run_row_id",
+        "model_family",
+        "train_max_distance",
+        "selection_eval_max_n_demos",
+        "selection_metric_name",
+        "selection_metric_value",
+        "ood_rollout_success_avg",
+        "ood_final_token_acc_avg",
+        "ood_valid_rule_rate_avg",
+        "ood_correct_rule_rate_avg",
+        "ood_free_run_rule_reachable_rate_avg",
+    ]
+
+    for _, row in best_rows.iterrows():
+        family = str(row.get("model_family"))
+        lines.extend(
+            [
+                f"## {family}",
+                "",
+                "| Key | Value |",
+                "| --- | --- |",
+            ]
+        )
+
+        cols = list(id_metric_cols)
+        cols.extend(COMMON_CONFIG_COLS)
+        cols.extend(FAMILY_CONFIG_COLS.get(family, []))
+
+        for col in cols:
+            val = row.get(col)
+            if _is_missing(val):
+                continue
+            lines.append(f"| `{col}` | `{_format_md_value(val)}` |")
+
+        lines.append("")
+
+    out_path.write_text("\n".join(lines), encoding="utf-8")
+
+
 def _plot_ood_demo_sweep(
     *,
     ood_by_demo: pd.DataFrame,
@@ -232,6 +333,7 @@ def _plot_ood_demo_sweep(
         marker="o",
     )
     plt.xscale("symlog", linthresh=1)
+    plt.xlim(left=0.0)
     plt.xlabel("Eval max_n_demos")
     plt.ylabel(metric)
     plt.title(f"OOD {metric} vs eval demos (train <= {int(train_max_distance)})")
@@ -268,6 +370,7 @@ def _plot_distance_by_demo(
     )
     for ax in np.ravel(g.axes):
         ax.axvline(float(train_max_distance), color="0.35", linestyle="--", linewidth=1.0)
+        ax.set_xlim(left=0.0)
     g.set_axis_labels("Layer distance", metric)
     g.set_titles("eval_max_n_demos={col_name}")
     g.fig.suptitle(f"{metric} by distance and eval demos (train <= {int(train_max_distance)})")
@@ -359,6 +462,14 @@ def _save_plots_for_train_max(
         train_max_distance=train_max_distance,
     )
 
+    best_rows = best_df.loc[best_df["train_max_distance"] == float(train_max_distance)].copy()
+    best_rows = best_rows.sort_values("model_family")
+    _write_best_config_markdown(
+        best_rows=best_rows,
+        train_max_distance=train_max_distance,
+        out_path=out_dir / f"best_configs_train_max_{int(train_max_distance):02d}.md",
+    )
+
 
 def _plot_sweep_vs_train_distance(
     *,
@@ -404,6 +515,7 @@ def _plot_sweep_vs_train_distance(
         )
         for ax in np.ravel(g.axes):
             ax.set_xscale("symlog", linthresh=1)
+            ax.set_xlim(left=0.0)
         g.set_axis_labels("Eval max_n_demos", metric)
         g.set_titles("{col_name}")
         g.fig.suptitle(f"OOD {metric} vs eval demos across train distances")
@@ -443,3 +555,5 @@ _plot_sweep_vs_train_distance(
 )
 
 print("Saved:", OUT_DIR)
+
+# %%

@@ -70,6 +70,118 @@ SWEEP_METRICS = [
     "rollout_success_rate",
 ]
 
+ROLE_METRIC_PLOT_GROUPS = [
+    {
+        "filename": "role_demo_metrics_loss.svg",
+        "title": "Loss by eval demos",
+        "metrics": ["loss"],
+        "sharey": False,
+    },
+    {
+        "filename": "role_demo_metrics_accuracy.svg",
+        "title": "Accuracy metrics by eval demos",
+        "metrics": ["token_acc", "final_token_acc", "seq_exact_acc"],
+        "sharey": False,
+    },
+    {
+        "filename": "role_demo_metrics_rule_match_rates.svg",
+        "title": "Rule-match rates by eval demos",
+        "metrics": [
+            "valid_rule_rate",
+            "invalid_rule_rate",
+            "correct_rule_rate",
+            "correct_given_valid_rate",
+            "decode_error_rate",
+            "unknown_rule_error_rate",
+            "wrong_rule_error_rate",
+        ],
+        "sharey": False,
+    },
+    {
+        "filename": "role_demo_metrics_first_transition_rates.svg",
+        "title": "First-transition rates by eval demos",
+        "metrics": [
+            "first_transition_rule_valid_rate",
+            "first_transition_rule_reachable_rate",
+            "first_transition_rule_reachable_given_valid_rate",
+            "first_transition_correct_rule_rate",
+            "first_transition_decode_error_rate",
+            "first_transition_unknown_rule_error_rate",
+            "first_transition_wrong_rule_error_rate",
+        ],
+        "sharey": False,
+    },
+    {
+        "filename": "role_demo_metrics_rollout_rates.svg",
+        "title": "Rollout rates and steps by eval demos",
+        "metrics": [
+            "rollout_success_rate",
+            "rollout_decode_error_rate",
+            "rollout_unknown_rule_error_rate",
+            "rollout_inapplicable_rule_error_rate",
+            "rollout_goal_not_reached_rate",
+            "rollout_avg_steps",
+        ],
+        "sharey": False,
+    },
+    {
+        "filename": "role_demo_metrics_rule_match_counts.svg",
+        "title": "Rule-match counts by eval demos",
+        "metrics": [
+            "n_rule_examples",
+            "n_valid_rule",
+            "n_invalid_rule",
+            "n_correct_rule",
+            "n_decode_error",
+            "n_unknown_rule_error",
+            "n_wrong_rule_error",
+        ],
+        "sharey": False,
+    },
+    {
+        "filename": "role_demo_metrics_first_transition_counts.svg",
+        "title": "First-transition counts by eval demos",
+        "metrics": [
+            "first_transition_n_examples",
+            "first_transition_n_valid_rule",
+            "first_transition_n_invalid_rule",
+            "first_transition_n_reachable_rule",
+            "first_transition_n_decode_error",
+            "first_transition_n_unknown_rule_error",
+            "first_transition_n_wrong_rule_error",
+            "first_transition_n_correct_rule",
+        ],
+        "sharey": False,
+    },
+    {
+        "filename": "role_demo_metrics_rollout_counts.svg",
+        "title": "Rollout counts by eval demos",
+        "metrics": ["rollout_n_examples"],
+        "sharey": False,
+    },
+]
+
+COMMON_CONFIG_COLS = [
+    "target_format",
+    "task_split",
+    "eval_roles",
+    "distance_range",
+    "train_max_n_demos",
+    "eval_max_n_demos_sweep",
+    "lr",
+    "n_layers",
+    "n_hidden",
+    "n_seq",
+    "n_vocab",
+]
+
+FAMILY_CONFIG_COLS = {
+    "transformer": ["n_heads", "pos_encoding", "use_swiglu"],
+    "mamba1": ["n_heads", "d_state", "d_conv", "scan_chunk_len"],
+    "mamba2": ["n_heads", "d_state", "d_conv", "scan_chunk_len"],
+    "mamba2_bonsai": ["n_heads", "d_state", "d_conv", "scan_chunk_len"],
+}
+
 
 def _as_int_list(value) -> list[int]:
     if isinstance(value, (list, tuple, np.ndarray)):
@@ -109,6 +221,7 @@ def _extract_final_row(row):
                 "train_first_transition_rule_reachable_rate", np.nan
             ),
             "train_rollout_success_rate": row.get("train_rollout_success_rate", np.nan),
+            "target_format": info.get("target_format"),
             "task_split": info.get("task_split"),
             "eval_roles": str(info.get("eval_roles")),
             "distance_range": str(_as_int_list(info.get("distance_range"))),
@@ -118,6 +231,8 @@ def _extract_final_row(row):
             "n_layers": info.get("n_layers", np.nan),
             "n_hidden": info.get("n_hidden", np.nan),
             "n_heads": info.get("n_heads", np.nan),
+            "pos_encoding": info.get("pos_encoding"),
+            "use_swiglu": info.get("use_swiglu"),
             "d_state": info.get("d_state", np.nan),
             "d_conv": info.get("d_conv", np.nan),
             "scan_chunk_len": info.get("scan_chunk_len", np.nan),
@@ -178,14 +293,141 @@ def filter_role_eval_demo_df_to_best(
     return role_eval_demo_df.loc[role_eval_demo_df["run_row_id"].isin(best_ids)].copy()
 
 
-def _plot_eval_demo_lines(
+def _is_missing(value) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, (list, tuple, dict, np.ndarray)):
+        return False
+    try:
+        return bool(pd.isna(value))
+    except TypeError:
+        return False
+
+
+def _format_md_value(value) -> str:
+    if _is_missing(value):
+        return "-"
+    if isinstance(value, bool):
+        return str(value).lower()
+    if isinstance(value, (np.floating, float)):
+        return f"{float(value):.6g}"
+    if isinstance(value, (np.integer, int)):
+        return str(int(value))
+    return str(value)
+
+
+def _write_best_config_markdown(
+    *,
+    best_rows: pd.DataFrame,
+    out_path: Path,
+) -> None:
+    lines = [
+        "# Best configurations by model family",
+        "",
+        "Selection metric: `eval_first_transition_rule_reachable_rate` (higher is better).",
+        "",
+    ]
+
+    id_metric_cols = [
+        "run_id",
+        "run_row_id",
+        "name",
+        "model_family",
+        "selection_role",
+        "selection_eval_max_n_demos",
+        "selection_metric_name",
+        "selection_metric_value",
+        "eval_first_transition_rule_reachable_rate",
+        "eval_first_transition_rule_valid_rate",
+        "eval_rollout_success_rate",
+        "train_first_transition_rule_reachable_rate",
+        "train_rollout_success_rate",
+    ]
+
+    for _, row in best_rows.iterrows():
+        family = str(row.get("model_family"))
+        lines.extend(
+            [
+                f"## {family}",
+                "",
+                "| Key | Value |",
+                "| --- | --- |",
+            ]
+        )
+
+        cols = list(id_metric_cols)
+        cols.extend(COMMON_CONFIG_COLS)
+        cols.extend(FAMILY_CONFIG_COLS.get(family, []))
+
+        for col in cols:
+            val = row.get(col)
+            if _is_missing(val):
+                continue
+            lines.append(f"| `{col}` | `{_format_md_value(val)}` |")
+
+        lines.append("")
+
+    out_path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def _plot_role_metric_group(
+    *,
+    best_role_eval_demo_df: pd.DataFrame,
+    metric_names: list[str],
+    out_path: Path,
+    title: str,
+    sharey: bool = False,
+) -> None:
+    available = [m for m in metric_names if m in best_role_eval_demo_df.columns]
+    if not available:
+        return
+
+    long_df = best_role_eval_demo_df[
+        ["model_family", "eval_role", "eval_max_n_demos", *available]
+    ].melt(
+        id_vars=["model_family", "eval_role", "eval_max_n_demos"],
+        value_vars=available,
+        var_name="metric",
+        value_name="value",
+    )
+    long_df = long_df.dropna(subset=["value"])
+    if long_df.empty:
+        return
+
+    g = sns.relplot(
+        data=long_df,
+        kind="line",
+        x="eval_max_n_demos",
+        y="value",
+        hue="model_family",
+        style="eval_role",
+        col="metric",
+        marker="o",
+        col_wrap=min(3, max(1, len(available))),
+        facet_kws={"sharex": True, "sharey": bool(sharey)},
+        height=3.0,
+        aspect=1.15,
+    )
+    for ax in np.ravel(g.axes):
+        ax.set_xscale("symlog", linthresh=1)
+        ax.set_xlim(left=0.0)
+    g.set_axis_labels("Eval max_n_demos", "Metric value")
+    g.set_titles("{col_name}")
+    g.fig.suptitle(title)
+    g.fig.subplots_adjust(top=0.88)
+    g.savefig(out_path, bbox_inches="tight")
+    plt.close(g.fig)
+
+
+def _plot_role_demo_lines(
     *,
     best_role_eval_demo_df: pd.DataFrame,
     metric: str,
     out_path: Path,
+    eval_role: str = "eval",
 ) -> None:
     plot_df = best_role_eval_demo_df.loc[
-        best_role_eval_demo_df["eval_role"] == "eval"
+        best_role_eval_demo_df["eval_role"] == str(eval_role)
     ].copy()
     if plot_df.empty or metric not in plot_df.columns:
         return
@@ -199,9 +441,10 @@ def _plot_eval_demo_lines(
         marker="o",
     )
     plt.xscale("symlog", linthresh=1)
+    plt.xlim(left=0.0)
     plt.xlabel("Eval max_n_demos")
     plt.ylabel(metric)
-    plt.title(f"Eval role: {metric} vs demos")
+    plt.title(f"{str(eval_role).capitalize()} role: {metric} vs demos")
     plt.savefig(out_path, bbox_inches="tight")
     plt.close()
 
@@ -235,6 +478,7 @@ def _plot_transfer_gap(
         marker="o",
     )
     plt.xscale("symlog", linthresh=1)
+    plt.xlim(left=0.0)
     plt.axhline(0.0, color="0.35", linestyle="--", linewidth=1.0)
     plt.xlabel("Eval max_n_demos")
     plt.ylabel("eval - train")
@@ -243,14 +487,15 @@ def _plot_transfer_gap(
     plt.close()
 
 
-def _plot_eval_heatmap(
+def _plot_role_heatmap(
     *,
     best_role_eval_demo_df: pd.DataFrame,
     metric: str,
     out_path: Path,
+    eval_role: str = "eval",
 ) -> None:
     plot_df = best_role_eval_demo_df.loc[
-        best_role_eval_demo_df["eval_role"] == "eval"
+        best_role_eval_demo_df["eval_role"] == str(eval_role)
     ].copy()
     if plot_df.empty or metric not in plot_df.columns:
         return
@@ -274,7 +519,7 @@ def _plot_eval_heatmap(
     )
     plt.xlabel("Eval max_n_demos")
     plt.ylabel("Model family")
-    plt.title(f"Eval role heatmap: {metric}")
+    plt.title(f"{str(eval_role).capitalize()} role heatmap: {metric}")
     plt.savefig(out_path, bbox_inches="tight")
     plt.close()
 
@@ -295,23 +540,47 @@ final_df.to_csv(OUT_DIR / "summary_final.csv", index=False)
 role_eval_demo_df.to_csv(OUT_DIR / "summary_by_role_eval_demo.csv", index=False)
 best_df.to_csv(OUT_DIR / "best_by_family.csv", index=False)
 best_role_eval_demo_df.to_csv(OUT_DIR / "best_by_role_eval_demo.csv", index=False)
+_write_best_config_markdown(
+    best_rows=best_df.sort_values("model_family").reset_index(drop=True),
+    out_path=OUT_DIR / "best_configs_by_family.md",
+)
+
+for group in ROLE_METRIC_PLOT_GROUPS:
+    _plot_role_metric_group(
+        best_role_eval_demo_df=best_role_eval_demo_df,
+        metric_names=list(group["metrics"]),
+        out_path=OUT_DIR / str(group["filename"]),
+        title=str(group["title"]),
+        sharey=bool(group["sharey"]),
+    )
 
 for metric in SWEEP_METRICS:
-    _plot_eval_demo_lines(
-        best_role_eval_demo_df=best_role_eval_demo_df,
-        metric=metric,
-        out_path=OUT_DIR / f"eval_{metric}_vs_demo.svg",
-    )
+    for role in ("train", "eval"):
+        _plot_role_demo_lines(
+            best_role_eval_demo_df=best_role_eval_demo_df,
+            metric=metric,
+            out_path=OUT_DIR / f"{role}_{metric}_vs_demo.svg",
+            eval_role=role,
+        )
     _plot_transfer_gap(
         best_role_eval_demo_df=best_role_eval_demo_df,
         metric=metric,
         out_path=OUT_DIR / f"gap_{metric}_eval_minus_train.svg",
     )
 
-_plot_eval_heatmap(
+for role in ("train", "eval"):
+    _plot_role_heatmap(
+        best_role_eval_demo_df=best_role_eval_demo_df,
+        metric="first_transition_rule_reachable_rate",
+        out_path=OUT_DIR / f"{role}_reachable_rate_heatmap.svg",
+        eval_role=role,
+    )
+
+_plot_role_heatmap(
     best_role_eval_demo_df=best_role_eval_demo_df,
-    metric="first_transition_rule_reachable_rate",
-    out_path=OUT_DIR / "eval_reachable_rate_heatmap.svg",
+    metric="rollout_success_rate",
+    out_path=OUT_DIR / "eval_rollout_success_heatmap.svg",
+    eval_role="eval",
 )
 
 print("Saved:", OUT_DIR)

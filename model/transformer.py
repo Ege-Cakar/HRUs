@@ -209,6 +209,7 @@ class TransformerConfig:
     pad_token_id: int = 0
     use_mup: bool = False
     use_sow: bool = False
+    use_bf16: bool = True
 
     def to_model(self, *, rngs: nnx.Rngs) -> 'Transformer':
         return Transformer(self, rngs=rngs)
@@ -227,6 +228,8 @@ class MultiHeadAttention(nnx.Module):
         rotary_cos: jnp.ndarray | None = None,
         rotary_sin: jnp.ndarray | None = None,
         use_sow=False,
+        dtype: jnp.dtype = jnp.float32,
+        param_dtype: jnp.dtype = jnp.float32,
         *, 
         rngs: nnx.Rngs
     ):
@@ -238,14 +241,30 @@ class MultiHeadAttention(nnx.Module):
         self.rotary_cos = rotary_cos
         self.rotary_sin = rotary_sin
         self.use_sow = use_sow
+        self.compute_dtype = dtype
+        self._prefer_cudnn = jax.default_backend() == "gpu"
         if use_mup:
             self.scale = mup_attention_scale(self.head_dim)
         else:
             self.scale = self.head_dim ** -0.5
         
         # Combined QKV projection for efficiency
-        self.qkv = nnx.Linear(n_hidden, 3 * n_hidden, use_bias=use_bias, rngs=rngs)
-        self.out_proj = nnx.Linear(n_hidden, n_hidden, use_bias=use_bias, rngs=rngs)
+        self.qkv = nnx.Linear(
+            n_hidden,
+            3 * n_hidden,
+            use_bias=use_bias,
+            dtype=dtype,
+            param_dtype=param_dtype,
+            rngs=rngs,
+        )
+        self.out_proj = nnx.Linear(
+            n_hidden,
+            n_hidden,
+            use_bias=use_bias,
+            dtype=dtype,
+            param_dtype=param_dtype,
+            rngs=rngs,
+        )
         
         if dropout_rate > 0:
             self.dropout = nnx.Dropout(rate=dropout_rate, rngs=rngs)
@@ -324,26 +343,47 @@ class MultiHeadAttention(nnx.Module):
                     f"past head_dim mismatch; expected {self.head_dim}, got {past_key.shape[3]} and {past_value.shape[3]}"
                 )
             past_len_i32 = jnp.asarray(pos_offset, dtype=jnp.int32)
-            k = jax.lax.dynamic_update_slice(past_key, k, (0, 0, past_len_i32, 0))
-            v = jax.lax.dynamic_update_slice(past_value, v, (0, 0, past_len_i32, 0))
+            k_update = k if k.dtype == past_key.dtype else k.astype(past_key.dtype)
+            v_update = v if v.dtype == past_value.dtype else v.astype(past_value.dtype)
+            k = jax.lax.dynamic_update_slice(past_key, k_update, (0, 0, past_len_i32, 0))
+            v = jax.lax.dynamic_update_slice(past_value, v_update, (0, 0, past_len_i32, 0))
         
-        # Scaled dot-product attention
-        attn_weights = jnp.einsum('bhqd,bhkd->bhqk', q, k) * self.scale
-        
-        if mask is not None:
-            attn_weights = jnp.where(mask, attn_weights, -1e9)
-        
-        attn_weights = jax.nn.softmax(attn_weights, axis=-1)
+        # Use dtype-compatible K/V tensors for attention computation when cache
+        # and compute dtypes differ.
+        k_attn = k if k.dtype == q.dtype else k.astype(q.dtype)
+        v_attn = v if v.dtype == q.dtype else v.astype(q.dtype)
 
-        if self.use_sow:
-            self.sow(nnx.Intermediate, 'attn_weights', attn_weights)
-        
-        if self.dropout is not None:
-            attn_weights = self.dropout(attn_weights)
-        
-        # Apply attention to values
-        out = jnp.einsum('bhqk,bhkd->bhqd', attn_weights, v)
-        out = jnp.transpose(out, (0, 2, 1, 3))  # (batch, seq, heads, head_dim)
+        use_manual_attention = self.use_sow or self.dropout is not None
+        if use_manual_attention:
+            attn_weights = jnp.einsum("bhqd,bhkd->bhqk", q, k_attn) * self.scale
+            if mask is not None:
+                mask_value = jnp.finfo(attn_weights.dtype).min
+                attn_weights = jnp.where(mask, attn_weights, mask_value)
+            attn_weights = jax.nn.softmax(attn_weights, axis=-1)
+            if self.use_sow:
+                self.sow(nnx.Intermediate, "attn_weights", attn_weights)
+            if self.dropout is not None:
+                attn_weights = self.dropout(attn_weights)
+            out = jnp.einsum("bhqk,bhkd->bhqd", attn_weights, v_attn)
+            out = jnp.transpose(out, (0, 2, 1, 3))  # (batch, seq, heads, head_dim)
+        else:
+            # jax.nn.dot_product_attention expects (batch, seq, heads, head_dim).
+            q_attn = jnp.transpose(q, (0, 2, 1, 3))
+            k_attn = jnp.transpose(k_attn, (0, 2, 1, 3))
+            v_attn = jnp.transpose(v_attn, (0, 2, 1, 3))
+            implementation = (
+                "cudnn"
+                if self._prefer_cudnn and q_attn.dtype == jnp.bfloat16
+                else "xla"
+            )
+            out = jax.nn.dot_product_attention(
+                q_attn,
+                k_attn,
+                v_attn,
+                mask=mask,
+                scale=self.scale,
+                implementation=implementation,
+            )
         out = out.reshape(batch_size, seq_len, self.n_hidden)
         
         out = self.out_proj(out)
@@ -368,6 +408,8 @@ class TransformerBlock(nnx.Module):
         rotary_cos: jnp.ndarray | None = None,
         rotary_sin: jnp.ndarray | None = None,
         use_sow: bool = False,
+        dtype: jnp.dtype = jnp.float32,
+        param_dtype: jnp.dtype = jnp.float32,
         *, 
         rngs: nnx.Rngs
     ):
@@ -385,22 +427,69 @@ class TransformerBlock(nnx.Module):
             rotary_cos=rotary_cos,
             rotary_sin=rotary_sin,
             use_sow=self.use_sow,
+            dtype=dtype,
+            param_dtype=param_dtype,
             rngs=rngs
         )
         
         # MLP
         if use_swiglu:
-            self.mlp_gate = nnx.Linear(n_hidden, n_mlp_hidden, use_bias=use_bias, rngs=rngs)
-            self.mlp_up = nnx.Linear(n_hidden, n_mlp_hidden, use_bias=use_bias, rngs=rngs)
-            self.mlp_down = nnx.Linear(n_mlp_hidden, n_hidden, use_bias=use_bias, rngs=rngs)
+            self.mlp_gate = nnx.Linear(
+                n_hidden,
+                n_mlp_hidden,
+                use_bias=use_bias,
+                dtype=dtype,
+                param_dtype=param_dtype,
+                rngs=rngs,
+            )
+            self.mlp_up = nnx.Linear(
+                n_hidden,
+                n_mlp_hidden,
+                use_bias=use_bias,
+                dtype=dtype,
+                param_dtype=param_dtype,
+                rngs=rngs,
+            )
+            self.mlp_down = nnx.Linear(
+                n_mlp_hidden,
+                n_hidden,
+                use_bias=use_bias,
+                dtype=dtype,
+                param_dtype=param_dtype,
+                rngs=rngs,
+            )
         else:
-            self.mlp_fc1 = nnx.Linear(n_hidden, n_mlp_hidden, use_bias=use_bias, rngs=rngs)
-            self.mlp_fc2 = nnx.Linear(n_mlp_hidden, n_hidden, use_bias=use_bias, rngs=rngs)
+            self.mlp_fc1 = nnx.Linear(
+                n_hidden,
+                n_mlp_hidden,
+                use_bias=use_bias,
+                dtype=dtype,
+                param_dtype=param_dtype,
+                rngs=rngs,
+            )
+            self.mlp_fc2 = nnx.Linear(
+                n_mlp_hidden,
+                n_hidden,
+                use_bias=use_bias,
+                dtype=dtype,
+                param_dtype=param_dtype,
+                rngs=rngs,
+            )
         
         # RMS norms (pre-norm architecture)
         if layer_norm:
-            self.ln1 = nnx.RMSNorm(n_hidden, rngs=rngs)
-            self.ln2 = nnx.RMSNorm(n_hidden, rngs=rngs)
+            self.ln1 = nnx.RMSNorm(
+                n_hidden,
+                dtype=dtype,
+                param_dtype=param_dtype,
+                rngs=rngs,
+            )
+            self.ln2 = nnx.RMSNorm(
+                n_hidden,
+                dtype=dtype,
+                param_dtype=param_dtype,
+                rngs=rngs,
+            )
         
         if dropout_rate > 0:
             self.dropout = nnx.Dropout(rate=dropout_rate, rngs=rngs)
@@ -469,6 +558,8 @@ class Transformer(nnx.Module):
 
     def __init__(self, config: TransformerConfig, *, rngs: nnx.Rngs):
         self.config = config
+        self.compute_dtype = jnp.bfloat16 if config.use_bf16 else jnp.float32
+        self.param_dtype = jnp.float32
         if config.n_mlp_hidden is None:
             if config.use_swiglu:
                 n_mlp_hidden = int(4 * config.n_hidden * 2 / 3)
@@ -494,6 +585,8 @@ class Transformer(nnx.Module):
             self.embed = nnx.Embed(
                 num_embeddings=config.n_vocab,
                 features=config.n_hidden,
+                dtype=self.compute_dtype,
+                param_dtype=self.param_dtype,
                 rngs=rngs
             )
         else:
@@ -501,13 +594,17 @@ class Transformer(nnx.Module):
         
         # Positional embeddings (stored as buffer, not parameter)
         if config.pos_encoding == "absolute":
-            self.pos_embedding = sinusoidal_pos_embedding(config.n_seq, config.n_hidden)
+            self.pos_embedding = sinusoidal_pos_embedding(config.n_seq, config.n_hidden).astype(
+                self.compute_dtype
+            )
             self.rotary_cos = None
             self.rotary_sin = None
         elif config.pos_encoding == "rope":
             self.pos_embedding = None
             head_dim = config.n_hidden // config.n_heads
             self.rotary_cos, self.rotary_sin = rotary_pos_embedding(config.n_seq, head_dim)
+            self.rotary_cos = self.rotary_cos.astype(self.compute_dtype)
+            self.rotary_sin = self.rotary_sin.astype(self.compute_dtype)
         else:
             self.pos_embedding = None
             self.rotary_cos = None
@@ -527,6 +624,8 @@ class Transformer(nnx.Module):
                 rotary_cos=self.rotary_cos,
                 rotary_sin=self.rotary_sin,
                 use_sow=config.use_sow,
+                dtype=self.compute_dtype,
+                param_dtype=self.param_dtype,
                 rngs=rngs,
             )
             for _ in range(config.n_layers)
@@ -534,7 +633,12 @@ class Transformer(nnx.Module):
         
         # Final RMS norm (if using normalization)
         if config.layer_norm:
-            self.final_ln = nnx.RMSNorm(config.n_hidden, rngs=rngs)
+            self.final_ln = nnx.RMSNorm(
+                config.n_hidden,
+                dtype=self.compute_dtype,
+                param_dtype=self.param_dtype,
+                rngs=rngs,
+            )
         else:
             self.final_ln = None
         
@@ -545,10 +649,19 @@ class Transformer(nnx.Module):
                 config.n_hidden,
                 out_features,
                 use_bias=config.use_bias,
+                dtype=self.compute_dtype,
+                param_dtype=self.param_dtype,
                 rngs=rngs,
             )
         else:
-            self.output = nnx.Linear(config.n_hidden, out_features, use_bias=config.use_bias, rngs=rngs)
+            self.output = nnx.Linear(
+                config.n_hidden,
+                out_features,
+                use_bias=config.use_bias,
+                dtype=self.compute_dtype,
+                param_dtype=self.param_dtype,
+                rngs=rngs,
+            )
         
         # Precompute causal mask for max sequence length
         self._causal_mask = jnp.tril(jnp.ones((config.n_seq, config.n_seq), dtype=bool))
@@ -589,6 +702,8 @@ class Transformer(nnx.Module):
             assert x.ndim == 3, f"Expected 3D input (batch, seq, features), got {x.shape}"
             if config.output_mode == "last_nonpad":
                 raise ValueError("output_mode='last_nonpad' requires token indices (n_vocab must be set)")
+
+        x = x.astype(self.compute_dtype)
         
         batch_size, seq_len, _ = x.shape
         head_dim = config.n_hidden // config.n_heads

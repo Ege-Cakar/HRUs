@@ -59,6 +59,7 @@ class TestTransformerConfig:
         assert config.output_mode == "last_token"
         assert config.pad_token_id == 0
         assert config.use_mup is False
+        assert config.use_bf16 is True
 
     def test_custom_values(self):
         config = TransformerConfig(
@@ -77,7 +78,8 @@ class TestTransformerConfig:
             dropout_rate=0.1,
             output_mode="full_sequence",
             pad_token_id=3,
-            use_mup=True
+            use_mup=True,
+            use_bf16=False,
         )
         assert config.n_vocab == 512
         assert config.n_seq == 256
@@ -95,6 +97,7 @@ class TestTransformerConfig:
         assert config.output_mode == "full_sequence"
         assert config.pad_token_id == 3
         assert config.use_mup is True
+        assert config.use_bf16 is False
 
     def test_to_model(self):
         config = TransformerConfig(n_vocab=100, n_hidden=64, n_seq=16, n_layers=2, n_heads=4)
@@ -251,6 +254,26 @@ class TestTransformer:
         output = model(x)
         
         assert output.shape == (4, 3)
+        assert output.dtype == jnp.bfloat16
+
+    def test_forward_without_embedding_fp32_opt_out(self):
+        config = TransformerConfig(
+            n_vocab=None,
+            n_hidden=64,
+            n_seq=16,
+            n_layers=2,
+            n_heads=4,
+            n_out=3,
+            use_bf16=False,
+        )
+        rngs = nnx.Rngs(42)
+        model = Transformer(config, rngs=rngs)
+
+        x = jnp.ones((4, 10, 64), dtype=jnp.float32)
+        output = model(x)
+
+        assert output.shape == (4, 3)
+        assert output.dtype == jnp.float32
 
     def test_forward_last_token_only_false(self):
         """Test forward pass with output_mode='full_sequence' (full sequence output)."""
@@ -441,6 +464,26 @@ class TestTransformer:
         assert cache.values[0].shape == (2, 4, 16, 8)
         assert int(cache.length) == 0
 
+    def test_mixed_precision_forward_accepts_fp32_cache(self):
+        config = TransformerConfig(
+            n_vocab=64,
+            n_hidden=32,
+            n_seq=8,
+            n_layers=2,
+            n_heads=4,
+            n_out=7,
+            output_mode="full_sequence",
+        )
+        model = Transformer(config, rngs=nnx.Rngs(0))
+        x = jnp.array([[1, 2, 3, 4]], dtype=jnp.int32)
+        cache = create_empty_kv_cache(config, batch_size=1, dtype=jnp.float32)
+
+        y, new_cache = model(x, cache=cache, return_cache=True)
+        assert y.shape == (1, 4, 7)
+        assert y.dtype == jnp.bfloat16
+        assert new_cache.keys[0].dtype == jnp.float32
+        assert new_cache.values[0].dtype == jnp.float32
+
     @pytest.mark.parametrize("pos_encoding", ["absolute", "rope"])
     def test_cached_incremental_matches_full_sequence(self, pos_encoding):
         config = TransformerConfig(
@@ -452,6 +495,7 @@ class TestTransformer:
             n_out=7,
             output_mode="full_sequence",
             pos_encoding=pos_encoding,
+            use_bf16=False,
         )
         model = Transformer(config, rngs=nnx.Rngs(42))
         x = jnp.array(

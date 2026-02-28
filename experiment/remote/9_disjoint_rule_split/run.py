@@ -61,11 +61,11 @@ print("RUN ID", RUN_ID)
 EVAL_ROLES = ["train", "eval"]
 
 TRAIN_MAX_N_DEMOS = 8
-EVAL_MAX_N_DEMOS_SWEEP = [0, 1, 2, 4, 8, 16, 32]
+EVAL_MAX_N_DEMOS_SWEEP = [0, 2, 4, 8, 12, 16, 24, 32]
 SELECTION_EVAL_MAX_N_DEMOS = 8
 
 BATCH_SIZE = 32
-TRAIN_ITERS = 10_000
+TRAIN_ITERS = 25_000
 TEST_EVERY = 1000
 TEST_ITERS = 3
 EVAL_ITERS_PER_ROLE = 3
@@ -73,11 +73,15 @@ ROLLOUT_EXAMPLES_PER_ROLE = 64
 
 RUN_SPLIT = 24
 
-SPLIT_SEED = 2031
-PREDICATES_PER_LAYER = 64
-RULES_01_TRAIN = 256
-RULES_01_EVAL = 256
-RULES_12_SHARED = 256
+SPLIT_SEED = 2032
+# PREDICATES_PER_LAYER = 64
+# RULES_01_TRAIN = 256
+# RULES_01_EVAL = 256
+# RULES_12_SHARED = 256
+PREDICATES_PER_LAYER = 1024
+RULES_01_TRAIN = 1024
+RULES_01_EVAL = 1024
+RULES_12_SHARED = 1024
 ARITY_MAX = 3
 VARS_PER_RULE_MAX = 6
 K_IN_MAX = 3
@@ -337,7 +341,7 @@ def make_ar_light_metrics_fn():
     return _metrics
 
 
-def make_ar_metrics_fn(*, tokenizer, rule_bank, n_seq: int, max_completion_len: int):
+def make_ar_metrics_fn(*, tokenizer, rule_bank, model_fn, n_seq: int, max_completion_len: int):
     adapter = AutoregressiveLogitsAdapter(
         n_seq=int(n_seq),
         max_completion_len=int(max_completion_len),
@@ -387,8 +391,6 @@ def make_ar_metrics_fn(*, tokenizer, rule_bank, n_seq: int, max_completion_len: 
             labels=np.asarray(labels),
             tokenizer=tokenizer,
         )
-        model_fn = make_model_callable(optimizer, to_numpy=False)
-
         n_examples = 0
         n_valid = 0
         n_reachable = 0
@@ -566,13 +568,14 @@ def _evaluate_role_for_demo(
     n_iters: int,
     eval_max_n_demos: int,
 ):
+    model_fn = make_model_callable(optimizer, to_numpy=False)
     metrics_fn = make_ar_metrics_fn(
         tokenizer=tokenizer,
         rule_bank=rule_bank,
+        model_fn=model_fn,
         n_seq=int(n_seq_ar),
         max_completion_len=int(max_completion_len),
     )
-    model_fn = make_model_callable(optimizer, to_numpy=False)
 
     base_rollout_adapter = AutoregressiveLogitsAdapter(
         n_seq=int(n_seq_ar),
