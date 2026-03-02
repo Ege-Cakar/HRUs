@@ -180,7 +180,7 @@ base_kwargs = {
 }
 
 rows = []
-for backend in ("sync", "thread", "process"):
+for backend in ("sync", "thread", "server"):
     task_bench = FOLLayerTask(
         mode="online",
         online_prefetch_backend=backend,

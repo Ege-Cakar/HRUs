@@ -332,7 +332,7 @@ def _plot_ood_demo_sweep(
         hue="model_family",
         marker="o",
     )
-    plt.xscale("symlog", linthresh=1)
+    # plt.xscale("symlog", linthresh=1)
     plt.xlim(left=0.0)
     plt.xlabel("Eval max_n_demos")
     plt.ylabel(metric)

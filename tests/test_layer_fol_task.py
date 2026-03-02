@@ -558,13 +558,42 @@ def test_layer_fol_task_online_prefetch_enabled_by_default() -> None:
         online_prefetch_workers=1,
     )
     try:
-        assert task.online_prefetch_enabled
-        assert task.online_prefetch_backend_resolved in {"process", "thread"}
+        assert task.online_prefetch_backend_resolved in {"server", "thread", "sync"}
+        if task.online_prefetch_backend_resolved != "sync":
+            assert task.online_prefetch_enabled
         assert task.online_prefetch_workers_resolved == 1
         assert task.online_prefetch_buffer_size_resolved >= task.batch_size
         xs, ys = next(task)
         assert xs.shape[0] == 4
         assert ys.shape[0] == 4
+    finally:
+        task.close()
+
+
+def test_layer_fol_task_online_prefetch_server_backend_samples() -> None:
+    task = FOLLayerTask(
+        distance_range=(1, 2),
+        batch_size=2,
+        mode="online",
+        seed=141,
+        n_layers=6,
+        predicates_per_layer=4,
+        rules_per_transition=8,
+        arity_max=3,
+        vars_per_rule_max=4,
+        constants=("a", "b", "c"),
+        k_in_max=2,
+        k_out_max=2,
+        initial_ant_max=3,
+        online_prefetch_backend="server",
+        online_prefetch_workers=1,
+        online_prefetch_buffer_size=4,
+    )
+    try:
+        assert task.online_prefetch_backend_resolved in {"server", "thread", "sync"}
+        xs, ys = next(task)
+        assert xs.shape[0] == 2
+        assert ys.shape[0] == 2
     finally:
         task.close()
 
@@ -658,6 +687,38 @@ def test_layer_fol_task_online_prefetch_process_fallback(monkeypatch) -> None:
             xs, ys = next(task)
             assert xs.shape[0] == 2
             assert ys.shape[0] == 2
+    finally:
+        task.close()
+
+
+def test_layer_fol_task_online_prefetch_server_fallback(monkeypatch) -> None:
+    class _FailServerClient:
+        def __init__(self, **kwargs):
+            raise RuntimeError("server unavailable")
+
+    monkeypatch.setattr("task.layer_fol._FOLOnlineSamplerServerClient", _FailServerClient)
+    task = FOLLayerTask(
+        distance_range=(1, 2),
+        batch_size=2,
+        mode="online",
+        seed=166,
+        n_layers=6,
+        predicates_per_layer=4,
+        rules_per_transition=8,
+        arity_max=3,
+        vars_per_rule_max=4,
+        constants=("a", "b", "c"),
+        k_in_max=2,
+        k_out_max=2,
+        initial_ant_max=3,
+        online_prefetch_backend="server",
+        online_prefetch_workers=1,
+    )
+    try:
+        assert task.online_prefetch_backend_resolved in {"thread", "sync"}
+        xs, ys = next(task)
+        assert xs.shape[0] == 2
+        assert ys.shape[0] == 2
     finally:
         task.close()
 

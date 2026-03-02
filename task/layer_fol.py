@@ -9,6 +9,8 @@ import json
 import os
 from pathlib import Path
 import pickle
+import subprocess
+import sys
 import threading
 from typing import Any, Callable, Iterable, Protocol
 
@@ -176,6 +178,173 @@ def _sample_fol_online_worker_records(n_records: int) -> list[dict]:
     if n_records < 1:
         raise ValueError(f"n_records must be >= 1, got {n_records}")
     return [_sample_fol_online_worker_record() for _ in range(n_records)]
+
+
+_IPC_LEN_BYTES = 8
+_IPC_MAX_FRAME_BYTES = 256 * 1024 * 1024
+
+
+def _read_exact(stream, n_bytes: int) -> bytes:
+    chunks: list[bytes] = []
+    remaining = int(n_bytes)
+    while remaining > 0:
+        chunk = stream.read(remaining)
+        if not chunk:
+            raise EOFError("Unexpected EOF while reading framed message.")
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+def _ipc_read_pickle_frame(stream):
+    header = stream.read(_IPC_LEN_BYTES)
+    if not header:
+        raise EOFError("Peer closed stream.")
+    if len(header) != _IPC_LEN_BYTES:
+        raise RuntimeError("Received truncated IPC frame header.")
+    payload_len = int.from_bytes(header, "big")
+    if payload_len < 0 or payload_len > _IPC_MAX_FRAME_BYTES:
+        raise RuntimeError(f"Invalid IPC frame length: {payload_len}")
+    payload = _read_exact(stream, payload_len)
+    return pickle.loads(payload)
+
+
+def _ipc_write_pickle_frame(stream, payload_obj) -> None:
+    payload = pickle.dumps(payload_obj, protocol=5)
+    frame_len = len(payload)
+    if frame_len > _IPC_MAX_FRAME_BYTES:
+        raise RuntimeError(
+            f"IPC payload exceeds max frame size: {frame_len} > {_IPC_MAX_FRAME_BYTES}"
+        )
+    stream.write(frame_len.to_bytes(_IPC_LEN_BYTES, "big"))
+    stream.write(payload)
+    stream.flush()
+
+
+class _FOLOnlineSamplerServerClient:
+    def __init__(self, *, config: dict, cwd: Path) -> None:
+        self._proc = subprocess.Popen(
+            [sys.executable, "-m", "task.layer_gen.generate_layer_fol", "--server-mode"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=str(cwd),
+        )
+        if self._proc.stdin is None or self._proc.stdout is None or self._proc.stderr is None:
+            raise RuntimeError("Failed to initialize sampler server stdio pipes.")
+
+        self._stdin = self._proc.stdin
+        self._stdout = self._proc.stdout
+        self._stderr = self._proc.stderr
+        self._stderr_chunks: list[bytes] = []
+        self._stderr_thread = threading.Thread(
+            target=self._drain_stderr,
+            daemon=True,
+        )
+        self._stderr_thread.start()
+        self._closed = False
+
+        try:
+            response = self._request(
+                {
+                    "op": "init",
+                    "config": dict(config),
+                }
+            )
+            self._ensure_ok(response, op="init")
+            self.resolved_backend = str(response.get("resolved_backend", "sync"))
+        except Exception:
+            self.close()
+            raise
+
+    def _drain_stderr(self) -> None:
+        try:
+            while True:
+                chunk = self._stderr.read(4096)
+                if not chunk:
+                    break
+                self._stderr_chunks.append(chunk)
+                if len(self._stderr_chunks) > 64:
+                    self._stderr_chunks = self._stderr_chunks[-64:]
+        except Exception:
+            return
+
+    def _server_stderr_text(self) -> str:
+        if not self._stderr_chunks:
+            return ""
+        raw = b"".join(self._stderr_chunks[-64:])
+        return raw.decode("utf-8", errors="replace").strip()
+
+    def _request(self, payload: dict):
+        if self._closed:
+            raise RuntimeError("Cannot request from closed sampler server client.")
+        try:
+            _ipc_write_pickle_frame(self._stdin, payload)
+            return _ipc_read_pickle_frame(self._stdout)
+        except Exception as err:
+            stderr_text = self._server_stderr_text()
+            message = f"Sampler server IPC failed: {type(err).__name__}: {err}"
+            if stderr_text:
+                message += f"\nserver stderr:\n{stderr_text}"
+            raise RuntimeError(message) from err
+
+    def _ensure_ok(self, response: dict, *, op: str) -> None:
+        if bool(response.get("ok", False)):
+            return
+        err_type = str(response.get("error_type", "RuntimeError"))
+        err_msg = str(response.get("error_msg", f"Sampler server op={op!r} failed."))
+        err_trace = str(response.get("traceback", "")).strip()
+        detail = f"Sampler server {op!r} failed: {err_type}: {err_msg}"
+        if err_trace:
+            detail += f"\n{err_trace}"
+        raise RuntimeError(detail)
+
+    def take(self, n_records: int) -> list[dict]:
+        response = self._request(
+            {
+                "op": "sample",
+                "n_records": int(n_records),
+            }
+        )
+        self._ensure_ok(response, op="sample")
+        records = response.get("records", [])
+        if not isinstance(records, list):
+            raise RuntimeError("Sampler server returned invalid records payload.")
+        return records
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+
+        try:
+            if self._proc.poll() is None:
+                try:
+                    _ipc_write_pickle_frame(self._stdin, {"op": "close"})
+                    _ = _ipc_read_pickle_frame(self._stdout)
+                except Exception:
+                    pass
+                self._proc.terminate()
+                try:
+                    self._proc.wait(timeout=2.0)
+                except subprocess.TimeoutExpired:
+                    self._proc.kill()
+                    self._proc.wait(timeout=2.0)
+        finally:
+            try:
+                self._stdin.close()
+            except Exception:
+                pass
+            try:
+                self._stdout.close()
+            except Exception:
+                pass
+            try:
+                self._stderr.close()
+            except Exception:
+                pass
+            if self._stderr_thread.is_alive():
+                self._stderr_thread.join(timeout=0.2)
 
 
 def _augment_prompt_with_demos(
@@ -378,7 +547,7 @@ class FOLLayerTask:
         sample_max_attempts=4096,
         max_unify_solutions=128,
         online_prefetch=True,
-        online_prefetch_backend=online_prefetch_util.DEFAULT_PREFETCH_BACKEND,
+        online_prefetch_backend="server",
         online_prefetch_workers=None,
         online_prefetch_buffer_size=None,
     ) -> None:
@@ -495,6 +664,7 @@ class FOLLayerTask:
         self._batch_fn = None
         self._global_autoreg_seq_len: int | None = None
         self._online_executor = None
+        self._online_server_client: _FOLOnlineSamplerServerClient | None = None
         self._online_prefetch_buffer: online_prefetch_util.AsyncRecordPrefetchBuffer | None = (
             None
         )
@@ -577,7 +747,9 @@ class FOLLayerTask:
                 batch = next(self._iterator)
             return self._apply_autoreg_fixed_length(batch)
 
-        if self._online_prefetch_buffer is None:
+        if self._online_server_client is not None:
+            records = self._online_server_client.take(self.batch_size)
+        elif self._online_prefetch_buffer is None:
             records = [self._sample_online_record() for _ in range(self.batch_size)]
         else:
             records = self._online_prefetch_buffer.take(self.batch_size)
@@ -697,25 +869,10 @@ class FOLLayerTask:
             shard_options=shard_opts,
         )
 
-    def _init_online_prefetch(self) -> None:
-        enabled, backend, workers, buffer_size = online_prefetch_util.resolve_online_prefetch_config(
-            enable=self._online_prefetch_requested,
-            backend=self._online_prefetch_backend_requested,
-            workers=self._online_prefetch_workers_requested,
-            buffer_size=self._online_prefetch_buffer_size_requested,
-            batch_size=self.batch_size,
-        )
-        self._online_prefetch_workers_resolved = int(workers)
-        self._online_prefetch_buffer_size_resolved = int(buffer_size)
-        self._online_prefetch_backend_resolved = str(backend)
-        self._online_prefetch_enabled = bool(enabled)
-
-        if not enabled:
-            return
+    def _online_worker_initargs(self) -> tuple:
         if self._rule_bank is None or self._tokenizer is None:
             raise RuntimeError("Online prefetch requires rule bank and tokenizer.")
-
-        initargs = (
+        return (
             int(self.seed),
             self._rule_bank.to_dict(),
             (
@@ -734,6 +891,22 @@ class FOLLayerTask:
                 else int(self._online_forced_step_idx)
             ),
         )
+
+    def _init_online_prefetch_executor_backend(
+        self,
+        *,
+        backend: str,
+        workers: int,
+        buffer_size: int,
+    ) -> None:
+        self._online_prefetch_backend_resolved = str(backend)
+        self._online_prefetch_enabled = str(backend) != "sync"
+        self._online_executor = None
+        self._online_prefetch_buffer = None
+        if backend == "sync":
+            return
+
+        initargs = self._online_worker_initargs()
 
         def _make_process_executor():
             return ProcessPoolExecutor(
@@ -784,6 +957,98 @@ class FOLLayerTask:
         self._online_executor = executor
         self._online_prefetch_enabled = True
 
+    def _init_online_server_backend(
+        self,
+        *,
+        workers: int,
+        buffer_size: int,
+    ) -> None:
+        if self._rule_bank is None or self._tokenizer is None:
+            raise RuntimeError("Online prefetch requires rule bank and tokenizer.")
+
+        repo_root = Path(__file__).resolve().parents[1]
+        config = {
+            "seed": int(self.seed),
+            "bank_payload": self._rule_bank.to_dict(),
+            "tokenizer_payload": (
+                None
+                if self.task_split == "none"
+                else self._tokenizer.to_dict()
+            ),
+            "distances": tuple(int(distance) for distance in self._distances),
+            "initial_ant_max": int(self.initial_ant_max),
+            "sample_max_attempts": int(self.sample_max_attempts),
+            "max_unify_solutions": int(self.max_unify_solutions),
+            "max_n_demos": int(self.max_n_demos),
+            "forced_step_idx": (
+                None
+                if self._online_forced_step_idx is None
+                else int(self._online_forced_step_idx)
+            ),
+            "workers": int(workers),
+            "buffer_size": int(buffer_size),
+            "batch_size": int(self.batch_size),
+        }
+        server_client = _FOLOnlineSamplerServerClient(config=config, cwd=repo_root)
+        self._online_server_client = server_client
+        self._online_prefetch_backend_resolved = "server"
+        self._online_prefetch_enabled = True
+
+    def _init_online_prefetch(self) -> None:
+        requested_backend = str(self._online_prefetch_backend_requested)
+        if requested_backend == "server":
+            enabled, _, workers, buffer_size = (
+                online_prefetch_util.resolve_online_prefetch_config(
+                    enable=self._online_prefetch_requested,
+                    backend="process",
+                    workers=self._online_prefetch_workers_requested,
+                    buffer_size=self._online_prefetch_buffer_size_requested,
+                    batch_size=self.batch_size,
+                )
+            )
+            self._online_prefetch_workers_resolved = int(workers)
+            self._online_prefetch_buffer_size_resolved = int(buffer_size)
+            self._online_prefetch_backend_resolved = "server" if enabled else "sync"
+            self._online_prefetch_enabled = bool(enabled)
+            if not enabled:
+                return
+
+            try:
+                self._init_online_server_backend(
+                    workers=int(workers),
+                    buffer_size=int(buffer_size),
+                )
+                return
+            except Exception:
+                self._online_server_client = None
+                self._init_online_prefetch_executor_backend(
+                    backend="thread",
+                    workers=int(workers),
+                    buffer_size=int(buffer_size),
+                )
+                return
+
+        enabled, backend, workers, buffer_size = online_prefetch_util.resolve_online_prefetch_config(
+            enable=self._online_prefetch_requested,
+            backend=requested_backend,
+            workers=self._online_prefetch_workers_requested,
+            buffer_size=self._online_prefetch_buffer_size_requested,
+            batch_size=self.batch_size,
+        )
+        self._online_prefetch_workers_resolved = int(workers)
+        self._online_prefetch_buffer_size_resolved = int(buffer_size)
+        self._online_prefetch_backend_resolved = str(backend)
+        self._online_prefetch_enabled = bool(enabled)
+
+        if not enabled:
+            return
+
+        self._init_online_prefetch_executor_backend(
+            backend=str(backend),
+            workers=int(workers),
+            buffer_size=int(buffer_size),
+        )
+
     @property
     def online_prefetch_enabled(self) -> bool:
         return bool(self._online_prefetch_enabled)
@@ -801,17 +1066,18 @@ class FOLLayerTask:
         return int(self._online_prefetch_buffer_size_resolved)
 
     def close(self) -> None:
+        if self._online_server_client is not None:
+            self._online_server_client.close()
+            self._online_server_client = None
+
         if self._online_prefetch_buffer is not None:
             self._online_prefetch_buffer.close()
             self._online_prefetch_buffer = None
             self._online_executor = None
-            self._online_prefetch_enabled = False
-            return
-
-        if self._online_executor is not None:
+        elif self._online_executor is not None:
             self._online_executor.shutdown(wait=True, cancel_futures=True)
             self._online_executor = None
-            self._online_prefetch_enabled = False
+        self._online_prefetch_enabled = False
 
     def _sample_online_record(self) -> dict:
         if self._rule_bank is None:

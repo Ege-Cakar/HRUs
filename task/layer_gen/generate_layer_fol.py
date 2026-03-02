@@ -9,7 +9,9 @@ import json
 import os
 from pathlib import Path
 import pickle
+import sys
 import time
+import traceback
 
 import numpy as np
 from tqdm import tqdm
@@ -25,8 +27,10 @@ if __package__ in (None, ""):
         sample_fol_problem,
         save_fol_rule_bank,
     )
+    from util import online_prefetch as online_prefetch_util  # type: ignore
     from util import tokenize_layer_fol  # type: ignore
 else:
+    from .util import online_prefetch as online_prefetch_util
     from .util.fol_rule_bank import (
         FOLRuleBank,
         FOLSequent,
@@ -124,7 +128,12 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Generate layered first-order datasets.",
     )
-    parser.add_argument("--out-dir", type=Path, required=True)
+    parser.add_argument("--out-dir", type=Path, default=None)
+    parser.add_argument(
+        "--server-mode",
+        action="store_true",
+        help="Run as an online sampling server over framed stdio IPC.",
+    )
 
     parser.add_argument("--n-layers", type=int, default=16)
     parser.add_argument("--predicates-per-layer", type=int, default=8)
@@ -318,8 +327,215 @@ def _write_metadata(
     (out_dir / "metadata.json").write_text(json.dumps(metadata, indent=2))
 
 
+_IPC_LEN_BYTES = 8
+_IPC_MAX_FRAME_BYTES = 256 * 1024 * 1024
+
+
+def _read_exact(stream, n_bytes: int) -> bytes:
+    chunks: list[bytes] = []
+    remaining = int(n_bytes)
+    while remaining > 0:
+        chunk = stream.read(remaining)
+        if not chunk:
+            raise EOFError("Unexpected EOF while reading framed message.")
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+def _ipc_read_pickle_frame(stream):
+    header = stream.read(_IPC_LEN_BYTES)
+    if not header:
+        raise EOFError("Peer closed stream.")
+    if len(header) != _IPC_LEN_BYTES:
+        raise RuntimeError("Received truncated IPC frame header.")
+    payload_len = int.from_bytes(header, "big")
+    if payload_len < 0 or payload_len > _IPC_MAX_FRAME_BYTES:
+        raise RuntimeError(f"Invalid IPC frame length: {payload_len}")
+    payload = _read_exact(stream, payload_len)
+    return pickle.loads(payload)
+
+
+def _ipc_write_pickle_frame(stream, payload_obj) -> None:
+    payload = pickle.dumps(payload_obj, protocol=5)
+    frame_len = len(payload)
+    if frame_len > _IPC_MAX_FRAME_BYTES:
+        raise RuntimeError(
+            f"IPC payload exceeds max frame size: {frame_len} > {_IPC_MAX_FRAME_BYTES}"
+        )
+    stream.write(frame_len.to_bytes(_IPC_LEN_BYTES, "big"))
+    stream.write(payload)
+    stream.flush()
+
+
+def _load_fol_online_worker_fns():
+    try:
+        from task.layer_fol import (  # pylint: disable=import-outside-toplevel
+            _init_fol_online_worker,
+            _sample_fol_online_worker_records,
+        )
+    except Exception as err:
+        raise RuntimeError(
+            "Could not import FOL online worker functions. "
+            "Run server mode as module: python -m task.layer_gen.generate_layer_fol --server-mode"
+        ) from err
+    return _init_fol_online_worker, _sample_fol_online_worker_records
+
+
+class _FOLSamplerServerState:
+    def __init__(self, *, config: dict) -> None:
+        init_worker_fn, sample_records_fn = _load_fol_online_worker_fns()
+        self._sample_records_fn = sample_records_fn
+        self._executor = None
+        self._prefetch_buffer: online_prefetch_util.AsyncRecordPrefetchBuffer | None = None
+
+        workers = int(config["workers"])
+        buffer_size = int(config["buffer_size"])
+        batch_size = int(config["batch_size"])
+
+        initargs = (
+            int(config["seed"]),
+            dict(config["bank_payload"]),
+            config.get("tokenizer_payload", None),
+            tuple(int(distance) for distance in config["distances"]),
+            int(config["initial_ant_max"]),
+            int(config["sample_max_attempts"]),
+            int(config["max_unify_solutions"]),
+            int(config["max_n_demos"]),
+            (
+                None
+                if config.get("forced_step_idx", None) is None
+                else int(config["forced_step_idx"])
+            ),
+        )
+
+        def _make_process_executor():
+            return ProcessPoolExecutor(
+                max_workers=workers,
+                initializer=init_worker_fn,
+                initargs=initargs,
+            )
+
+        def _make_thread_executor():
+            return ThreadPoolExecutor(
+                max_workers=workers,
+                initializer=init_worker_fn,
+                initargs=initargs,
+            )
+
+        resolved_backend, executor = online_prefetch_util.create_executor_with_fallback(
+            backend="process",
+            make_process_executor=_make_process_executor,
+            make_thread_executor=_make_thread_executor,
+        )
+        self.resolved_backend = str(resolved_backend)
+        if executor is None:
+            init_worker_fn(*initargs)
+            return
+
+        records_per_job = 1
+        if resolved_backend == "process":
+            records_per_job = max(1, batch_size // max(1, workers))
+
+        shutdown_fn = lambda: executor.shutdown(wait=True, cancel_futures=True)
+        try:
+            self._prefetch_buffer = online_prefetch_util.AsyncRecordPrefetchBuffer(
+                submit_fn=lambda: executor.submit(
+                    sample_records_fn,
+                    records_per_job,
+                ),
+                buffer_size=buffer_size,
+                on_close=shutdown_fn,
+            )
+        except Exception:
+            shutdown_fn()
+            raise
+        self._executor = executor
+
+    def take(self, count: int) -> list[dict]:
+        count = int(count)
+        if count < 0:
+            raise ValueError(f"n_records must be >= 0, got {count}")
+        if self._prefetch_buffer is None:
+            if count == 0:
+                return []
+            return list(self._sample_records_fn(count))
+        return self._prefetch_buffer.take(count)
+
+    def close(self) -> None:
+        if self._prefetch_buffer is not None:
+            self._prefetch_buffer.close()
+            self._prefetch_buffer = None
+            self._executor = None
+            return
+        if self._executor is not None:
+            self._executor.shutdown(wait=True, cancel_futures=True)
+            self._executor = None
+
+
+def _run_sampler_server() -> None:
+    state: _FOLSamplerServerState | None = None
+    stdin = sys.stdin.buffer
+    stdout = sys.stdout.buffer
+    try:
+        while True:
+            try:
+                request = _ipc_read_pickle_frame(stdin)
+            except EOFError:
+                break
+
+            op = str(request.get("op", ""))
+            try:
+                if op == "init":
+                    if state is not None:
+                        state.close()
+                    state = _FOLSamplerServerState(config=dict(request.get("config", {})))
+                    response = {
+                        "ok": True,
+                        "op": "init",
+                        "resolved_backend": str(state.resolved_backend),
+                    }
+                elif op == "sample":
+                    if state is None:
+                        raise RuntimeError("Server is not initialized.")
+                    n_records = int(request.get("n_records", 0))
+                    response = {
+                        "ok": True,
+                        "op": "sample",
+                        "records": state.take(n_records),
+                    }
+                elif op == "close":
+                    if state is not None:
+                        state.close()
+                        state = None
+                    response = {"ok": True, "op": "close"}
+                    _ipc_write_pickle_frame(stdout, response)
+                    break
+                else:
+                    raise ValueError(f"Unsupported server op: {op!r}")
+            except Exception as err:
+                response = {
+                    "ok": False,
+                    "op": op,
+                    "error_type": type(err).__name__,
+                    "error_msg": str(err),
+                    "traceback": traceback.format_exc(),
+                }
+
+            _ipc_write_pickle_frame(stdout, response)
+    finally:
+        if state is not None:
+            state.close()
+
+
 def main() -> None:
     args = _parse_args()
+    if args.server_mode:
+        _run_sampler_server()
+        return
+
+    if args.out_dir is None:
+        raise ValueError("--out-dir is required unless --server-mode is set.")
     if args.seed is None:
         args.seed = _default_seed()
 
