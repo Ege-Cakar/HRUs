@@ -63,8 +63,9 @@ print("RUN ID", RUN_ID)
 TRAIN_MAX_DISTANCES = [4]
 EVAL_DISTANCES = list(range(1, 9))
 
+TRAIN_MIN_N_DEMOS = 1
 TRAIN_MAX_N_DEMOS = 8
-EVAL_MAX_N_DEMOS_SWEEP = [0, 2, 4, 8, 12, 16, 24, 32]
+EVAL_MAX_N_DEMOS_SWEEP = [1, 2, 4, 8, 12, 16, 24, 32]
 SELECTION_EVAL_MAX_N_DEMOS = 8
 
 BATCH_SIZE = 32
@@ -116,7 +117,7 @@ MAMBA2_BONSAI_LRS = [5e-4]
 # TRAIN_MAX_DISTANCES = [2]
 # EVAL_DISTANCES = [1, 2, 8]
 # TRAIN_MAX_N_DEMOS = 2
-# EVAL_MAX_N_DEMOS_SWEEP = [0, 2, 8]
+# EVAL_MAX_N_DEMOS_SWEEP = [1, 2, 8]
 # SELECTION_EVAL_MAX_N_DEMOS = 2
 # BATCH_SIZE = 8
 # TRAIN_ITERS_SWEEP = [20]
@@ -322,12 +323,14 @@ class DemoAugmentedAdapter:
         base_adapter,
         rule_bank: FOLRuleBank,
         tokenizer,
+        min_n_demos: int,
         max_n_demos: int,
         max_unify_solutions: int,
     ) -> None:
         self.base_adapter = base_adapter
         self.rule_bank = rule_bank
         self.tokenizer = tokenizer
+        self.min_n_demos = int(min_n_demos)
         self.max_n_demos = int(max_n_demos)
         self.max_unify_solutions = int(max_unify_solutions)
 
@@ -363,6 +366,7 @@ class DemoAugmentedAdapter:
                 rng=rng,
                 src_layer=src_layer,
                 ants=tuple(sequent.ants),
+                min_n_demos=self.min_n_demos,
                 max_n_demos=self.max_n_demos,
                 max_unify_solutions=self.max_unify_solutions,
             )
@@ -471,6 +475,7 @@ def _make_layer_task(
     seed: int,
     drop_remainder: bool,
     shuffle: bool,
+    min_n_demos: int,
     max_n_demos: int,
     fixed_length_mode: str = "batch_max",
     fixed_length_n_seq: int | None = None,
@@ -490,6 +495,7 @@ def _make_layer_task(
         vars_per_rule_max=VARS_PER_RULE_MAX,
         constants=CONSTANTS,
         initial_ant_max=INITIAL_ANT_MAX,
+        min_n_demos=int(min_n_demos),
         max_n_demos=int(max_n_demos),
         sample_max_attempts=SAMPLE_MAX_ATTEMPTS,
         max_unify_solutions=MAX_UNIFY_SOLUTIONS,
@@ -687,6 +693,7 @@ def _evaluate_by_distance_for_demo(
         base_adapter=base_rollout_adapter,
         rule_bank=rule_bank,
         tokenizer=tokenizer,
+        min_n_demos=int(eval_max_n_demos),
         max_n_demos=int(eval_max_n_demos),
         max_unify_solutions=int(MAX_UNIFY_SOLUTIONS),
     )
@@ -711,6 +718,7 @@ def _evaluate_by_distance_for_demo(
             seed=new_seed(),
             drop_remainder=False,
             shuffle=True,
+            min_n_demos=int(eval_max_n_demos),
             max_n_demos=int(eval_max_n_demos),
             fixed_length_mode=EVAL_FIXED_LENGTH_MODE,
             fixed_length_n_seq=int(n_seq_ar),
@@ -904,6 +912,7 @@ for train_max_distance in TRAIN_MAX_DISTANCES:
                 seed=new_seed(),
                 drop_remainder=True,
                 shuffle=True,
+                min_n_demos=int(TRAIN_MIN_N_DEMOS),
                 max_n_demos=int(TRAIN_MAX_N_DEMOS),
                 fixed_length_mode=TRAIN_FIXED_LENGTH_MODE,
                 fixed_length_n_seq=TRAIN_N_SEQ_AR,
@@ -918,6 +927,7 @@ for train_max_distance in TRAIN_MAX_DISTANCES:
                 seed=new_seed(),
                 drop_remainder=False,
                 shuffle=True,
+                min_n_demos=int(TRAIN_MIN_N_DEMOS),
                 max_n_demos=int(TRAIN_MAX_N_DEMOS),
                 fixed_length_mode=EVAL_FIXED_LENGTH_MODE,
                 fixed_length_n_seq=N_SEQ_AR,
@@ -1010,6 +1020,7 @@ for train_max_distance in TRAIN_MAX_DISTANCES:
                 seed=new_seed(),
                 drop_remainder=True,
                 shuffle=True,
+                min_n_demos=int(TRAIN_MIN_N_DEMOS),
                 max_n_demos=int(TRAIN_MAX_N_DEMOS),
                 fixed_length_mode=TRAIN_FIXED_LENGTH_MODE,
                 fixed_length_n_seq=TRAIN_N_SEQ_AR,
@@ -1024,6 +1035,7 @@ for train_max_distance in TRAIN_MAX_DISTANCES:
                 seed=new_seed(),
                 drop_remainder=False,
                 shuffle=True,
+                min_n_demos=int(TRAIN_MIN_N_DEMOS),
                 max_n_demos=int(TRAIN_MAX_N_DEMOS),
                 fixed_length_mode=EVAL_FIXED_LENGTH_MODE,
                 fixed_length_n_seq=N_SEQ_AR,

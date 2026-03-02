@@ -376,6 +376,16 @@ def test_layer_fol_task_rejects_negative_max_n_demos() -> None:
         FOLLayerTask(mode="online", max_n_demos=-1)
 
 
+def test_layer_fol_task_rejects_negative_min_n_demos() -> None:
+    with pytest.raises(ValueError, match="min_n_demos"):
+        FOLLayerTask(mode="online", max_n_demos=1, min_n_demos=-1)
+
+
+def test_layer_fol_task_rejects_min_n_demos_greater_than_max_n_demos() -> None:
+    with pytest.raises(ValueError, match="min_n_demos"):
+        FOLLayerTask(mode="online", max_n_demos=1, min_n_demos=2)
+
+
 def test_layer_fol_task_online_sampling_prepends_demos_when_enabled() -> None:
     task = FOLLayerTask(
         distance_range=(1, 2),
@@ -401,6 +411,98 @@ def test_layer_fol_task_online_sampling_prepends_demos_when_enabled() -> None:
         segments = _split_prompt_segments(prompt, task.tokenizer.sep_token_id)
         n_demos = len(segments) - 1
         assert 1 <= n_demos <= 3
+
+
+def test_layer_fol_task_online_sampling_respects_demo_min_max_bounds() -> None:
+    task = FOLLayerTask(
+        distance_range=(1, 2),
+        batch_size=2,
+        mode="online",
+        seed=170,
+        n_layers=6,
+        predicates_per_layer=4,
+        rules_per_transition=8,
+        arity_max=3,
+        vars_per_rule_max=4,
+        constants=("a", "b", "c"),
+        k_in_max=2,
+        k_out_max=2,
+        initial_ant_max=3,
+        min_n_demos=2,
+        max_n_demos=4,
+        online_prefetch_backend="sync",
+    )
+
+    for _ in range(20):
+        rec = task._sample_online_record()
+        prompt = np.asarray(rec["prompt"], dtype=np.int32)
+        segments = _split_prompt_segments(prompt, task.tokenizer.sep_token_id)
+        n_demos = len(segments) - 1
+        assert 2 <= n_demos <= 4
+
+
+def test_layer_fol_task_online_sampling_can_sample_zero_demos_when_min_is_zero() -> None:
+    task = FOLLayerTask(
+        distance_range=(1, 2),
+        batch_size=2,
+        mode="online",
+        seed=171,
+        n_layers=6,
+        predicates_per_layer=4,
+        rules_per_transition=8,
+        arity_max=3,
+        vars_per_rule_max=4,
+        constants=("a", "b", "c"),
+        k_in_max=2,
+        k_out_max=2,
+        initial_ant_max=3,
+        min_n_demos=0,
+        max_n_demos=2,
+        online_prefetch_backend="sync",
+    )
+
+    saw_zero_demos = False
+    saw_positive_demos = False
+    for _ in range(120):
+        rec = task._sample_online_record()
+        prompt = np.asarray(rec["prompt"], dtype=np.int32)
+        segments = _split_prompt_segments(prompt, task.tokenizer.sep_token_id)
+        n_demos = len(segments) - 1
+        saw_zero_demos = saw_zero_demos or n_demos == 0
+        saw_positive_demos = saw_positive_demos or n_demos > 0
+        if saw_zero_demos and saw_positive_demos:
+            break
+
+    assert saw_zero_demos
+    assert saw_positive_demos
+
+
+def test_layer_fol_task_online_sampling_uses_exact_demo_count_when_min_equals_max() -> None:
+    task = FOLLayerTask(
+        distance_range=(1, 2),
+        batch_size=2,
+        mode="online",
+        seed=172,
+        n_layers=6,
+        predicates_per_layer=4,
+        rules_per_transition=8,
+        arity_max=3,
+        vars_per_rule_max=4,
+        constants=("a", "b", "c"),
+        k_in_max=2,
+        k_out_max=2,
+        initial_ant_max=3,
+        min_n_demos=2,
+        max_n_demos=2,
+        online_prefetch_backend="sync",
+    )
+
+    for _ in range(20):
+        rec = task._sample_online_record()
+        prompt = np.asarray(rec["prompt"], dtype=np.int32)
+        segments = _split_prompt_segments(prompt, task.tokenizer.sep_token_id)
+        n_demos = len(segments) - 1
+        assert n_demos == 2
 
 
 def test_layer_fol_task_online_sampling_demo_candidates_sampled_with_replacement() -> None:

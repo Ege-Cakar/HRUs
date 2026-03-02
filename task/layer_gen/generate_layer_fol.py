@@ -392,6 +392,13 @@ class _FOLSamplerServerState:
         workers = int(config["workers"])
         buffer_size = int(config["buffer_size"])
         batch_size = int(config["batch_size"])
+        max_n_demos = int(config["max_n_demos"])
+        min_n_demos = int(
+            config.get(
+                "min_n_demos",
+                0 if max_n_demos == 0 else 1,
+            )
+        )
 
         initargs = (
             int(config["seed"]),
@@ -401,7 +408,8 @@ class _FOLSamplerServerState:
             int(config["initial_ant_max"]),
             int(config["sample_max_attempts"]),
             int(config["max_unify_solutions"]),
-            int(config["max_n_demos"]),
+            max_n_demos,
+            min_n_demos,
             (
                 None
                 if config.get("forced_step_idx", None) is None

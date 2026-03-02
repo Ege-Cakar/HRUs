@@ -60,8 +60,9 @@ print("RUN ID", RUN_ID)
 
 EVAL_ROLES = ["train", "eval"]
 
+TRAIN_MIN_N_DEMOS = 1
 TRAIN_MAX_N_DEMOS = 8
-EVAL_MAX_N_DEMOS_SWEEP = [0, 2, 4, 8, 12, 16, 24, 32]
+EVAL_MAX_N_DEMOS_SWEEP = [1, 2, 4, 8, 12, 16, 24, 32]
 SELECTION_EVAL_MAX_N_DEMOS = 8
 
 BATCH_SIZE = 32
@@ -116,7 +117,7 @@ MAMBA2_BONSAI_LRS = [3e-4, 1e-3]
 # ROLLOUT_EXAMPLES_PER_ROLE = 4
 # RUN_SPLIT = 1
 # TRAIN_MAX_N_DEMOS = 4
-# EVAL_MAX_N_DEMOS_SWEEP = [0, 4, 8]
+# EVAL_MAX_N_DEMOS_SWEEP = [1, 4, 8]
 # SELECTION_EVAL_MAX_N_DEMOS = 4
 # PREDICATES_PER_LAYER = 10
 # RULES_01_TRAIN = 18
@@ -287,6 +288,7 @@ def _make_layer_task(
     seed: int,
     drop_remainder: bool,
     shuffle: bool,
+    min_n_demos: int,
     max_n_demos: int,
     fixed_length_mode: str,
     fixed_length_n_seq: int,
@@ -308,6 +310,7 @@ def _make_layer_task(
         vars_per_rule_max=int(VARS_PER_RULE_MAX),
         constants=tuple(str(tok) for tok in CONSTANTS),
         initial_ant_max=int(INITIAL_ANT_MAX),
+        min_n_demos=int(min_n_demos),
         max_n_demos=int(max_n_demos),
         sample_max_attempts=int(SAMPLE_MAX_ATTEMPTS),
         max_unify_solutions=int(MAX_UNIFY_SOLUTIONS),
@@ -481,12 +484,14 @@ class DemoAugmentedAdapter:
         base_adapter,
         rule_bank,
         tokenizer,
+        min_n_demos: int,
         max_n_demos: int,
         max_unify_solutions: int,
     ) -> None:
         self.base_adapter = base_adapter
         self.rule_bank = rule_bank
         self.tokenizer = tokenizer
+        self.min_n_demos = int(min_n_demos)
         self.max_n_demos = int(max_n_demos)
         self.max_unify_solutions = int(max_unify_solutions)
 
@@ -522,6 +527,7 @@ class DemoAugmentedAdapter:
                 rng=rng,
                 src_layer=src_layer,
                 ants=tuple(sequent.ants),
+                min_n_demos=self.min_n_demos,
                 max_n_demos=self.max_n_demos,
                 max_unify_solutions=self.max_unify_solutions,
             )
@@ -587,6 +593,7 @@ def _evaluate_role_for_demo(
         base_adapter=base_rollout_adapter,
         rule_bank=rule_bank,
         tokenizer=tokenizer,
+        min_n_demos=int(eval_max_n_demos),
         max_n_demos=int(eval_max_n_demos),
         max_unify_solutions=int(MAX_UNIFY_SOLUTIONS),
     )
@@ -600,6 +607,7 @@ def _evaluate_role_for_demo(
         seed=new_seed(),
         drop_remainder=False,
         shuffle=True,
+        min_n_demos=int(eval_max_n_demos),
         max_n_demos=int(eval_max_n_demos),
         fixed_length_mode=EVAL_FIXED_LENGTH_MODE,
         fixed_length_n_seq=int(n_seq_ar),
@@ -778,6 +786,7 @@ for n_layers, (n_hidden, n_heads), lr, pos_encoding, use_swiglu, train_iters in 
         seed=new_seed(),
         drop_remainder=True,
         shuffle=True,
+        min_n_demos=int(TRAIN_MIN_N_DEMOS),
         max_n_demos=int(TRAIN_MAX_N_DEMOS),
         fixed_length_mode=TRAIN_FIXED_LENGTH_MODE,
         fixed_length_n_seq=TRAIN_N_SEQ_AR,
@@ -788,6 +797,7 @@ for n_layers, (n_hidden, n_heads), lr, pos_encoding, use_swiglu, train_iters in 
         seed=new_seed(),
         drop_remainder=False,
         shuffle=True,
+        min_n_demos=int(TRAIN_MIN_N_DEMOS),
         max_n_demos=int(TRAIN_MAX_N_DEMOS),
         fixed_length_mode=EVAL_FIXED_LENGTH_MODE,
         fixed_length_n_seq=N_SEQ_AR,
@@ -875,6 +885,7 @@ for n_layers, (n_hidden, n_heads), d_state, d_conv, scan_chunk_len, lr, train_it
         seed=new_seed(),
         drop_remainder=True,
         shuffle=True,
+        min_n_demos=int(TRAIN_MIN_N_DEMOS),
         max_n_demos=int(TRAIN_MAX_N_DEMOS),
         fixed_length_mode=TRAIN_FIXED_LENGTH_MODE,
         fixed_length_n_seq=TRAIN_N_SEQ_AR,
@@ -885,6 +896,7 @@ for n_layers, (n_hidden, n_heads), d_state, d_conv, scan_chunk_len, lr, train_it
         seed=new_seed(),
         drop_remainder=False,
         shuffle=True,
+        min_n_demos=int(TRAIN_MIN_N_DEMOS),
         max_n_demos=int(TRAIN_MAX_N_DEMOS),
         fixed_length_mode=EVAL_FIXED_LENGTH_MODE,
         fixed_length_n_seq=N_SEQ_AR,

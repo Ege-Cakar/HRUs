@@ -86,6 +86,7 @@ def _init_fol_online_worker(
     sample_max_attempts: int,
     max_unify_solutions: int,
     max_n_demos: int,
+    min_n_demos: int,
     forced_step_idx: int | None,
 ) -> None:
     bank = FOLRuleBank.from_dict(bank_payload)
@@ -106,6 +107,7 @@ def _init_fol_online_worker(
         "sample_max_attempts": int(sample_max_attempts),
         "max_unify_solutions": int(max_unify_solutions),
         "max_n_demos": int(max_n_demos),
+        "min_n_demos": int(min_n_demos),
         "forced_step_idx": (
             None if forced_step_idx is None else int(forced_step_idx)
         ),
@@ -163,6 +165,7 @@ def _sample_fol_online_worker_record() -> dict:
         src_layer=int(src_layer),
         ants=ants,
         max_n_demos=int(state["max_n_demos"]),
+        min_n_demos=int(state["min_n_demos"]),
         max_unify_solutions=int(state["max_unify_solutions"]),
     )
     return {
@@ -356,13 +359,21 @@ def _augment_prompt_with_demos(
     src_layer: int,
     ants: tuple[FOLAtom, ...],
     max_n_demos: int,
+    min_n_demos: int,
     max_unify_solutions: int,
 ) -> list[int]:
     max_n_demos = int(max_n_demos)
+    min_n_demos = int(min_n_demos)
+    if min_n_demos > max_n_demos:
+        raise ValueError(
+            f"min_n_demos must be <= max_n_demos, got {min_n_demos} > {max_n_demos}"
+        )
     if max_n_demos <= 0:
         return prompt_tokens
 
-    n_demos = int(rng.integers(1, max_n_demos + 1))
+    n_demos = int(rng.integers(min_n_demos, max_n_demos + 1))
+    if n_demos <= 0:
+        return prompt_tokens
     schemas = _collect_applicable_demo_schemas(
         rule_bank=rule_bank,
         src_layer=int(src_layer),
@@ -544,6 +555,7 @@ class FOLLayerTask:
         k_out_max=3,
         initial_ant_max=3,
         max_n_demos=0,
+        min_n_demos=None,
         sample_max_attempts=4096,
         max_unify_solutions=128,
         online_prefetch=True,
@@ -634,6 +646,17 @@ class FOLLayerTask:
         self.max_n_demos = int(max_n_demos)
         if self.max_n_demos < 0:
             raise ValueError(f"max_n_demos must be >= 0, got {self.max_n_demos}")
+        if min_n_demos is None:
+            self.min_n_demos = 0 if self.max_n_demos == 0 else 1
+        else:
+            self.min_n_demos = int(min_n_demos)
+        if self.min_n_demos < 0:
+            raise ValueError(f"min_n_demos must be >= 0, got {self.min_n_demos}")
+        if self.min_n_demos > self.max_n_demos:
+            raise ValueError(
+                "min_n_demos must be <= max_n_demos, "
+                f"got min_n_demos={self.min_n_demos}, max_n_demos={self.max_n_demos}"
+            )
         self.sample_max_attempts = int(sample_max_attempts)
         if self.sample_max_attempts < 1:
             raise ValueError(
@@ -885,6 +908,7 @@ class FOLLayerTask:
             int(self.sample_max_attempts),
             int(self.max_unify_solutions),
             int(self.max_n_demos),
+            int(self.min_n_demos),
             (
                 None
                 if self._online_forced_step_idx is None
@@ -980,6 +1004,7 @@ class FOLLayerTask:
             "sample_max_attempts": int(self.sample_max_attempts),
             "max_unify_solutions": int(self.max_unify_solutions),
             "max_n_demos": int(self.max_n_demos),
+            "min_n_demos": int(self.min_n_demos),
             "forced_step_idx": (
                 None
                 if self._online_forced_step_idx is None
@@ -1126,6 +1151,7 @@ class FOLLayerTask:
             src_layer=int(src_layer),
             ants=ants,
             max_n_demos=int(self.max_n_demos),
+            min_n_demos=int(self.min_n_demos),
             max_unify_solutions=int(self.max_unify_solutions),
         )
         return {

@@ -52,6 +52,7 @@ TASK_CFG = {
     "distance_range": (2, 2),
     "batch_size": 1,
     "initial_ant_max": 5,
+    "train_min_n_demos": 1,
     "train_max_n_demos": 2,
     "eval_max_n_demos": 4,
 }
@@ -131,6 +132,7 @@ train_task = FOLLayerTask(
     batch_size=int(TASK_CFG["batch_size"]),
     seed=111,
     initial_ant_max=int(TASK_CFG["initial_ant_max"]),
+    min_n_demos=int(TASK_CFG["train_min_n_demos"]),
     max_n_demos=int(TASK_CFG["train_max_n_demos"]),
     online_prefetch_backend="sync",
 )
@@ -144,6 +146,7 @@ eval_task = FOLLayerTask(
     batch_size=int(TASK_CFG["batch_size"]),
     seed=222,
     initial_ant_max=int(TASK_CFG["initial_ant_max"]),
+    min_n_demos=int(TASK_CFG["eval_max_n_demos"]),
     max_n_demos=int(TASK_CFG["eval_max_n_demos"]),
     online_prefetch_backend="sync",
 )
@@ -275,6 +278,7 @@ train_task_ar = FOLLayerTask(
     batch_size=TRAIN_CFG["batch_size"],
     seed=111,
     initial_ant_max=INITIAL_ANT_MAX,
+    min_n_demos=int(TASK_CFG["train_min_n_demos"]),
     max_n_demos=TRAIN_CFG["train_max_n_demos"],
     prediction_objective="autoregressive",
     fixed_length_mode="next_pow2",
@@ -291,6 +295,7 @@ eval_task_ar = FOLLayerTask(
     batch_size=TRAIN_CFG["batch_size"],
     seed=222,
     initial_ant_max=INITIAL_ANT_MAX,
+    min_n_demos=TRAIN_CFG["eval_max_n_demos"],
     max_n_demos=TRAIN_CFG["eval_max_n_demos"],
     prediction_objective="autoregressive",
     fixed_length_mode="next_pow2",
