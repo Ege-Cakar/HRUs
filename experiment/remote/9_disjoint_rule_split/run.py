@@ -65,13 +65,13 @@ EVAL_MAX_N_DEMOS_SWEEP = [0, 2, 4, 8, 12, 16, 24, 32]
 SELECTION_EVAL_MAX_N_DEMOS = 8
 
 BATCH_SIZE = 32
-TRAIN_ITERS = 25_000
+TRAIN_ITERS_SWEEP = [400, 1600, 6400, 25600, 102400]
 TEST_EVERY = 1000
 TEST_ITERS = 3
 EVAL_ITERS_PER_ROLE = 3
 ROLLOUT_EXAMPLES_PER_ROLE = 64
 
-RUN_SPLIT = 24
+RUN_SPLIT = 120
 
 SPLIT_SEED = 2032
 # PREDICATES_PER_LAYER = 64
@@ -109,7 +109,7 @@ MAMBA2_BONSAI_LRS = [3e-4, 1e-3]
 
 ### START TEST CONFIGS
 # BATCH_SIZE = 8
-# TRAIN_ITERS = 20
+# TRAIN_ITERS_SWEEP = [20]
 # TEST_EVERY = 10
 # TEST_ITERS = 1
 # EVAL_ITERS_PER_ROLE = 1
@@ -747,12 +747,13 @@ all_cases = []
 
 ar_light_metrics_fn = make_ar_light_metrics_fn()
 
-for n_layers, (n_hidden, n_heads), lr, pos_encoding, use_swiglu in itertools.product(
+for n_layers, (n_hidden, n_heads), lr, pos_encoding, use_swiglu, train_iters in itertools.product(
     TRANSFORMER_LAYERS,
     TRANSFORMER_WIDTH_HEADS,
     TRANSFORMER_LRS,
     TRANSFORMER_POS,
     TRANSFORMER_SWIGLU,
+    TRAIN_ITERS_SWEEP,
 ):
     config = TransformerConfig(
         n_vocab=N_VOCAB,
@@ -796,7 +797,7 @@ for n_layers, (n_hidden, n_heads), lr, pos_encoding, use_swiglu in itertools.pro
         "loss": "ce_mask",
         "eval_fns": [ar_light_metrics_fn],
         "print_fn": make_print_fn("final_token_acc"),
-        "train_iters": TRAIN_ITERS,
+        "train_iters": int(train_iters),
         "test_iters": TEST_ITERS,
         "test_every": TEST_EVERY,
         "lr": lr,
@@ -823,12 +824,14 @@ for n_layers, (n_hidden, n_heads), lr, pos_encoding, use_swiglu in itertools.pro
         "eval_fixed_length_mode": EVAL_FIXED_LENGTH_MODE,
         "eval_fixed_length_n_seq": N_SEQ_AR,
         "train_eval_profile": "light",
+        "train_iters": int(train_iters),
     }
 
     case = Case(
         (
             f"9_disjoint_rule_split_transformer_"
-            f"l{int(n_layers)}_h{int(n_hidden)}_heads{int(n_heads)}_lr{_lr_tag(lr)}"
+            f"l{int(n_layers)}_h{int(n_hidden)}_heads{int(n_heads)}_"
+            f"lr{_lr_tag(lr)}_ti{int(train_iters)}"
         ),
         config,
         train_task=train_task,
@@ -838,13 +841,14 @@ for n_layers, (n_hidden, n_heads), lr, pos_encoding, use_swiglu in itertools.pro
     )
     all_cases.append(case)
 
-for n_layers, (n_hidden, n_heads), d_state, d_conv, scan_chunk_len, lr in itertools.product(
+for n_layers, (n_hidden, n_heads), d_state, d_conv, scan_chunk_len, lr, train_iters in itertools.product(
     MAMBA2_BONSAI_LAYERS,
     MAMBA2_BONSAI_WIDTH_HEADS,
     MAMBA2_BONSAI_D_STATE,
     MAMBA2_BONSAI_D_CONV,
     MAMBA2_BONSAI_SCAN_CHUNK_LEN,
     MAMBA2_BONSAI_LRS,
+    TRAIN_ITERS_SWEEP,
 ):
     config = Mamba2BonsaiConfig(
         n_vocab=N_VOCAB,
@@ -890,7 +894,7 @@ for n_layers, (n_hidden, n_heads), d_state, d_conv, scan_chunk_len, lr in iterto
         "loss": "ce_mask",
         "eval_fns": [ar_light_metrics_fn],
         "print_fn": make_print_fn("final_token_acc"),
-        "train_iters": TRAIN_ITERS,
+        "train_iters": int(train_iters),
         "test_iters": TEST_ITERS,
         "test_every": TEST_EVERY,
         "lr": lr,
@@ -918,13 +922,14 @@ for n_layers, (n_hidden, n_heads), d_state, d_conv, scan_chunk_len, lr in iterto
         "eval_fixed_length_mode": EVAL_FIXED_LENGTH_MODE,
         "eval_fixed_length_n_seq": N_SEQ_AR,
         "train_eval_profile": "light",
+        "train_iters": int(train_iters),
     }
 
     case = Case(
         (
             "9_disjoint_rule_split_mamba2_bonsai_"
             f"l{int(n_layers)}_h{int(n_hidden)}_heads{int(n_heads)}_"
-            f"ds{int(d_state)}_lr{_lr_tag(lr)}"
+            f"ds{int(d_state)}_lr{_lr_tag(lr)}_ti{int(train_iters)}"
         ),
         config,
         train_task=train_task,

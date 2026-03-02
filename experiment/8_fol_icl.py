@@ -67,6 +67,7 @@ COMMON_CONFIG_COLS = [
     "ood_distances",
     "train_max_n_demos",
     "eval_max_n_demos_sweep",
+    "train_iters",
     "lr",
     "n_layers",
     "n_hidden",
@@ -105,6 +106,18 @@ def _infer_train_max_distance(info: dict) -> float:
     return float(max(train_distances))
 
 
+def _extract_train_iters(row, *, info: dict | None = None) -> float:
+    info = (row.get("info", {}) or {}) if info is None else info
+    train_args = row.get("train_args", {}) or {}
+    val = train_args.get("train_iters", info.get("train_iters"))
+    if val is None:
+        return np.nan
+    try:
+        return float(int(val))
+    except (TypeError, ValueError):
+        return np.nan
+
+
 def _extract_final_row(row):
     info = row.get("info", {}) or {}
     final = row.get("metrics_final", {}) or {}
@@ -119,6 +132,7 @@ def _extract_final_row(row):
             "run_id": row.get("run_id"),
             "model_family": row.get("model_family"),
             "train_max_distance": _infer_train_max_distance(info),
+            "train_iters": _extract_train_iters(row, info=info),
             "selection_metric_name": row.get("selection_metric_name"),
             "selection_metric_value": row.get("selection_metric_value", np.nan),
             "selection_eval_max_n_demos": row.get("selection_eval_max_n_demos", np.nan),
@@ -163,6 +177,7 @@ def _explode_distance_eval_demo_rows(df: pd.DataFrame) -> pd.DataFrame:
         info = row.get("info", {}) or {}
         by_eval_demo = row.get("metrics_by_eval_demo", {}) or {}
         train_max_distance = _infer_train_max_distance(info)
+        train_iters = _extract_train_iters(row, info=info)
 
         for eval_demo, by_distance in by_eval_demo.items():
             eval_demo_int = int(eval_demo)
@@ -175,6 +190,7 @@ def _explode_distance_eval_demo_rows(df: pd.DataFrame) -> pd.DataFrame:
                     "run_id": row.get("run_id"),
                     "model_family": row.get("model_family"),
                     "train_max_distance": train_max_distance,
+                    "train_iters": train_iters,
                     "eval_max_n_demos": eval_demo_int,
                     "distance": distance_int,
                     "lr": info.get("lr", np.nan),
@@ -524,6 +540,149 @@ def _plot_sweep_vs_train_distance(
         plt.close(g.fig)
 
 
+def _plot_ood_demo_sweep_across_train_max(
+    *,
+    ood_by_demo: pd.DataFrame,
+    metric: str,
+    out_path: Path,
+) -> None:
+    if ood_by_demo.empty or metric not in ood_by_demo.columns:
+        return
+    plot_df = ood_by_demo.dropna(subset=[metric]).copy()
+    if plot_df.empty:
+        return
+
+    g = sns.relplot(
+        data=plot_df,
+        kind="line",
+        x="eval_max_n_demos",
+        y=metric,
+        hue="train_max_distance",
+        col="model_family",
+        marker="o",
+        facet_kws={"sharex": True, "sharey": False},
+        height=3.3,
+        aspect=1.15,
+    )
+    for ax in np.ravel(g.axes):
+        ax.set_xscale("symlog", linthresh=1)
+        ax.set_xlim(left=0.0)
+    g.set_axis_labels("Eval max_n_demos", metric)
+    g.set_titles("{col_name}")
+    g.fig.suptitle(f"OOD {metric} vs eval demos across train distances")
+    g.fig.subplots_adjust(top=0.84)
+    g.savefig(out_path, bbox_inches="tight")
+    plt.close(g.fig)
+
+
+def _save_aggregates_for_train_iters(
+    *,
+    train_iters: int,
+    final_df: pd.DataFrame,
+    distance_eval_demo_df: pd.DataFrame,
+    out_root: Path,
+) -> None:
+    out_dir = out_root / f"train_iters_{int(train_iters)}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    final_slice = final_df.loc[final_df["train_iters"] == float(train_iters)].copy()
+    dist_slice = distance_eval_demo_df.loc[
+        distance_eval_demo_df["train_iters"] == float(train_iters)
+    ].copy()
+    if final_slice.empty or dist_slice.empty:
+        return
+
+    final_agg_metrics = [
+        "selection_metric_value",
+        "ood_rollout_success_avg",
+        "ood_final_token_acc_avg",
+        "ood_valid_rule_rate_avg",
+        "ood_correct_rule_rate_avg",
+        "ood_free_run_rule_reachable_rate_avg",
+        "loss",
+        "final_token_acc",
+        "seq_exact_acc",
+        "token_acc",
+        "valid_rule_rate",
+        "correct_rule_rate",
+        "free_run_rule_reachable_rate",
+    ]
+    final_agg_metrics = [c for c in final_agg_metrics if c in final_slice.columns]
+    final_agg = (
+        final_slice.groupby(["train_iters", "train_max_distance", "model_family"], as_index=False)
+        .agg({metric: "mean" for metric in final_agg_metrics})
+        .sort_values(["train_max_distance", "model_family"])
+        .reset_index(drop=True)
+    )
+    final_agg.to_csv(out_dir / "summary_final_aggregated_by_family_and_train_max.csv", index=False)
+
+    dist_metric_cols = [metric for metric in DISTANCE_METRIC_COLS if metric in dist_slice.columns]
+    dist_agg = (
+        dist_slice.groupby(
+            ["train_iters", "train_max_distance", "model_family", "eval_max_n_demos", "distance"],
+            as_index=False,
+        )
+        .agg({metric: "mean" for metric in dist_metric_cols})
+        .sort_values(
+            ["train_max_distance", "model_family", "eval_max_n_demos", "distance"]
+        )
+        .reset_index(drop=True)
+    )
+    dist_agg.to_csv(out_dir / "summary_by_distance_eval_demo_aggregated.csv", index=False)
+
+    ood_frames = []
+    train_max_values = sorted(int(v) for v in dist_agg["train_max_distance"].dropna().astype(int).unique())
+    for train_max_distance in train_max_values:
+        train_max_dir = out_dir / f"train_max_{int(train_max_distance):02d}"
+        train_max_dir.mkdir(parents=True, exist_ok=True)
+
+        dist_train_max = dist_agg.loc[
+            dist_agg["train_max_distance"] == float(train_max_distance)
+        ].copy()
+        if dist_train_max.empty:
+            continue
+
+        ood_by_demo = _compute_ood_by_demo(
+            best_distance_eval_df=dist_train_max,
+            train_max_distance=train_max_distance,
+        )
+        if not ood_by_demo.empty:
+            ood_by_demo.to_csv(train_max_dir / "ood_by_eval_demo_aggregated.csv", index=False)
+            ood_frames.append(ood_by_demo)
+            for metric in SWEEP_METRICS:
+                _plot_ood_demo_sweep(
+                    ood_by_demo=ood_by_demo,
+                    metric=metric,
+                    out_path=train_max_dir / f"ood_{metric}_vs_eval_demo.svg",
+                    train_max_distance=train_max_distance,
+                )
+
+        for metric in SWEEP_METRICS:
+            _plot_distance_by_demo(
+                best_distance_eval_df=dist_train_max,
+                metric=metric,
+                out_path=train_max_dir / f"distance_{metric}_by_eval_demo.svg",
+                train_max_distance=train_max_distance,
+            )
+        _plot_reachable_heatmaps(
+            best_distance_eval_df=dist_train_max,
+            out_dir=train_max_dir,
+            train_max_distance=train_max_distance,
+        )
+
+    if not ood_frames:
+        return
+
+    ood_all = pd.concat(ood_frames, ignore_index=True)
+    ood_all.to_csv(out_dir / "ood_by_eval_demo_aggregated_all_train_max.csv", index=False)
+    for metric in SWEEP_METRICS:
+        _plot_ood_demo_sweep_across_train_max(
+            ood_by_demo=ood_all,
+            metric=metric,
+            out_path=out_dir / f"ood_{metric}_vs_eval_demo_across_train_max.svg",
+        )
+
+
 df = collate_dfs("remote/8_fol_icl/set", show_progress=True)
 if len(df) == 0:
     raise ValueError("No results found in remote/8_fol_icl/set")
@@ -553,6 +712,15 @@ _plot_sweep_vs_train_distance(
     distance_eval_demo_df=distance_eval_demo_df,
     out_root=OUT_DIR,
 )
+
+train_iters_values = sorted(int(v) for v in final_df["train_iters"].dropna().astype(int).unique())
+for train_iters in train_iters_values:
+    _save_aggregates_for_train_iters(
+        train_iters=train_iters,
+        final_df=final_df,
+        distance_eval_demo_df=distance_eval_demo_df,
+        out_root=OUT_DIR,
+    )
 
 print("Saved:", OUT_DIR)
 

@@ -168,6 +168,7 @@ COMMON_CONFIG_COLS = [
     "distance_range",
     "train_max_n_demos",
     "eval_max_n_demos_sweep",
+    "train_iters",
     "lr",
     "n_layers",
     "n_hidden",
@@ -196,6 +197,18 @@ def _as_int_list(value) -> list[int]:
     return []
 
 
+def _extract_train_iters(row, *, info: dict | None = None) -> float:
+    info = (row.get("info", {}) or {}) if info is None else info
+    train_args = row.get("train_args", {}) or {}
+    val = train_args.get("train_iters", info.get("train_iters"))
+    if val is None:
+        return np.nan
+    try:
+        return float(int(val))
+    except (TypeError, ValueError):
+        return np.nan
+
+
 def _extract_final_row(row):
     info = row.get("info", {}) or {}
     final = row.get("metrics_final", {}) or {}
@@ -206,6 +219,7 @@ def _extract_final_row(row):
             "run_id": row.get("run_id"),
             "name": row.get("name"),
             "model_family": row.get("model_family"),
+            "train_iters": _extract_train_iters(row, info=info),
             "selection_role": row.get("selection_role"),
             "selection_eval_max_n_demos": row.get("selection_eval_max_n_demos", np.nan),
             "selection_metric_name": row.get("selection_metric_name"),
@@ -251,6 +265,7 @@ def _explode_role_eval_demo_rows(df: pd.DataFrame) -> pd.DataFrame:
     for _, row in df.iterrows():
         info = row.get("info", {}) or {}
         by_role = row.get("metrics_by_role_eval_demo", {}) or {}
+        train_iters = _extract_train_iters(row, info=info)
         for role, by_demo in by_role.items():
             by_demo = by_demo or {}
             for eval_demo, metrics in by_demo.items():
@@ -260,6 +275,7 @@ def _explode_role_eval_demo_rows(df: pd.DataFrame) -> pd.DataFrame:
                     "run_id": row.get("run_id"),
                     "name": row.get("name"),
                     "model_family": row.get("model_family"),
+                    "train_iters": train_iters,
                     "eval_role": str(role),
                     "eval_max_n_demos": int(eval_demo),
                     "lr": info.get("lr", np.nan),
@@ -524,6 +540,95 @@ def _plot_role_heatmap(
     plt.close()
 
 
+def _save_aggregates_for_train_iters(
+    *,
+    train_iters: int,
+    final_df: pd.DataFrame,
+    role_eval_demo_df: pd.DataFrame,
+    out_root: Path,
+) -> None:
+    out_dir = out_root / f"train_iters_{int(train_iters)}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    final_slice = final_df.loc[final_df["train_iters"] == float(train_iters)].copy()
+    role_slice = role_eval_demo_df.loc[
+        role_eval_demo_df["train_iters"] == float(train_iters)
+    ].copy()
+    if final_slice.empty or role_slice.empty:
+        return
+
+    final_agg_metrics = [
+        "selection_metric_value",
+        "eval_first_transition_rule_reachable_rate",
+        "eval_first_transition_rule_valid_rate",
+        "eval_rollout_success_rate",
+        "train_first_transition_rule_reachable_rate",
+        "train_rollout_success_rate",
+        "loss",
+        "final_token_acc",
+        "seq_exact_acc",
+        "token_acc",
+    ]
+    final_agg_metrics = [metric for metric in final_agg_metrics if metric in final_slice.columns]
+    final_agg = (
+        final_slice.groupby(["train_iters", "model_family"], as_index=False)
+        .agg({metric: "mean" for metric in final_agg_metrics})
+        .sort_values(["model_family"])
+        .reset_index(drop=True)
+    )
+    final_agg.to_csv(out_dir / "summary_final_aggregated_by_family.csv", index=False)
+
+    role_metric_cols = [metric for metric in ROLE_EVAL_DEMO_METRIC_COLS if metric in role_slice.columns]
+    role_agg = (
+        role_slice.groupby(
+            ["train_iters", "model_family", "eval_role", "eval_max_n_demos"],
+            as_index=False,
+        )
+        .agg({metric: "mean" for metric in role_metric_cols})
+        .sort_values(["model_family", "eval_role", "eval_max_n_demos"])
+        .reset_index(drop=True)
+    )
+    role_agg.to_csv(out_dir / "summary_by_role_eval_demo_aggregated.csv", index=False)
+
+    for group in ROLE_METRIC_PLOT_GROUPS:
+        _plot_role_metric_group(
+            best_role_eval_demo_df=role_agg,
+            metric_names=list(group["metrics"]),
+            out_path=out_dir / str(group["filename"]),
+            title=f"{str(group['title'])} (train_iters={int(train_iters)})",
+            sharey=bool(group["sharey"]),
+        )
+
+    for metric in SWEEP_METRICS:
+        for role in ("train", "eval"):
+            _plot_role_demo_lines(
+                best_role_eval_demo_df=role_agg,
+                metric=metric,
+                out_path=out_dir / f"{role}_{metric}_vs_demo.svg",
+                eval_role=role,
+            )
+        _plot_transfer_gap(
+            best_role_eval_demo_df=role_agg,
+            metric=metric,
+            out_path=out_dir / f"gap_{metric}_eval_minus_train.svg",
+        )
+
+    for role in ("train", "eval"):
+        _plot_role_heatmap(
+            best_role_eval_demo_df=role_agg,
+            metric="first_transition_rule_reachable_rate",
+            out_path=out_dir / f"{role}_reachable_rate_heatmap.svg",
+            eval_role=role,
+        )
+
+    _plot_role_heatmap(
+        best_role_eval_demo_df=role_agg,
+        metric="rollout_success_rate",
+        out_path=out_dir / "eval_rollout_success_heatmap.svg",
+        eval_role="eval",
+    )
+
+
 df = collate_dfs("remote/9_disjoint_rule_split/set", show_progress=True)
 if len(df) == 0:
     raise ValueError("No results found in remote/9_disjoint_rule_split/set")
@@ -582,5 +687,14 @@ _plot_role_heatmap(
     out_path=OUT_DIR / "eval_rollout_success_heatmap.svg",
     eval_role="eval",
 )
+
+train_iters_values = sorted(int(v) for v in final_df["train_iters"].dropna().astype(int).unique())
+for train_iters in train_iters_values:
+    _save_aggregates_for_train_iters(
+        train_iters=train_iters,
+        final_df=final_df,
+        role_eval_demo_df=role_eval_demo_df,
+        out_root=OUT_DIR,
+    )
 
 print("Saved:", OUT_DIR)

@@ -68,13 +68,13 @@ EVAL_MAX_N_DEMOS_SWEEP = [0, 2, 4, 8, 12, 16, 24, 32]
 SELECTION_EVAL_MAX_N_DEMOS = 8
 
 BATCH_SIZE = 32
-TRAIN_ITERS = 25_000
+TRAIN_ITERS_SWEEP = [400, 1600, 6400, 25600, 102400]
 TEST_EVERY = 1000
 TEST_ITERS = 3
 EVAL_ITERS_PER_DISTANCE = 3
 ROLLOUT_EXAMPLES_PER_DISTANCE = 64
 
-RUN_SPLIT = 2
+RUN_SPLIT = 10
 
 RULE_BANK_SEED = 2029
 N_LAYERS = 12
@@ -119,7 +119,7 @@ MAMBA2_BONSAI_LRS = [5e-4]
 # EVAL_MAX_N_DEMOS_SWEEP = [0, 2, 8]
 # SELECTION_EVAL_MAX_N_DEMOS = 2
 # BATCH_SIZE = 8
-# TRAIN_ITERS = 20
+# TRAIN_ITERS_SWEEP = [20]
 # TEST_EVERY = 10
 # TEST_ITERS = 1
 # EVAL_ITERS_PER_DISTANCE = 1
@@ -869,12 +869,13 @@ for train_max_distance in TRAIN_MAX_DISTANCES:
             f"No OOD distances for k={train_max_distance}; ensure k < max(EVAL_DISTANCES)."
         )
 
-    for n_layers, (n_hidden, n_heads), lr, pos_encoding, use_swiglu in itertools.product(
+    for n_layers, (n_hidden, n_heads), lr, pos_encoding, use_swiglu, train_iters in itertools.product(
         TRANSFORMER_LAYERS,
         TRANSFORMER_WIDTH_HEADS,
         TRANSFORMER_LRS,
         TRANSFORMER_POS,
         TRANSFORMER_SWIGLU,
+        TRAIN_ITERS_SWEEP,
     ):
         config = TransformerConfig(
             n_vocab=N_VOCAB,
@@ -928,7 +929,7 @@ for train_max_distance in TRAIN_MAX_DISTANCES:
             "loss": "ce_mask",
             "eval_fns": [ar_light_metrics_fn],
             "print_fn": make_print_fn("final_token_acc"),
-            "train_iters": TRAIN_ITERS,
+            "train_iters": int(train_iters),
             "test_iters": TEST_ITERS,
             "test_every": TEST_EVERY,
             "lr": lr,
@@ -956,10 +957,11 @@ for train_max_distance in TRAIN_MAX_DISTANCES:
             "eval_fixed_length_mode": EVAL_FIXED_LENGTH_MODE,
             "eval_fixed_length_n_seq": N_SEQ_AR,
             "train_eval_profile": "light",
+            "train_iters": int(train_iters),
         }
 
         case = Case(
-            f"8_fol_icl_transformer_k{int(train_max_distance):02d}",
+            f"8_fol_icl_transformer_k{int(train_max_distance):02d}_ti{int(train_iters)}",
             config,
             train_task=train_task,
             test_task=test_task,
@@ -970,13 +972,14 @@ for train_max_distance in TRAIN_MAX_DISTANCES:
         case._test_probe = test_probe
         all_cases.append(case)
 
-    for n_layers, (n_hidden, n_heads), d_state, d_conv, scan_chunk_len, lr in itertools.product(
+    for n_layers, (n_hidden, n_heads), d_state, d_conv, scan_chunk_len, lr, train_iters in itertools.product(
         MAMBA2_BONSAI_LAYERS,
         MAMBA2_BONSAI_WIDTH_HEADS,
         MAMBA2_BONSAI_D_STATE,
         MAMBA2_BONSAI_D_CONV,
         MAMBA2_BONSAI_SCAN_CHUNK_LEN,
         MAMBA2_BONSAI_LRS,
+        TRAIN_ITERS_SWEEP,
     ):
         config = Mamba2BonsaiConfig(
             n_vocab=N_VOCAB,
@@ -1032,7 +1035,7 @@ for train_max_distance in TRAIN_MAX_DISTANCES:
             "loss": "ce_mask",
             "eval_fns": [ar_light_metrics_fn],
             "print_fn": make_print_fn("final_token_acc"),
-            "train_iters": TRAIN_ITERS,
+            "train_iters": int(train_iters),
             "test_iters": TEST_ITERS,
             "test_every": TEST_EVERY,
             "lr": lr,
@@ -1061,10 +1064,11 @@ for train_max_distance in TRAIN_MAX_DISTANCES:
             "eval_fixed_length_mode": EVAL_FIXED_LENGTH_MODE,
             "eval_fixed_length_n_seq": N_SEQ_AR,
             "train_eval_profile": "light",
+            "train_iters": int(train_iters),
         }
 
         case = Case(
-            f"8_fol_icl_mamba2_k{int(train_max_distance):02d}",
+            f"8_fol_icl_mamba2_k{int(train_max_distance):02d}_ti{int(train_iters)}",
             config,
             train_task=train_task,
             test_task=test_task,

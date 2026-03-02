@@ -6,7 +6,7 @@
 #SBATCH --mem=32G
 #SBATCH -o log.%A.%a.out
 #SBATCH -e log.%A.%a.err
-#SBATCH --array=1-24
+#SBATCH --array=1-120
 #SBATCH --mail-type=END
 #SBATCH --mail-user=wtong@g.harvard.edu
 #SBATCH --account=kempner_pehlevan_lab
