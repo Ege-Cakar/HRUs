@@ -14,11 +14,18 @@ repl/
 *.array_record
 data/
 **/*.csv
+set/
 
 # ignore slurm logging outputs
 *.err
 *.out
 
+*.DS_Store
+
+bolt
+.boltignore
+
 # agent files
 journal/
 *.github
+CLAUDE.md
