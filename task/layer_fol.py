@@ -28,7 +28,9 @@ from task.layer_gen.util.fol_rule_bank import (
     FOLLayerRule,
     FOLRuleBank,
     FOLSequent,
+    build_fresh_layer0_bank,
     build_random_fol_rule_bank,
+    generate_fresh_predicate_names,
     load_fol_depth3_icl_split_bundle,
     load_fol_rule_bank,
     parse_atom_text,
@@ -53,6 +55,39 @@ def _build_tokenizer_for_split_bundle(
     identifiers.update(f"x{idx}" for idx in range(1, int(max_vars) + 1))
     predicate_identifiers = set(bundle.train_bank.predicate_arities)
     predicate_identifiers.update(bundle.eval_bank.predicate_arities)
+    return tokenize_layer_fol.build_tokenizer_from_identifiers(
+        sorted(identifiers),
+        predicate_identifiers=sorted(predicate_identifiers),
+    )
+
+
+def _fresh_predicate_sentinels() -> list[str]:
+    """Generate sentinel predicates covering all chars in the fresh predicate charset."""
+    from task.layer_gen.util.fol_rule_bank import _FRESH_PREDICATE_CHARSET
+
+    charset = _FRESH_PREDICATE_CHARSET
+    sentinels: list[str] = []
+    for i in range(0, len(charset), 4):
+        chunk = charset[i : i + 4].ljust(4, charset[0])
+        sentinels.append(f"r_{chunk}")
+    return sentinels
+
+
+def _build_tokenizer_for_fresh_icl(
+    *,
+    base_bank: FOLRuleBank,
+) -> tokenize_layer_fol.FOLLayerTokenizer:
+    """Build a tokenizer for fresh-ICL that covers all possible fresh predicate chars."""
+    identifiers: set[str] = set(base_bank.constants)
+    identifiers.update(base_bank.predicate_arities)
+    identifiers.update(f"x{idx}" for idx in range(1, int(base_bank.vars_per_rule_max) + 1))
+
+    predicate_identifiers = set(base_bank.predicate_arities)
+    # Add sentinel predicates covering all alphanumeric chars used by fresh names.
+    sentinels = _fresh_predicate_sentinels()
+    identifiers.update(sentinels)
+    predicate_identifiers.update(sentinels)
+
     return tokenize_layer_fol.build_tokenizer_from_identifiers(
         sorted(identifiers),
         predicate_identifiers=sorted(predicate_identifiers),
@@ -562,6 +597,7 @@ class FOLLayerTask:
         online_prefetch_backend="server",
         online_prefetch_workers=None,
         online_prefetch_buffer_size=None,
+        fresh_icl_n_predicates=None,
     ) -> None:
         self.mode = str(mode)
         if self.mode not in {"offline", "online"}:
@@ -586,9 +622,9 @@ class FOLLayerTask:
                 f"fixed_length_n_seq must be >= 2, got {self.fixed_length_n_seq}"
             )
         self.task_split = str(task_split)
-        if self.task_split not in {"none", "depth3_icl_transfer"}:
+        if self.task_split not in {"none", "depth3_icl_transfer", "depth3_fresh_icl"}:
             raise ValueError(
-                "task_split must be 'none' or 'depth3_icl_transfer', "
+                "task_split must be 'none', 'depth3_icl_transfer', or 'depth3_fresh_icl', "
                 f"got {self.task_split!r}"
             )
         self.split_role = str(split_role)
@@ -604,6 +640,8 @@ class FOLLayerTask:
         )
         self._split_bundle: FOLDepth3ICLSplitBundle | None = None
         self._online_forced_step_idx: int | None = None
+        self._base_bank: FOLRuleBank | None = None
+        self._fresh_icl_n_predicates: int | None = None
         if self.task_split == "depth3_icl_transfer":
             if self.mode != "online":
                 raise ValueError("task_split='depth3_icl_transfer' requires mode='online'.")
@@ -615,6 +653,17 @@ class FOLLayerTask:
                 raise ValueError(
                     "rule_bank_path cannot be combined with task_split='depth3_icl_transfer'; "
                     "use split_rule_bundle_path."
+                )
+        elif self.task_split == "depth3_fresh_icl":
+            if self.mode != "online":
+                raise ValueError("task_split='depth3_fresh_icl' requires mode='online'.")
+            if rule_bank_path is not None:
+                raise ValueError(
+                    "rule_bank_path cannot be combined with task_split='depth3_fresh_icl'."
+                )
+            if split_rule_bundle_path is not None:
+                raise ValueError(
+                    "split_rule_bundle_path cannot be combined with task_split='depth3_fresh_icl'."
                 )
 
         if self.task_split == "none" and rule_bank_path is None:
@@ -633,6 +682,13 @@ class FOLLayerTask:
                     f"to [2], got {self._distances}."
                 )
             self._online_forced_step_idx = 0 if self.split_role == "eval" else None
+        elif self.task_split == "depth3_fresh_icl":
+            if self._distances != [2]:
+                raise ValueError(
+                    "task_split='depth3_fresh_icl' requires distance_range to resolve "
+                    f"to [2], got {self._distances}."
+                )
+            self._online_forced_step_idx = 0 if self.split_role == "eval" else None
         self.batch_size = int(batch_size)
         self.shuffle = bool(shuffle)
         self.seed = seed if seed is not None else int(
@@ -643,6 +699,11 @@ class FOLLayerTask:
         self.drop_remainder = drop_remainder
 
         self.initial_ant_max = int(initial_ant_max)
+        self.rules_per_transition = int(rules_per_transition)
+        self._k_in_min = int(k_in_min)
+        self._k_in_max = int(k_in_max)
+        self._k_out_min = int(k_out_min)
+        self._k_out_max = int(k_out_max)
         self.max_n_demos = int(max_n_demos)
         if self.max_n_demos < 0:
             raise ValueError(f"max_n_demos must be >= 0, got {self.max_n_demos}")
@@ -712,6 +773,30 @@ class FOLLayerTask:
                 else:
                     self._rule_bank = self._split_bundle.eval_bank
                 self._tokenizer = _build_tokenizer_for_split_bundle(self._split_bundle)
+            elif self.task_split == "depth3_fresh_icl":
+                self._fresh_icl_n_predicates = (
+                    int(fresh_icl_n_predicates)
+                    if fresh_icl_n_predicates is not None
+                    else int(predicates_per_layer)
+                )
+                # Build a base bank with standard layers 1-2 (layer 0 is placeholder).
+                self._base_bank = build_random_fol_rule_bank(
+                    n_layers=3,
+                    predicates_per_layer=int(predicates_per_layer),
+                    rules_per_transition=int(rules_per_transition),
+                    arity_max=int(arity_max),
+                    vars_per_rule_max=int(vars_per_rule_max),
+                    constants=tuple(str(tok) for tok in constants),
+                    k_in_min=int(k_in_min),
+                    k_in_max=int(k_in_max),
+                    k_out_min=int(k_out_min),
+                    k_out_max=int(k_out_max),
+                    rng=self._rng,
+                )
+                self._rule_bank = self._base_bank
+                self._tokenizer = _build_tokenizer_for_fresh_icl(
+                    base_bank=self._base_bank,
+                )
             elif rule_bank_path is not None:
                 self._rule_bank = load_fol_rule_bank(Path(rule_bank_path))
             else:
@@ -751,7 +836,11 @@ class FOLLayerTask:
         else:
             self.stats = {}
             self._batch_fn = self._make_batch_fn()
-            self._init_online_prefetch()
+            if self.task_split == "depth3_fresh_icl":
+                self._online_prefetch_enabled = False
+                self._online_prefetch_backend_resolved = "sync"
+            else:
+                self._init_online_prefetch()
 
         if (
             self.prediction_objective == "autoregressive"
@@ -1105,6 +1194,9 @@ class FOLLayerTask:
         self._online_prefetch_enabled = False
 
     def _sample_online_record(self) -> dict:
+        if self.task_split == "depth3_fresh_icl":
+            return self._sample_online_record_fresh_icl()
+
         if self._rule_bank is None:
             raise RuntimeError("Online mode requires a rule bank.")
         if self._tokenizer is None:
@@ -1146,6 +1238,79 @@ class FOLLayerTask:
         prompt = _augment_prompt_with_demos(
             prompt_tokens=prompt,
             rule_bank=self._rule_bank,
+            tokenizer=self._tokenizer,
+            rng=self._rng,
+            src_layer=int(src_layer),
+            ants=ants,
+            max_n_demos=int(self.max_n_demos),
+            min_n_demos=int(self.min_n_demos),
+            max_unify_solutions=int(self.max_unify_solutions),
+        )
+        return {
+            "distance": int(distance),
+            "src_layer": int(src_layer),
+            "prompt": np.asarray(prompt, dtype=np.int32),
+            "completions": [np.asarray(completion, dtype=np.int32)],
+        }
+
+    def _sample_online_record_fresh_icl(self) -> dict:
+        if self._base_bank is None:
+            raise RuntimeError("depth3_fresh_icl requires a base bank.")
+        if self._tokenizer is None:
+            raise RuntimeError("depth3_fresh_icl requires a tokenizer.")
+        if self._fresh_icl_n_predicates is None:
+            raise RuntimeError("depth3_fresh_icl requires _fresh_icl_n_predicates.")
+
+        fresh_preds = generate_fresh_predicate_names(
+            self._fresh_icl_n_predicates, self._rng
+        )
+        temp_bank = build_fresh_layer0_bank(
+            base_bank=self._base_bank,
+            fresh_predicates=fresh_preds,
+            rules_per_transition=self.rules_per_transition,
+            k_in_min=self._k_in_min,
+            k_in_max=self._k_in_max,
+            k_out_min=self._k_out_min,
+            k_out_max=self._k_out_max,
+            rng=self._rng,
+        )
+
+        distance = 2
+        sampled = None
+        last_err = None
+        for _ in range(3):
+            try:
+                sampled = sample_fol_problem(
+                    bank=temp_bank,
+                    distance=distance,
+                    initial_ant_max=self.initial_ant_max,
+                    rng=self._rng,
+                    max_attempts=self.sample_max_attempts,
+                    max_unify_solutions=self.max_unify_solutions,
+                )
+                break
+            except RuntimeError as err:
+                last_err = err
+
+        if sampled is None:
+            raise RuntimeError(
+                "Failed to sample fresh-ICL FOLLayerTask record for distance=2 "
+                f"after 3 retries with max_attempts={self.sample_max_attempts}."
+            ) from last_err
+
+        step_idx = _pick_sampled_step_index(
+            rng=self._rng,
+            n_steps=len(sampled.step_rules),
+            forced_step_idx=self._online_forced_step_idx,
+        )
+        src_layer = sampled.step_layers[step_idx]
+        ants = sampled.step_ants[step_idx]
+        rule = sampled.step_rules[step_idx]
+        sequent = FOLSequent(ants=ants, cons=sampled.goal_atom)
+        prompt, completion = self._tokenizer.tokenize_example(sequent, rule.statement_text)
+        prompt = _augment_prompt_with_demos(
+            prompt_tokens=prompt,
+            rule_bank=temp_bank,
             tokenizer=self._tokenizer,
             rng=self._rng,
             src_layer=int(src_layer),

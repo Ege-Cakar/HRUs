@@ -100,3 +100,35 @@ def test_from_dict_rejects_v1_payload() -> None:
         assert "Strict migration enabled" in str(exc)
     else:
         raise AssertionError("Expected ValueError for v1 tokenizer payload")
+
+
+def test_fresh_predicate_r_abcd_is_char_tokenized() -> None:
+    tokenizer = tok.build_tokenizer_from_identifiers(
+        ["r_a1b2", "r1_1", "a", "b", "x1"],
+        predicate_identifiers=["r_a1b2", "r1_1"],
+    )
+    # r_a1b2 should not be a single token.
+    assert "r_a1b2" not in tokenizer.token_to_id
+    # Individual chars should be tokens.
+    for ch in "r_a1b2":
+        assert ch in tokenizer.token_to_id
+
+    # Roundtrip encode/decode should work.
+    statement = "r_a1b2(a,b) → r1_1(a,b)"
+    completion = tokenizer.encode_completion(statement)
+    decoded = tokenizer.decode_completion_text(completion)
+    assert decoded == statement
+
+
+def test_standard_predicates_still_char_tokenized_alongside_fresh() -> None:
+    tokenizer = tok.build_tokenizer_from_identifiers(
+        ["r0_1", "r_x9z3", "a", "x1"],
+        predicate_identifiers=["r0_1", "r_x9z3"],
+    )
+    # Both forms should be char-tokenized.
+    assert "r0_1" not in tokenizer.token_to_id
+    assert "r_x9z3" not in tokenizer.token_to_id
+    for ch in "r0_1":
+        assert ch in tokenizer.token_to_id
+    for ch in "r_x9z3":
+        assert ch in tokenizer.token_to_id

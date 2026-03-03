@@ -1041,3 +1041,231 @@ def test_layer_fol_task_split_eval_prefetch_thread_forces_src_layer_0(tmp_path: 
         xs, ys = next(task)
         assert xs.shape[0] == 2
         assert ys.shape[0] == 2
+
+
+def test_layer_fol_task_fresh_icl_constructs_and_samples() -> None:
+    task = FOLLayerTask(
+        mode="online",
+        task_split="depth3_fresh_icl",
+        distance_range=(2, 2),
+        batch_size=4,
+        seed=301,
+        predicates_per_layer=4,
+        rules_per_transition=8,
+        arity_max=3,
+        vars_per_rule_max=4,
+        constants=("a", "b", "c"),
+        k_in_max=2,
+        k_out_max=2,
+        initial_ant_max=3,
+        max_n_demos=3,
+        online_prefetch_backend="sync",
+    )
+    xs, ys = next(task)
+    assert xs.shape[0] == 4
+    assert ys.shape[0] == 4
+    assert xs.dtype == np.int32
+    assert ys.dtype == np.int32
+
+
+def test_layer_fol_task_fresh_icl_produces_fresh_predicates() -> None:
+    import re
+
+    task = FOLLayerTask(
+        mode="online",
+        task_split="depth3_fresh_icl",
+        distance_range=(2, 2),
+        batch_size=1,
+        seed=302,
+        predicates_per_layer=4,
+        rules_per_transition=8,
+        arity_max=3,
+        vars_per_rule_max=4,
+        constants=("a", "b", "c"),
+        k_in_max=2,
+        k_out_max=2,
+        initial_ant_max=3,
+        max_n_demos=0,
+        online_prefetch_backend="sync",
+    )
+    fresh_re = re.compile(r"r_[a-z0-9]{4}")
+    saw_fresh = False
+    for _ in range(20):
+        rec = task._sample_online_record()
+        prompt = np.asarray(rec["prompt"], dtype=np.int32)
+        decoded = task.tokenizer.decode_batch_ids(
+            prompt.reshape(1, -1), include_special_tokens=False
+        )[0]
+        if fresh_re.search(decoded):
+            saw_fresh = True
+            break
+    assert saw_fresh
+
+
+def test_layer_fol_task_fresh_icl_eval_forces_step_idx_0() -> None:
+    task = FOLLayerTask(
+        mode="online",
+        task_split="depth3_fresh_icl",
+        split_role="eval",
+        distance_range=(2, 2),
+        batch_size=1,
+        seed=303,
+        predicates_per_layer=4,
+        rules_per_transition=8,
+        arity_max=3,
+        vars_per_rule_max=4,
+        constants=("a", "b", "c"),
+        k_in_max=2,
+        k_out_max=2,
+        initial_ant_max=3,
+        max_n_demos=0,
+        online_prefetch_backend="sync",
+    )
+    for _ in range(20):
+        rec = task._sample_online_record()
+        assert int(rec["src_layer"]) == 0
+
+
+def test_layer_fol_task_fresh_icl_train_samples_both_layers() -> None:
+    task = FOLLayerTask(
+        mode="online",
+        task_split="depth3_fresh_icl",
+        split_role="train",
+        distance_range=(2, 2),
+        batch_size=1,
+        seed=304,
+        predicates_per_layer=4,
+        rules_per_transition=8,
+        arity_max=3,
+        vars_per_rule_max=4,
+        constants=("a", "b", "c"),
+        k_in_max=2,
+        k_out_max=2,
+        initial_ant_max=3,
+        max_n_demos=0,
+        online_prefetch_backend="sync",
+    )
+    seen = set()
+    for _ in range(80):
+        rec = task._sample_online_record()
+        seen.add(int(rec["src_layer"]))
+        if seen == {0, 1}:
+            break
+    assert seen == {0, 1}
+
+
+def test_layer_fol_task_fresh_icl_requires_online_mode() -> None:
+    with pytest.raises(ValueError, match="requires mode='online'"):
+        FOLLayerTask(
+            mode="offline",
+            task_split="depth3_fresh_icl",
+            distance_range=(2, 2),
+        )
+
+
+def test_layer_fol_task_fresh_icl_requires_distance_2() -> None:
+    with pytest.raises(ValueError, match="resolve to \\[2\\]"):
+        FOLLayerTask(
+            mode="online",
+            task_split="depth3_fresh_icl",
+            distance_range=(1, 2),
+        )
+
+
+def test_layer_fol_task_fresh_icl_rejects_rule_bank_path(tmp_path: Path) -> None:
+    fake_bank = tmp_path / "fake_bank.json"
+    fake_bank.write_text("{}")
+    with pytest.raises(ValueError, match="rule_bank_path cannot be combined"):
+        FOLLayerTask(
+            mode="online",
+            task_split="depth3_fresh_icl",
+            distance_range=(2, 2),
+            rule_bank_path=fake_bank,
+        )
+
+
+def test_layer_fol_task_fresh_icl_rejects_split_rule_bundle_path(tmp_path: Path) -> None:
+    split_path = _write_depth3_split_bundle(tmp_path, seed=305)
+    with pytest.raises(ValueError, match="split_rule_bundle_path cannot be combined"):
+        FOLLayerTask(
+            mode="online",
+            task_split="depth3_fresh_icl",
+            distance_range=(2, 2),
+            split_rule_bundle_path=split_path,
+        )
+
+
+def test_layer_fol_task_fresh_icl_forces_sync_prefetch() -> None:
+    task = FOLLayerTask(
+        mode="online",
+        task_split="depth3_fresh_icl",
+        distance_range=(2, 2),
+        batch_size=2,
+        seed=306,
+        predicates_per_layer=4,
+        rules_per_transition=8,
+        arity_max=3,
+        vars_per_rule_max=4,
+        constants=("a", "b", "c"),
+        k_in_max=2,
+        k_out_max=2,
+        initial_ant_max=3,
+        max_n_demos=0,
+    )
+    assert not task.online_prefetch_enabled
+    assert task.online_prefetch_backend_resolved == "sync"
+
+
+def test_layer_fol_task_fresh_icl_respects_fresh_icl_n_predicates() -> None:
+    task = FOLLayerTask(
+        mode="online",
+        task_split="depth3_fresh_icl",
+        distance_range=(2, 2),
+        batch_size=1,
+        seed=307,
+        predicates_per_layer=4,
+        rules_per_transition=8,
+        arity_max=3,
+        vars_per_rule_max=4,
+        constants=("a", "b", "c"),
+        k_in_max=2,
+        k_out_max=2,
+        initial_ant_max=3,
+        max_n_demos=0,
+        fresh_icl_n_predicates=6,
+        online_prefetch_backend="sync",
+    )
+    assert task._fresh_icl_n_predicates == 6
+    xs, ys = next(task)
+    assert xs.shape[0] == 1
+
+
+def test_layer_fol_task_fresh_icl_demos_use_fresh_rules() -> None:
+    task = FOLLayerTask(
+        mode="online",
+        task_split="depth3_fresh_icl",
+        split_role="eval",
+        distance_range=(2, 2),
+        batch_size=1,
+        seed=308,
+        predicates_per_layer=4,
+        rules_per_transition=8,
+        arity_max=3,
+        vars_per_rule_max=4,
+        constants=("a", "b", "c"),
+        k_in_max=2,
+        k_out_max=2,
+        initial_ant_max=3,
+        max_n_demos=3,
+        online_prefetch_backend="sync",
+    )
+    saw_demo = False
+    for _ in range(40):
+        rec = task._sample_online_record()
+        prompt = np.asarray(rec["prompt"], dtype=np.int32)
+        segments = _split_prompt_segments(prompt, task.tokenizer.sep_token_id)
+        demo_segments = segments[:-1]
+        if demo_segments:
+            saw_demo = True
+            break
+    assert saw_demo

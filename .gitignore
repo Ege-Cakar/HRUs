@@ -26,6 +26,5 @@ bolt
 .boltignore
 
 # agent files
-journal/
 *.github
 CLAUDE.md

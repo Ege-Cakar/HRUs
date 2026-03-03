@@ -25,7 +25,7 @@ EOT_TOKEN = "<EOT>"
 _LOGIC_TOKENS = ("⊢", "∧", "→", "(", ")", ",")
 _RESERVED_TOKENS = (PAD_TOKEN, SEP_TOKEN, EOT_TOKEN)
 _IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-_PREDICATE_RE = re.compile(r"r\d+_\d+$")
+_PREDICATE_RE = re.compile(r"r\d+_\d+$|r_[a-z0-9]{4}$")
 _PREDICATE_CHAR_RE = re.compile(r"[A-Za-z0-9_]")
 
 

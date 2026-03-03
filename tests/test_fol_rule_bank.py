@@ -8,7 +8,9 @@ from task.layer_gen.util.fol_rule_bank import (
     FOLRuleBank,
     FOLSequent,
     build_depth3_icl_split_bundle,
+    build_fresh_layer0_bank,
     build_random_fol_rule_bank,
+    generate_fresh_predicate_names,
     load_fol_depth3_icl_split_bundle,
     parse_clause_text,
     parse_sequent_text,
@@ -231,3 +233,100 @@ def test_fol_rule_bank_layer_predicates_override_predicates_for_layer() -> None:
     assert bank.predicates_for_layer(0) == ("r0_9",)
     assert bank.predicates_for_layer(1) == ("r1_9",)
     assert bank.predicates_for_layer(2) == ("r2_9",)
+
+
+def test_generate_fresh_predicate_names_format_and_uniqueness() -> None:
+    rng = np.random.default_rng(42)
+    names = generate_fresh_predicate_names(10, rng)
+    assert len(names) == 10
+    assert len(set(names)) == 10
+    for name in names:
+        assert name.startswith("r_")
+        assert len(name) == 6
+        suffix = name[2:]
+        assert all(ch in "abcdefghijklmnopqrstuvwxyz0123456789" for ch in suffix)
+
+
+def test_generate_fresh_predicate_names_rejects_zero() -> None:
+    rng = np.random.default_rng(0)
+    try:
+        generate_fresh_predicate_names(0, rng)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("Expected ValueError for n=0")
+
+
+def test_build_fresh_layer0_bank_produces_valid_3_layer_bank() -> None:
+    rng = np.random.default_rng(7)
+    base_bank = build_random_fol_rule_bank(
+        n_layers=3,
+        predicates_per_layer=4,
+        rules_per_transition=8,
+        arity_max=3,
+        vars_per_rule_max=4,
+        constants=("a", "b", "c"),
+        k_in_max=2,
+        k_out_max=2,
+        rng=rng,
+    )
+    fresh_preds = generate_fresh_predicate_names(5, rng)
+    fresh_bank = build_fresh_layer0_bank(
+        base_bank=base_bank,
+        fresh_predicates=fresh_preds,
+        rules_per_transition=6,
+        k_in_min=1,
+        k_in_max=2,
+        k_out_min=1,
+        k_out_max=2,
+        rng=rng,
+    )
+    assert fresh_bank.n_layers == 3
+    assert fresh_bank.predicates_for_layer(0) == fresh_preds
+    assert fresh_bank.predicates_for_layer(1) == base_bank.predicates_for_layer(1)
+    assert fresh_bank.predicates_for_layer(2) == base_bank.predicates_for_layer(2)
+
+    # Layer 0->1 rules use fresh predicates on LHS.
+    for rule in fresh_bank.transition_rules(0):
+        for atom in rule.lhs:
+            assert atom.predicate in set(fresh_preds)
+        for atom in rule.rhs:
+            assert atom.predicate in set(base_bank.predicates_for_layer(1))
+
+    # Layer 1->2 rules are identical to base.
+    assert fresh_bank.statement_set(1) == base_bank.statement_set(1)
+
+
+def test_build_fresh_layer0_bank_supports_sampling() -> None:
+    rng = np.random.default_rng(11)
+    base_bank = build_random_fol_rule_bank(
+        n_layers=3,
+        predicates_per_layer=4,
+        rules_per_transition=8,
+        arity_max=3,
+        vars_per_rule_max=4,
+        constants=("a", "b", "c"),
+        k_in_max=2,
+        k_out_max=2,
+        rng=rng,
+    )
+    fresh_preds = generate_fresh_predicate_names(4, rng)
+    fresh_bank = build_fresh_layer0_bank(
+        base_bank=base_bank,
+        fresh_predicates=fresh_preds,
+        rules_per_transition=6,
+        k_in_min=1,
+        k_in_max=2,
+        k_out_min=1,
+        k_out_max=2,
+        rng=rng,
+    )
+    sampled = sample_fol_problem(
+        bank=fresh_bank,
+        distance=2,
+        initial_ant_max=3,
+        rng=rng,
+    )
+    assert sampled.distance == 2
+    assert sampled.start_layer == 0
+    assert len(sampled.step_rules) == 2

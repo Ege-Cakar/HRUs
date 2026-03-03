@@ -727,6 +727,97 @@ def build_random_fol_rule_bank(
     )
 
 
+_FRESH_PREDICATE_CHARSET = "abcdefghijklmnopqrstuvwxyz0123456789"
+
+
+def generate_fresh_predicate_names(
+    n: int,
+    rng: np.random.Generator,
+) -> tuple[str, ...]:
+    """Generate ``n`` unique ``r_XXXX`` predicate names (4 random alphanumeric chars each)."""
+    n = int(n)
+    if n < 1:
+        raise ValueError(f"n must be >= 1, got {n}")
+    charset = np.array(list(_FRESH_PREDICATE_CHARSET), dtype="U1")
+    seen: set[str] = set()
+    names: list[str] = []
+    max_attempts = max(1_000, n * 50)
+    for _ in range(max_attempts):
+        suffix = "".join(rng.choice(charset, size=4))
+        name = f"r_{suffix}"
+        if name in seen:
+            continue
+        seen.add(name)
+        names.append(name)
+        if len(names) >= n:
+            break
+    if len(names) < n:
+        raise RuntimeError(
+            f"Could not generate {n} unique fresh predicate names after {max_attempts} attempts."
+        )
+    return tuple(names)
+
+
+def build_fresh_layer0_bank(
+    *,
+    base_bank: FOLRuleBank,
+    fresh_predicates: tuple[str, ...],
+    rules_per_transition: int,
+    k_in_min: int,
+    k_in_max: int,
+    k_out_min: int,
+    k_out_max: int,
+    rng: np.random.Generator,
+) -> FOLRuleBank:
+    """Build a temporary 3-layer bank with fresh layer-0 predicates and base layer-1→2 content."""
+    if int(base_bank.n_layers) != 3:
+        raise ValueError("base_bank must have n_layers=3.")
+    if not fresh_predicates:
+        raise ValueError("fresh_predicates must be non-empty.")
+
+    base_l1 = base_bank.predicates_for_layer(1)
+    base_l2 = base_bank.predicates_for_layer(2)
+
+    # Assign random arities to fresh predicates.
+    predicate_arities: dict[str, int] = dict(base_bank.predicate_arities)
+    for pred in fresh_predicates:
+        predicate_arities[pred] = int(rng.integers(1, int(base_bank.arity_max) + 1))
+
+    var_pool = tuple(f"x{idx}" for idx in range(1, int(base_bank.vars_per_rule_max) + 1))
+
+    fresh_rules_01 = _sample_transition_rules(
+        src_layer=0,
+        lhs_predicates=tuple(fresh_predicates),
+        rhs_predicates=tuple(base_l1),
+        rules_per_transition=int(rules_per_transition),
+        k_in_min=int(k_in_min),
+        k_in_max=int(k_in_max),
+        k_out_min=int(k_out_min),
+        k_out_max=int(k_out_max),
+        predicate_arities=predicate_arities,
+        var_pool=var_pool,
+        rng=rng,
+    )
+
+    return FOLRuleBank(
+        n_layers=3,
+        predicates_per_layer=int(base_bank.predicates_per_layer),
+        arity_max=int(base_bank.arity_max),
+        constants=tuple(base_bank.constants),
+        vars_per_rule_max=int(base_bank.vars_per_rule_max),
+        predicate_arities=predicate_arities,
+        transitions={
+            0: tuple(fresh_rules_01),
+            1: base_bank.transitions.get(1, ()),
+        },
+        layer_predicates={
+            0: tuple(fresh_predicates),
+            1: tuple(base_l1),
+            2: tuple(base_l2),
+        },
+    )
+
+
 def _validate_depth3_icl_split_bundle(bundle: FOLDepth3ICLSplitBundle) -> None:
     train_bank = bundle.train_bank
     eval_bank = bundle.eval_bank

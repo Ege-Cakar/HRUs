@@ -1,4 +1,4 @@
-"""Analysis script for 9_disjoint_rule_split."""
+"""Analysis script for 10_fresh_rule_split."""
 
 # <codecell>
 from __future__ import annotations
@@ -19,7 +19,7 @@ from common import collate_dfs, set_theme
 
 
 set_theme()
-OUT_DIR = Path("fig/9_disjoint_rule_split")
+OUT_DIR = Path("fig/10_fresh_rule_split")
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 ROLE_EVAL_DEMO_METRIC_COLS = [
@@ -629,9 +629,9 @@ def _save_aggregates_for_train_iters(
     )
 
 
-df = collate_dfs("remote/9_disjoint_rule_split/set", show_progress=True)
+df = collate_dfs("remote/10_fresh_rule_split/set", show_progress=True)
 if len(df) == 0:
-    raise ValueError("No results found in remote/9_disjoint_rule_split/set")
+    raise ValueError("No results found in remote/10_fresh_rule_split/set")
 
 df = df.reset_index(drop=True).copy()
 df["__row_id"] = np.arange(len(df), dtype=np.int64)
