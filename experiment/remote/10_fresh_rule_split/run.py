@@ -308,13 +308,14 @@ def make_ar_light_metrics_fn():
     return _metrics
 
 
-def make_ar_metrics_fn(*, tokenizer, rule_bank, model_fn, n_seq: int, max_completion_len: int):
-    adapter = AutoregressiveLogitsAdapter(
-        n_seq=int(n_seq),
-        max_completion_len=int(max_completion_len),
-        pad_token_id=0,
-        jit_step=True,
-    )
+def make_ar_metrics_fn(*, tokenizer, rule_bank, model_fn, n_seq: int, max_completion_len: int, adapter=None):
+    if adapter is None:
+        adapter = AutoregressiveLogitsAdapter(
+            n_seq=int(n_seq),
+            max_completion_len=int(max_completion_len),
+            pad_token_id=0,
+            jit_step=True,
+        )
 
     def _metrics(optimizer, batch, loss=None):
         _ = loss
@@ -536,21 +537,26 @@ def _evaluate_role_for_demo(
     max_completion_len: int,
     n_iters: int,
     eval_max_n_demos: int,
+    model_fn=None,
+    shared_adapter=None,
 ):
-    model_fn = make_model_callable(optimizer, to_numpy=False)
+    if model_fn is None:
+        model_fn = make_model_callable(optimizer, to_numpy=False)
+    if shared_adapter is None:
+        shared_adapter = AutoregressiveLogitsAdapter(
+            n_seq=int(n_seq_ar),
+            max_completion_len=int(max_completion_len),
+            pad_token_id=0,
+            jit_step=True,
+        )
+
     metrics_fn = make_ar_metrics_fn(
         tokenizer=tokenizer,
         rule_bank=rule_bank,
         model_fn=model_fn,
         n_seq=int(n_seq_ar),
         max_completion_len=int(max_completion_len),
-    )
-
-    base_rollout_adapter = AutoregressiveLogitsAdapter(
-        n_seq=int(n_seq_ar),
-        max_completion_len=int(max_completion_len),
-        pad_token_id=0,
-        jit_step=True,
+        adapter=shared_adapter,
     )
 
     seq_len_counts: Counter[int] = Counter()
@@ -595,6 +601,7 @@ def _evaluate_role_for_demo(
     n_rollout_goal_not_reached = 0
     rollout_steps: list[int] = []
 
+    rollout_demo_adapter = None
     for _ in range(int(ROLLOUT_EXAMPLES_PER_ROLE)):
         # Build a per-example fresh bank
         fresh_preds = generate_fresh_predicate_names(int(FRESH_ICL_N_PREDICATES), rollout_rng)
@@ -609,15 +616,18 @@ def _evaluate_role_for_demo(
             rng=rollout_rng,
         )
 
-        # Build a rollout adapter that uses the temp bank for demos
-        rollout_adapter = DemoAugmentedAdapter(
-            base_adapter=base_rollout_adapter,
-            rule_bank=temp_bank,
-            tokenizer=tokenizer,
-            min_n_demos=int(eval_max_n_demos),
-            max_n_demos=int(eval_max_n_demos),
-            max_unify_solutions=int(MAX_UNIFY_SOLUTIONS),
-        )
+        # Build/reuse a rollout adapter that uses the temp bank for demos
+        if rollout_demo_adapter is None:
+            rollout_demo_adapter = DemoAugmentedAdapter(
+                base_adapter=shared_adapter,
+                rule_bank=temp_bank,
+                tokenizer=tokenizer,
+                min_n_demos=int(eval_max_n_demos),
+                max_n_demos=int(eval_max_n_demos),
+                max_unify_solutions=int(MAX_UNIFY_SOLUTIONS),
+            )
+        else:
+            rollout_demo_adapter.rule_bank = temp_bank
 
         # Sample one rollout example from this bank
         examples = sample_rollout_examples(
@@ -635,7 +645,7 @@ def _evaluate_role_for_demo(
             rule_bank=temp_bank,
             example=examples[0],
             model=model_fn,
-            adapter=rollout_adapter,
+            adapter=rollout_demo_adapter,
             tokenizer=tokenizer,
             temperature=0.0,
             rng=rollout_rng,
@@ -965,6 +975,14 @@ for case in tqdm(all_cases, desc="cases", leave=True):
     metrics_by_role_eval_demo = {}
     post_eval_start = time.perf_counter()
 
+    model_fn = make_model_callable(case.optimizer, to_numpy=False)
+    shared_adapter = AutoregressiveLogitsAdapter(
+        n_seq=int(N_SEQ_AR),
+        max_completion_len=int(MAX_COMPLETION_LEN),
+        pad_token_id=0,
+        jit_step=True,
+    )
+
     eval_job_bar = tqdm(
         total=int(len(EVAL_ROLES) * len(EVAL_MAX_N_DEMOS_SWEEP)),
         desc=f"{case.name} eval role/demo sweep",
@@ -986,6 +1004,8 @@ for case in tqdm(all_cases, desc="cases", leave=True):
                 max_completion_len=MAX_COMPLETION_LEN,
                 n_iters=EVAL_ITERS_PER_ROLE,
                 eval_max_n_demos=int(eval_max_n_demos),
+                model_fn=model_fn,
+                shared_adapter=shared_adapter,
             )
             eval_job_bar.update(1)
         metrics_by_role_eval_demo[str(role)] = role_metrics

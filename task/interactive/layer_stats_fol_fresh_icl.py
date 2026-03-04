@@ -349,10 +349,11 @@ def _sample_prompt_state_fresh(
     sample_max_attempts: int,
     max_unify_solutions: int,
     rng: np.random.Generator,
-) -> tuple[FOLRuleBank, int, tuple[FOLAtom, ...], FOLAtom, int]:
+) -> tuple[FOLRuleBank, int, tuple[FOLAtom, ...], FOLAtom, int] | None:
     """Sample a single prompt from a fresh-predicate bank.
 
-    Returns ``(temp_bank, src_layer, ants, goal_atom, goal_layer)``.
+    Returns ``(temp_bank, src_layer, ants, goal_atom, goal_layer)``, or
+    ``None`` if no feasible problem could be sampled within the attempt budget.
     The ``temp_bank`` is a per-prompt bank whose layer-0 predicates are freshly
     generated, which is necessary for reachability checking at step_idx=0.
     """
@@ -369,14 +370,17 @@ def _sample_prompt_state_fresh(
         rng=rng,
     )
 
-    sampled = sample_fol_problem(
-        bank=temp_bank,
-        distance=2,
-        initial_ant_max=int(initial_ant_max),
-        rng=rng,
-        max_attempts=int(sample_max_attempts),
-        max_unify_solutions=int(max_unify_solutions),
-    )
+    try:
+        sampled = sample_fol_problem(
+            bank=temp_bank,
+            distance=2,
+            initial_ant_max=int(initial_ant_max),
+            rng=rng,
+            max_attempts=int(sample_max_attempts),
+            max_unify_solutions=int(max_unify_solutions),
+        )
+    except RuntimeError:
+        return None
 
     step_idx = int(forced_step_idx)
     src_layer = int(sampled.step_layers[step_idx])
@@ -438,6 +442,8 @@ def run_study(cfg: dict[str, Any]) -> tuple[pd.DataFrame, pd.DataFrame]:
                 leave=False,
             )
 
+            n_sample_failures = 0
+
             for bank_idx in range(n_banks):
                 bank_seed = int(master_rng.integers(0, np.iinfo(np.int32).max))
                 prompt_seed = int(master_rng.integers(0, np.iinfo(np.int32).max))
@@ -446,18 +452,20 @@ def run_study(cfg: dict[str, Any]) -> tuple[pd.DataFrame, pd.DataFrame]:
 
                 for step_idx in step_indices:
                     for prompt_idx in range(n_prompts):
-                        temp_bank, src_layer, ants, goal_atom, goal_layer = (
-                            _sample_prompt_state_fresh(
-                                base_bank=base_bank,
-                                bank_cfg=bank_cfg,
-                                forced_step_idx=step_idx,
-                                initial_ant_max=initial_ant_max,
-                                sample_max_attempts=sample_max_attempts,
-                                max_unify_solutions=max_unify_solutions,
-                                rng=prompt_rng,
-                            )
+                        result = _sample_prompt_state_fresh(
+                            base_bank=base_bank,
+                            bank_cfg=bank_cfg,
+                            forced_step_idx=step_idx,
+                            initial_ant_max=initial_ant_max,
+                            sample_max_attempts=sample_max_attempts,
+                            max_unify_solutions=max_unify_solutions,
+                            rng=prompt_rng,
                         )
                         prompt_bar.update(1)
+                        if result is None:
+                            n_sample_failures += 1
+                            continue
+                        temp_bank, src_layer, ants, goal_atom, goal_layer = result
                         schemas = _collect_applicable_demo_schemas(
                             rule_bank=temp_bank,
                             src_layer=int(src_layer),
@@ -634,7 +642,13 @@ def run_study(cfg: dict[str, Any]) -> tuple[pd.DataFrame, pd.DataFrame]:
                         "p_bad": p_bad,
                         "ci_low": float(ci_low),
                         "ci_high": float(ci_high),
+                        "n_sample_failures": int(n_sample_failures),
                     }
+                )
+            if n_sample_failures > 0:
+                print(
+                    f"  [{sweep_name}={sweep_value}] skipped "
+                    f"{n_sample_failures} prompt(s) due to sampling failures"
                 )
             prompt_bar.close()
             settings_bar.update(1)

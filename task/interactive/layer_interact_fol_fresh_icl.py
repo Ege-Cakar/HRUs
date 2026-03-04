@@ -25,7 +25,7 @@ from task.layer_fol import FOLLayerTask
 # <codecell>
 # ---- CONFIG (edit in-place for local iteration) ----
 TASK_CFG = {
-    "seed": 42,
+    "seed": np.random.randint(0, 999),
     "predicates_per_layer": 8,
     "fresh_icl_n_predicates": 8,
     "rules_per_transition": 32,
