@@ -218,6 +218,133 @@ def _sample_fol_online_worker_records(n_records: int) -> list[dict]:
     return [_sample_fol_online_worker_record() for _ in range(n_records)]
 
 
+def _init_fol_online_fresh_worker(
+    seed_base: int,
+    base_bank_payload: dict,
+    tokenizer_payload: dict,
+    fresh_icl_n_predicates: int,
+    rules_per_transition: int,
+    k_in_min: int,
+    k_in_max: int,
+    k_out_min: int,
+    k_out_max: int,
+    initial_ant_max: int,
+    sample_max_attempts: int,
+    max_unify_solutions: int,
+    max_n_demos: int,
+    min_n_demos: int,
+    forced_step_idx: int | None,
+) -> None:
+    base_bank = FOLRuleBank.from_dict(base_bank_payload)
+    tokenizer = tokenize_layer_fol.FOLLayerTokenizer.from_dict(tokenizer_payload)
+    worker_seed = (
+        int(seed_base)
+        + int(os.getpid()) * 1_000_003
+        + int(threading.get_ident() % 1_000_003)
+    )
+    _FOL_ONLINE_WORKER_LOCAL.state = {
+        "base_bank": base_bank,
+        "tokenizer": tokenizer,
+        "fresh_icl_n_predicates": int(fresh_icl_n_predicates),
+        "rules_per_transition": int(rules_per_transition),
+        "k_in_min": int(k_in_min),
+        "k_in_max": int(k_in_max),
+        "k_out_min": int(k_out_min),
+        "k_out_max": int(k_out_max),
+        "initial_ant_max": int(initial_ant_max),
+        "sample_max_attempts": int(sample_max_attempts),
+        "max_unify_solutions": int(max_unify_solutions),
+        "max_n_demos": int(max_n_demos),
+        "min_n_demos": int(min_n_demos),
+        "forced_step_idx": (
+            None if forced_step_idx is None else int(forced_step_idx)
+        ),
+        "rng": np.random.default_rng(worker_seed),
+    }
+
+
+def _sample_fol_online_fresh_worker_record() -> dict:
+    state = getattr(_FOL_ONLINE_WORKER_LOCAL, "state", None)
+    if state is None:
+        raise RuntimeError("FOL online fresh worker state was not initialized.")
+
+    rng: np.random.Generator = state["rng"]
+    base_bank: FOLRuleBank = state["base_bank"]
+    tokenizer = state["tokenizer"]
+
+    fresh_preds = generate_fresh_predicate_names(
+        state["fresh_icl_n_predicates"], rng
+    )
+    temp_bank = build_fresh_layer0_bank(
+        base_bank=base_bank,
+        fresh_predicates=fresh_preds,
+        rules_per_transition=state["rules_per_transition"],
+        k_in_min=state["k_in_min"],
+        k_in_max=state["k_in_max"],
+        k_out_min=state["k_out_min"],
+        k_out_max=state["k_out_max"],
+        rng=rng,
+    )
+
+    distance = 2
+    sampled = None
+    last_err = None
+    for _ in range(3):
+        try:
+            sampled = sample_fol_problem(
+                bank=temp_bank,
+                distance=distance,
+                initial_ant_max=state["initial_ant_max"],
+                rng=rng,
+                max_attempts=state["sample_max_attempts"],
+                max_unify_solutions=state["max_unify_solutions"],
+            )
+            break
+        except RuntimeError as err:
+            last_err = err
+
+    if sampled is None:
+        raise RuntimeError(
+            "Failed to sample fresh-ICL FOLLayerTask record for distance=2 "
+            f"after 3 retries with max_attempts={state['sample_max_attempts']}."
+        ) from last_err
+
+    step_idx = _pick_sampled_step_index(
+        rng=rng,
+        n_steps=len(sampled.step_rules),
+        forced_step_idx=state["forced_step_idx"],
+    )
+    src_layer = sampled.step_layers[step_idx]
+    ants = sampled.step_ants[step_idx]
+    rule = sampled.step_rules[step_idx]
+    sequent = FOLSequent(ants=ants, cons=sampled.goal_atom)
+    prompt, completion = tokenizer.tokenize_example(sequent, rule.statement_text)
+    prompt = _augment_prompt_with_demos(
+        prompt_tokens=prompt,
+        rule_bank=temp_bank,
+        tokenizer=tokenizer,
+        rng=rng,
+        src_layer=int(src_layer),
+        ants=ants,
+        max_n_demos=int(state["max_n_demos"]),
+        min_n_demos=int(state["min_n_demos"]),
+        max_unify_solutions=int(state["max_unify_solutions"]),
+    )
+    return {
+        "distance": int(distance),
+        "src_layer": int(src_layer),
+        "prompt": np.asarray(prompt, dtype=np.int32),
+        "completions": [np.asarray(completion, dtype=np.int32)],
+    }
+
+
+def _sample_fol_online_fresh_worker_records(n_records: int) -> list[dict]:
+    n_records = int(n_records)
+    if n_records < 1:
+        raise ValueError(f"n_records must be >= 1, got {n_records}")
+    return [_sample_fol_online_fresh_worker_record() for _ in range(n_records)]
+
+
 _IPC_LEN_BYTES = 8
 _IPC_MAX_FRAME_BYTES = 256 * 1024 * 1024
 
@@ -837,8 +964,7 @@ class FOLLayerTask:
             self.stats = {}
             self._batch_fn = self._make_batch_fn()
             if self.task_split == "depth3_fresh_icl":
-                self._online_prefetch_enabled = False
-                self._online_prefetch_backend_resolved = "sync"
+                self._init_online_prefetch_fresh()
             else:
                 self._init_online_prefetch()
 
@@ -1005,6 +1131,27 @@ class FOLLayerTask:
             ),
         )
 
+    def _online_fresh_worker_initargs(self) -> tuple:
+        if self._base_bank is None or self._tokenizer is None:
+            raise RuntimeError("Fresh-ICL prefetch requires base bank and tokenizer.")
+        return (
+            int(self.seed),
+            self._base_bank.to_dict(),
+            self._tokenizer.to_dict(),
+            int(self._fresh_icl_n_predicates),
+            int(self.rules_per_transition),
+            int(self._k_in_min),
+            int(self._k_in_max),
+            int(self._k_out_min),
+            int(self._k_out_max),
+            int(self.initial_ant_max),
+            int(self.sample_max_attempts),
+            int(self.max_unify_solutions),
+            int(self.max_n_demos),
+            int(self.min_n_demos),
+            None if self._online_forced_step_idx is None else int(self._online_forced_step_idx),
+        )
+
     def _init_online_prefetch_executor_backend(
         self,
         *,
@@ -1107,6 +1254,97 @@ class FOLLayerTask:
         self._online_server_client = server_client
         self._online_prefetch_backend_resolved = "server"
         self._online_prefetch_enabled = True
+
+    def _init_online_prefetch_executor_backend_fresh(
+        self,
+        *,
+        backend: str,
+        workers: int,
+        buffer_size: int,
+    ) -> None:
+        self._online_prefetch_backend_resolved = str(backend)
+        self._online_prefetch_enabled = str(backend) != "sync"
+        self._online_executor = None
+        self._online_prefetch_buffer = None
+        if backend == "sync":
+            return
+
+        initargs = self._online_fresh_worker_initargs()
+
+        def _make_process_executor():
+            return ProcessPoolExecutor(
+                max_workers=workers,
+                initializer=_init_fol_online_fresh_worker,
+                initargs=initargs,
+            )
+
+        def _make_thread_executor():
+            return ThreadPoolExecutor(
+                max_workers=workers,
+                initializer=_init_fol_online_fresh_worker,
+                initargs=initargs,
+            )
+
+        resolved_backend, executor = online_prefetch_util.create_executor_with_fallback(
+            backend=backend,
+            make_process_executor=_make_process_executor,
+            make_thread_executor=_make_thread_executor,
+        )
+        self._online_prefetch_backend_resolved = str(resolved_backend)
+        if executor is None:
+            self._online_prefetch_enabled = False
+            return
+
+        records_per_job = 1
+        if resolved_backend == "process":
+            records_per_job = max(1, self.batch_size // max(1, workers))
+
+        shutdown_fn = lambda: executor.shutdown(wait=True, cancel_futures=True)
+        try:
+            self._online_prefetch_buffer = online_prefetch_util.AsyncRecordPrefetchBuffer(
+                submit_fn=lambda: executor.submit(
+                    _sample_fol_online_fresh_worker_records,
+                    records_per_job,
+                ),
+                buffer_size=buffer_size,
+                on_close=shutdown_fn,
+            )
+        except Exception:
+            shutdown_fn()
+            self._online_prefetch_enabled = False
+            self._online_prefetch_backend_resolved = "sync"
+            self._online_prefetch_buffer = None
+            self._online_executor = None
+            return
+
+        self._online_executor = executor
+        self._online_prefetch_enabled = True
+
+    def _init_online_prefetch_fresh(self) -> None:
+        enabled, backend, workers, buffer_size = (
+            online_prefetch_util.resolve_online_prefetch_config(
+                enable=self._online_prefetch_requested,
+                backend=(
+                    self._online_prefetch_backend_requested
+                    if self._online_prefetch_backend_requested != "server"
+                    else "process"
+                ),
+                workers=self._online_prefetch_workers_requested,
+                buffer_size=self._online_prefetch_buffer_size_requested,
+                batch_size=self.batch_size,
+            )
+        )
+        self._online_prefetch_workers_resolved = int(workers)
+        self._online_prefetch_buffer_size_resolved = int(buffer_size)
+        self._online_prefetch_backend_resolved = str(backend)
+        self._online_prefetch_enabled = bool(enabled)
+        if not enabled:
+            return
+        self._init_online_prefetch_executor_backend_fresh(
+            backend=str(backend),
+            workers=int(workers),
+            buffer_size=int(buffer_size),
+        )
 
     def _init_online_prefetch(self) -> None:
         requested_backend = str(self._online_prefetch_backend_requested)

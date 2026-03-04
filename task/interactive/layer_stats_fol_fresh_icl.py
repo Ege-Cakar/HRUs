@@ -126,6 +126,7 @@ class DrawAccumulator:
     n_bad: int = 0
     n_schema_choices: int = 0
     p_bad_prompt_values: list[float] = field(default_factory=list)
+    p_any_good_prompt_values: list[float] = field(default_factory=list)
 
 
 def _layer_from_predicate(predicate: str) -> int:
@@ -484,6 +485,7 @@ def run_study(cfg: dict[str, Any]) -> tuple[pd.DataFrame, pd.DataFrame]:
 
                             if schema_count <= 0:
                                 acc.n_no_schema += 1
+                                acc.p_any_good_prompt_values.append(0.0)
                                 if save_trial_rows:
                                     trial_rows.append(
                                         {
@@ -554,6 +556,8 @@ def run_study(cfg: dict[str, Any]) -> tuple[pd.DataFrame, pd.DataFrame]:
                             )
                             p_bad_prompt = float(n_bad / n_unique)
                             acc.p_bad_prompt_values.append(p_bad_prompt)
+                            any_good = float(n_bad < n_unique)
+                            acc.p_any_good_prompt_values.append(any_good)
 
                             if save_trial_rows:
                                 trial_rows.append(
@@ -594,6 +598,16 @@ def run_study(cfg: dict[str, Any]) -> tuple[pd.DataFrame, pd.DataFrame]:
                 )
                 ci_low, ci_high = _bootstrap_mean_ci(
                     acc.p_bad_prompt_values,
+                    rng=bootstrap_rng,
+                    n_bootstrap=n_bootstrap,
+                )
+                p_any_good = (
+                    float(np.mean(acc.p_any_good_prompt_values))
+                    if acc.p_any_good_prompt_values
+                    else float("nan")
+                )
+                p_any_good_ci_low, p_any_good_ci_high = _bootstrap_mean_ci(
+                    acc.p_any_good_prompt_values,
                     rng=bootstrap_rng,
                     n_bootstrap=n_bootstrap,
                 )
@@ -642,6 +656,9 @@ def run_study(cfg: dict[str, Any]) -> tuple[pd.DataFrame, pd.DataFrame]:
                         "p_bad": p_bad,
                         "ci_low": float(ci_low),
                         "ci_high": float(ci_high),
+                        "p_any_good": p_any_good,
+                        "p_any_good_ci_low": float(p_any_good_ci_low),
+                        "p_any_good_ci_high": float(p_any_good_ci_high),
                         "n_sample_failures": int(n_sample_failures),
                     }
                 )
@@ -766,6 +783,116 @@ def _plot_lines(summary_df: pd.DataFrame, out_dir: Path) -> None:
         plt.close()
 
 
+def _plot_any_good_heatmaps(summary_df: pd.DataFrame, out_dir: Path) -> None:
+    if summary_df.empty:
+        return
+    required = {
+        "sweep_name",
+        "sweep_value",
+        "step_idx",
+        "src_layer",
+        "exact_n_demos",
+        "p_any_good",
+    }
+    if not required.issubset(set(summary_df.columns)):
+        return
+
+    for (sweep_name, step_idx, src_layer), part in summary_df.groupby(
+        ["sweep_name", "step_idx", "src_layer"], sort=True
+    ):
+        heat = (
+            part.pivot(
+                index="exact_n_demos",
+                columns="sweep_value",
+                values="p_any_good",
+            )
+            .sort_index()
+            .sort_index(axis=1)
+        )
+        if heat.empty:
+            continue
+        plt.figure(figsize=(8, 5))
+        sns.heatmap(
+            heat,
+            annot=True,
+            fmt=".2f",
+            cmap="viridis",
+            vmin=0.0,
+            vmax=1.0,
+            cbar_kws={"label": "P(any good demo schema)"},
+        )
+        plt.title(
+            f"Any-good probability heatmap "
+            f"({sweep_name}, step={step_idx}, src={src_layer})"
+        )
+        plt.xlabel(sweep_name)
+        plt.ylabel("exact_n_demos")
+        plt.tight_layout()
+        plt.savefig(
+            out_dir
+            / f"p_any_good_heatmap_{sweep_name}_step_{int(step_idx)}_src_{int(src_layer)}.png",
+            dpi=180,
+        )
+        plt.close()
+
+
+def _plot_any_good_lines(summary_df: pd.DataFrame, out_dir: Path) -> None:
+    if summary_df.empty:
+        return
+    required = {
+        "sweep_name",
+        "sweep_value",
+        "step_idx",
+        "src_layer",
+        "exact_n_demos",
+        "p_any_good",
+        "p_any_good_ci_low",
+        "p_any_good_ci_high",
+    }
+    if not required.issubset(set(summary_df.columns)):
+        return
+
+    for (sweep_name, step_idx, src_layer), part in summary_df.groupby(
+        ["sweep_name", "step_idx", "src_layer"], sort=True
+    ):
+        ordered = part.sort_values(["exact_n_demos", "sweep_value"])
+        if ordered.empty:
+            continue
+        plt.figure(figsize=(8, 5))
+        sns.lineplot(
+            data=ordered,
+            x="sweep_value",
+            y="p_any_good",
+            hue="exact_n_demos",
+            marker="o",
+        )
+        for _, row in ordered.iterrows():
+            if pd.isna(row["p_any_good"]):
+                continue
+            plt.vlines(
+                x=float(row["sweep_value"]),
+                ymin=float(row["p_any_good_ci_low"]),
+                ymax=float(row["p_any_good_ci_high"]),
+                color="gray",
+                linewidth=1.0,
+                alpha=0.4,
+            )
+        plt.ylim(0.0, 1.0)
+        plt.title(
+            f"Any-good probability "
+            f"({sweep_name}, step={step_idx}, src={src_layer})"
+        )
+        plt.xlabel(sweep_name)
+        plt.ylabel("P(any good demo schema)")
+        plt.tight_layout()
+        plt.savefig(
+            out_dir
+            / f"p_any_good_lines_{sweep_name}_step_{int(step_idx)}_src_{int(src_layer)}.png",
+            dpi=180,
+        )
+        plt.close()
+
+
 # <codecell>
 def save_outputs(
     *,
@@ -786,6 +913,8 @@ def save_outputs(
 
     _plot_heatmaps(summary_df, out_dir=out_dir)
     _plot_lines(summary_df, out_dir=out_dir)
+    _plot_any_good_heatmaps(summary_df, out_dir=out_dir)
+    _plot_any_good_lines(summary_df, out_dir=out_dir)
     return out_dir
 
 
@@ -803,6 +932,9 @@ def print_console_summary(summary_df: pd.DataFrame) -> None:
         "p_bad",
         "ci_low",
         "ci_high",
+        "p_any_good",
+        "p_any_good_ci_low",
+        "p_any_good_ci_high",
         "n_schema_choices",
         "no_demo_schema_rate",
         "mean_applicable_schema_count",

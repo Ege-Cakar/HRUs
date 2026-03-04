@@ -1195,7 +1195,7 @@ def test_layer_fol_task_fresh_icl_rejects_split_rule_bundle_path(tmp_path: Path)
         )
 
 
-def test_layer_fol_task_fresh_icl_forces_sync_prefetch() -> None:
+def test_layer_fol_task_fresh_icl_prefetch_enabled() -> None:
     task = FOLLayerTask(
         mode="online",
         task_split="depth3_fresh_icl",
@@ -1212,8 +1212,9 @@ def test_layer_fol_task_fresh_icl_forces_sync_prefetch() -> None:
         initial_ant_max=3,
         max_n_demos=0,
     )
-    assert not task.online_prefetch_enabled
-    assert task.online_prefetch_backend_resolved == "sync"
+    assert task.online_prefetch_enabled
+    assert task.online_prefetch_backend_resolved in ("thread", "process")
+    task.close()
 
 
 def test_layer_fol_task_fresh_icl_respects_fresh_icl_n_predicates() -> None:

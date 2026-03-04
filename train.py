@@ -12,13 +12,52 @@ from tqdm import tqdm
 from common import new_seed, merge_dicts
 
 
+def warmup_cosine_schedule(peak_lr, train_iters, warmup_frac=0.1, end_lr=0.0):
+    """Linear warmup then cosine decay to end_lr."""
+    warmup_steps = int(train_iters * warmup_frac)
+    return optax.warmup_cosine_decay_schedule(
+        init_value=0.0,
+        peak_value=peak_lr,
+        warmup_steps=warmup_steps,
+        decay_steps=train_iters,
+        end_value=end_lr,
+    )
+
+
+def warmup_constant_schedule(peak_lr, train_iters, warmup_frac=0.1):
+    """Linear warmup then constant at peak_lr."""
+    warmup_steps = int(train_iters * warmup_frac)
+    return optax.join_schedules(
+        schedules=[
+            optax.linear_schedule(init_value=0.0, end_value=peak_lr,
+                                  transition_steps=warmup_steps),
+            optax.constant_schedule(peak_lr),
+        ],
+        boundaries=[warmup_steps],
+    )
+
+
+def linear_decay_schedule(init_lr, train_iters, end_lr=0.0):
+    """Simple linear decay from init_lr to end_lr."""
+    return optax.linear_schedule(
+        init_value=init_lr,
+        end_value=end_lr,
+        transition_steps=train_iters,
+    )
+
+
 def create_optimizer(model: nnx.Module,
-                     lr: float = 1e-4,
+                     lr: float | Callable = 1e-4,
                      optim=optax.adamw,
                      clip: float | None = None,
                      wrt: nnx.filterlib.Filter = nnx.Param,
                      **opt_kwargs) -> nnx.Optimizer:
-    """Create an NNX optimizer for the model."""
+    """Create an NNX optimizer for the model.
+
+    Args:
+        lr: Learning rate. Either a float for constant LR or a callable
+            schedule (e.g. from warmup_cosine_schedule).
+    """
     tx = optim(learning_rate=lr, **opt_kwargs)
 
     if clip is not None:

@@ -11,10 +11,13 @@ from train import (
     Case,
     ce_mask,
     create_optimizer,
+    linear_decay_schedule,
     loss_and_acc,
     parse_loss_name,
     train,
     train_step,
+    warmup_constant_schedule,
+    warmup_cosine_schedule,
 )
 
 
@@ -74,6 +77,49 @@ class TestCeMask:
         assert jnp.isnan(loss) or jnp.isinf(loss)
 
 
+class TestScheduleHelpers:
+    """Tests for LR schedule helper functions."""
+
+    def test_warmup_cosine_returns_callable(self):
+        schedule = warmup_cosine_schedule(1e-3, train_iters=1000)
+        assert callable(schedule)
+
+    def test_warmup_cosine_values(self):
+        schedule = warmup_cosine_schedule(1e-3, train_iters=1000, warmup_frac=0.1, end_lr=0.0)
+        # Start at 0
+        assert float(schedule(0)) == pytest.approx(0.0, abs=1e-7)
+        # Peak at end of warmup
+        assert float(schedule(100)) == pytest.approx(1e-3, rel=1e-5)
+        # End near 0
+        assert float(schedule(1000)) == pytest.approx(0.0, abs=1e-5)
+
+    def test_warmup_constant_returns_callable(self):
+        schedule = warmup_constant_schedule(1e-3, train_iters=1000)
+        assert callable(schedule)
+
+    def test_warmup_constant_values(self):
+        schedule = warmup_constant_schedule(1e-3, train_iters=1000, warmup_frac=0.1)
+        # Start at 0
+        assert float(schedule(0)) == pytest.approx(0.0, abs=1e-7)
+        # Peak at end of warmup
+        assert float(schedule(100)) == pytest.approx(1e-3, rel=1e-5)
+        # Still at peak near end
+        assert float(schedule(999)) == pytest.approx(1e-3, rel=1e-5)
+
+    def test_linear_decay_returns_callable(self):
+        schedule = linear_decay_schedule(1e-3, train_iters=1000)
+        assert callable(schedule)
+
+    def test_linear_decay_values(self):
+        schedule = linear_decay_schedule(1e-3, train_iters=1000, end_lr=0.0)
+        # Start at init_lr
+        assert float(schedule(0)) == pytest.approx(1e-3, rel=1e-5)
+        # Midpoint
+        assert float(schedule(500)) == pytest.approx(5e-4, rel=1e-5)
+        # End at 0
+        assert float(schedule(1000)) == pytest.approx(0.0, abs=1e-7)
+
+
 class TestCreateOptimizer:
     """Tests for create_optimizer function."""
 
@@ -100,9 +146,19 @@ class TestCreateOptimizer:
         config = MixerConfig(n_vocab=100, n_hidden=64, n_seq=10, n_layers=1)
         rngs = nnx.Rngs(42)
         model = config.to_model(rngs=rngs)
-        
+
         optimizer = create_optimizer(model, lr=1e-3, optim=optax.sgd)
-        
+
+        assert isinstance(optimizer, nnx.Optimizer)
+
+    def test_with_schedule(self):
+        config = MixerConfig(n_vocab=100, n_hidden=64, n_seq=10, n_layers=1)
+        rngs = nnx.Rngs(42)
+        model = config.to_model(rngs=rngs)
+
+        schedule = warmup_cosine_schedule(1e-3, train_iters=1000)
+        optimizer = create_optimizer(model, lr=schedule)
+
         assert isinstance(optimizer, nnx.Optimizer)
 
 
@@ -213,11 +269,11 @@ class TestTrain:
         rngs = nnx.Rngs(42)
         model = config.to_model(rngs=rngs)
         initial_optimizer = create_optimizer(model, lr=1e-3)
-        
+
         x = jnp.ones((8, 10), dtype=jnp.int32)
         y = jnp.array([0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0])
         train_iter = SimpleIterator(x, y)
-        
+
         optimizer, hist = train(
             initial_optimizer,  # Pass optimizer instead of config
             train_iter=train_iter,
@@ -225,8 +281,29 @@ class TestTrain:
             train_iters=5,
             test_every=5
         )
-        
+
         assert optimizer is initial_optimizer
+
+    def test_training_with_schedule(self):
+        config = MixerConfig(n_vocab=100, n_hidden=32, n_seq=10, n_layers=1, n_out=1)
+
+        x = jnp.ones((8, 10), dtype=jnp.int32)
+        y = jnp.array([0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0])
+        train_iter = SimpleIterator(x, y)
+
+        schedule = warmup_cosine_schedule(1e-3, train_iters=10)
+        optimizer, hist = train(
+            config,
+            train_iter=train_iter,
+            loss='bce',
+            lr=schedule,
+            train_iters=10,
+            test_every=5,
+            seed=42
+        )
+
+        assert isinstance(optimizer, nnx.Optimizer)
+        assert len(hist['train']) == 2
 
 
 class TestCase:
