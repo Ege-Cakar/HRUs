@@ -44,14 +44,14 @@ FRESH_ICL_CFG = {
     "vars_per_rule_max": 6,
     "k_in_max": 3,
     "k_out_max": 5,
-    "constants": tuple(f"p{i}" for i in range(256)),
+    "constants": tuple(f"p{i}" for i in range(32)),
 }
 TASK_CFG = {
     "distance_range": (2, 2),
     "batch_size": 1,
     "initial_ant_max": 5,
-    "train_min_n_demos": 1,
-    "train_max_n_demos": 2,
+    "train_min_n_demos": 4,
+    "train_max_n_demos": 4,
     "eval_max_n_demos": 4,
 }
 
@@ -93,7 +93,6 @@ def preview_record(task: FOLLayerTask, record: dict, *, role: str) -> None:
 
 # <codecell>
 # --- Build base bank and preview fresh-ICL samples ---
-
 base_bank = build_random_fol_rule_bank(
     n_layers=3,
     predicates_per_layer=int(FRESH_ICL_CFG["predicates_per_layer"]),
@@ -108,58 +107,6 @@ base_bank = build_random_fol_rule_bank(
     rng=np.random.default_rng(int(FRESH_ICL_CFG["seed"])),
 )
 print("base bank: n_layers=3, predicates_per_layer=", FRESH_ICL_CFG["predicates_per_layer"])
-
-train_task = FOLLayerTask(
-    mode="online",
-    task_split="depth3_fresh_icl",
-    split_role="train",
-    distance_range=TASK_CFG["distance_range"],
-    batch_size=int(TASK_CFG["batch_size"]),
-    seed=111,
-    initial_ant_max=int(TASK_CFG["initial_ant_max"]),
-    min_n_demos=int(TASK_CFG["train_min_n_demos"]),
-    max_n_demos=int(TASK_CFG["train_max_n_demos"]),
-    predicates_per_layer=int(FRESH_ICL_CFG["predicates_per_layer"]),
-    rules_per_transition=int(FRESH_ICL_CFG["rules_per_transition"]),
-    fresh_icl_n_predicates=int(FRESH_ICL_CFG["fresh_icl_n_predicates"]),
-    arity_max=int(FRESH_ICL_CFG["arity_max"]),
-    vars_per_rule_max=int(FRESH_ICL_CFG["vars_per_rule_max"]),
-    constants=tuple(str(c) for c in FRESH_ICL_CFG["constants"]),
-    k_in_max=int(FRESH_ICL_CFG["k_in_max"]),
-    k_out_max=int(FRESH_ICL_CFG["k_out_max"]),
-    online_prefetch_backend="sync",
-)
-
-eval_task = FOLLayerTask(
-    mode="online",
-    task_split="depth3_fresh_icl",
-    split_role="eval",
-    distance_range=TASK_CFG["distance_range"],
-    batch_size=int(TASK_CFG["batch_size"]),
-    seed=222,
-    initial_ant_max=int(TASK_CFG["initial_ant_max"]),
-    min_n_demos=int(TASK_CFG["eval_max_n_demos"]),
-    max_n_demos=int(TASK_CFG["eval_max_n_demos"]),
-    predicates_per_layer=int(FRESH_ICL_CFG["predicates_per_layer"]),
-    rules_per_transition=int(FRESH_ICL_CFG["rules_per_transition"]),
-    fresh_icl_n_predicates=int(FRESH_ICL_CFG["fresh_icl_n_predicates"]),
-    arity_max=int(FRESH_ICL_CFG["arity_max"]),
-    vars_per_rule_max=int(FRESH_ICL_CFG["vars_per_rule_max"]),
-    constants=tuple(str(c) for c in FRESH_ICL_CFG["constants"]),
-    k_in_max=int(FRESH_ICL_CFG["k_in_max"]),
-    k_out_max=int(FRESH_ICL_CFG["k_out_max"]),
-    online_prefetch_backend="sync",
-)
-
-for _ in range(3):
-    preview_record(train_task, train_task._sample_online_record(), role="train")
-for _ in range(3):
-    preview_record(eval_task, eval_task._sample_online_record(), role="eval")
-
-
-# <codecell>
-train_task.close()
-eval_task.close()
 
 
 # <codecell>
@@ -248,11 +195,11 @@ print(f"N_VOCAB={N_VOCAB}  N_SEQ={N_SEQ}  MAX_COMPLETION_LEN={MAX_COMPLETION_LEN
 
 TRAIN_CFG = {
     "n_layers": 4,
-    "n_hidden": 128,
-    "n_heads": 4,
+    "n_hidden": 256,
+    "n_heads": 8,
     "lr": 5e-4,
-    "train_iters": 2000,
-    "test_every": 500,
+    "train_iters": 5000,
+    "test_every": 1000,
     "test_iters": 1,
     "batch_size": 16,
     "train_max_n_demos": int(TASK_CFG["train_max_n_demos"]),
@@ -284,7 +231,6 @@ train_task_ar = FOLLayerTask(
     constants=tuple(str(c) for c in FRESH_ICL_CFG["constants"]),
     k_in_max=int(FRESH_ICL_CFG["k_in_max"]),
     k_out_max=int(FRESH_ICL_CFG["k_out_max"]),
-    online_prefetch_backend="sync",
 )
 
 eval_task_ar = FOLLayerTask(
@@ -308,7 +254,6 @@ eval_task_ar = FOLLayerTask(
     constants=tuple(str(c) for c in FRESH_ICL_CFG["constants"]),
     k_in_max=int(FRESH_ICL_CFG["k_in_max"]),
     k_out_max=int(FRESH_ICL_CFG["k_out_max"]),
-    online_prefetch_backend="sync",
 )
 
 model_config = TransformerConfig(
@@ -372,8 +317,14 @@ def inspect_samples(task, *, role: str, n_samples: int):
 
         # Decode the sequent from the prompt
         segments = _split_prompt_segments(prompt, tokenizer.sep_token_id)
+        demo_segments = segments[:-1]
         main_segment = segments[-1] + [int(tokenizer.sep_token_id)]
         sequent = tokenizer.decode_prompt(main_segment)
+        full_prompt_text = tokenizer.decode_batch_ids(
+            prompt.reshape(1, -1),
+            skip_pad=True,
+            include_special_tokens=True,
+        )[0]
 
         # Run autoregressive prediction
         pred_completion = adapter.predict_completion(
@@ -406,7 +357,14 @@ def inspect_samples(task, *, role: str, n_samples: int):
         else:
             status = "OTHER"
 
-        print(f"[{role} #{i}] status={status}")
+        print(f"[{role} #{i}] status={status} n_demos={len(demo_segments)}")
+        print(f"  full_input_prompt: {full_prompt_text}")
+        if demo_segments:
+            for demo_idx, demo in enumerate(demo_segments):
+                demo_text = tokenizer.decode_completion_text(
+                    list(demo) + [int(tokenizer.eot_token_id)]
+                )
+                print(f"  demo[{demo_idx}]: {demo_text}")
         print(f"  sequent:    {sequent.text}")
         print(f"  expected:   {gt_text}")
         print(f"  predicted:  {pred_text}")
