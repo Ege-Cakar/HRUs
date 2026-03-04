@@ -40,7 +40,7 @@ from task.layer_gen.util.fol_rule_bank import (
     build_random_fol_rule_bank,
     generate_fresh_predicate_names,
 )
-from train import Case, ce_mask
+from train import Case, ce_mask, warmup_cosine_schedule
 
 from utils import (
     _layer_from_predicate,
@@ -58,45 +58,49 @@ print("RUN ID", RUN_ID)
 
 EVAL_ROLES = ["train", "eval"]
 
-TRAIN_MIN_N_DEMOS = 1
+TRAIN_MIN_N_DEMOS = 4
 TRAIN_MAX_N_DEMOS = 8
 EVAL_MAX_N_DEMOS_SWEEP = [1, 2, 4, 8, 12, 16, 24, 32]
 SELECTION_EVAL_MAX_N_DEMOS = 8
 
 BATCH_SIZE = 32
-TRAIN_ITERS_SWEEP = [1600, 6400, 25600, 102400]
+TRAIN_ITERS_SWEEP = [6400, 25600]
+# TRAIN_ITERS_SWEEP = [1600, 6400, 25600, 102400]
 TEST_EVERY = 1000
-TEST_ITERS = 3
-EVAL_ITERS_PER_ROLE = 3
+TEST_ITERS = 2
+EVAL_ITERS_PER_ROLE = 2
 ROLLOUT_EXAMPLES_PER_ROLE = 64
 
-RUN_SPLIT = 8
+# RUN_SPLIT = 8
+RUN_SPLIT = 4
 
 PREDICATES_PER_LAYER = 64
 RULES_PER_TRANSITION = 64
 FRESH_ICL_N_PREDICATES = 64
 N_LAYERS = 3
-ARITY_MAX = 3
+# ARITY_MAX = 3
+ARITY_MAX = 1
 VARS_PER_RULE_MAX = 6
-K_IN_MAX = 3
-K_OUT_MAX = 5
-INITIAL_ANT_MAX = 5
-CONSTANTS = [f"p{i}" for i in range(16)]
+K_IN_MAX = 1
+K_OUT_MAX = 3
+INITIAL_ANT_MAX = 3
+# CONSTANTS = [f"p{i}" for i in range(16)]
+CONSTANTS = [f"p{i}" for i in range(1)]
 SAMPLE_MAX_ATTEMPTS = 4096
 MAX_UNIFY_SOLUTIONS = 128
-BASE_BANK_SEED = 2041
+BASE_BANK_SEED = 2042
 
 TRAIN_FIXED_LENGTH_MODE = "next_pow2"
 EVAL_FIXED_LENGTH_MODE = "next_pow2"
 
-TRANSFORMER_LAYERS = [4]
-TRANSFORMER_WIDTH_HEADS = [(256, 8)]
+TRANSFORMER_LAYERS = [12]
+TRANSFORMER_WIDTH_HEADS = [(768, 12)]
 TRANSFORMER_LRS = [5e-4]
 TRANSFORMER_POS = ["rope"]
 TRANSFORMER_SWIGLU = [True]
 
-MAMBA2_BONSAI_LAYERS = [4]
-MAMBA2_BONSAI_WIDTH_HEADS = [(256, 8)]
+MAMBA2_BONSAI_LAYERS = [12]
+MAMBA2_BONSAI_WIDTH_HEADS = [(1024, 8)]
 MAMBA2_BONSAI_D_STATE = [32]
 MAMBA2_BONSAI_D_CONV = [4]
 MAMBA2_BONSAI_SCAN_CHUNK_LEN = [64]
@@ -396,8 +400,12 @@ def make_ar_metrics_fn(*, tokenizer, rule_bank, model_fn, n_seq: int, max_comple
             if matched.decode_error:
                 n_decode_error += 1
                 continue
-            if matched.unknown_rule_error or matched.matched_rule is None:
+            if matched.unknown_rule_error:
                 n_unknown_rule_error += 1
+                continue
+            if matched.matched_rule is None:
+                # Schema matched but no exact match (wrong_rule_error)
+                n_wrong_rule_error += 1
                 continue
 
             n_valid += 1
@@ -597,6 +605,7 @@ def _evaluate_role_for_demo(
     n_rollout_success = 0
     n_rollout_decode_error = 0
     n_rollout_unknown_rule_error = 0
+    n_rollout_wrong_rule_error = 0
     n_rollout_inapplicable_rule_error = 0
     n_rollout_goal_not_reached = 0
     rollout_steps: list[int] = []
@@ -658,6 +667,8 @@ def _evaluate_role_for_demo(
             n_rollout_decode_error += 1
         elif result.failure_reason == "unknown_rule_error":
             n_rollout_unknown_rule_error += 1
+        elif result.failure_reason == "wrong_rule_error":
+            n_rollout_wrong_rule_error += 1
         elif result.failure_reason == "inapplicable_rule_error":
             n_rollout_inapplicable_rule_error += 1
         elif result.failure_reason == "goal_not_reached":
@@ -682,6 +693,7 @@ def _evaluate_role_for_demo(
             "rollout_success_rate": _rollout_rate(n_rollout_success),
             "rollout_decode_error_rate": _rollout_rate(n_rollout_decode_error),
             "rollout_unknown_rule_error_rate": _rollout_rate(n_rollout_unknown_rule_error),
+            "rollout_wrong_rule_error_rate": _rollout_rate(n_rollout_wrong_rule_error),
             "rollout_inapplicable_rule_error_rate": _rollout_rate(
                 n_rollout_inapplicable_rule_error
             ),
@@ -819,7 +831,7 @@ for n_layers, (n_hidden, n_heads), lr, pos_encoding, use_swiglu, train_iters in 
         "train_iters": int(train_iters),
         "test_iters": TEST_ITERS,
         "test_every": TEST_EVERY,
-        "lr": lr,
+        "lr": warmup_cosine_schedule(lr, int(train_iters)),
     }
 
     info = {
@@ -916,7 +928,7 @@ for n_layers, (n_hidden, n_heads), d_state, d_conv, scan_chunk_len, lr, train_it
         "train_iters": int(train_iters),
         "test_iters": TEST_ITERS,
         "test_every": TEST_EVERY,
-        "lr": lr,
+        "lr": warmup_cosine_schedule(lr, int(train_iters)),
     }
 
     info = {
@@ -1031,7 +1043,7 @@ for case in tqdm(all_cases, desc="cases", leave=True):
             "train_iters": case.train_args["train_iters"],
             "test_iters": case.train_args["test_iters"],
             "test_every": case.train_args["test_every"],
-            "lr": case.train_args["lr"],
+            "lr": case.info["lr"],
             "eval_profile": case.info.get("train_eval_profile", "light"),
         },
         "metrics_final": case.hist["test"][-1] if case.hist and case.hist.get("test") else {},

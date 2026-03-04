@@ -8,14 +8,22 @@ import pytest
 from task.layer_fol import (
     AutoregressiveLogitsAdapter,
     CompletionLogitsAdapter,
+    FAILURE_WRONG_RULE_ERROR,
     FOLLayerRolloutExample,
     evaluate_layer_rollouts_fol,
     evaluate_rule_matches_fol,
     match_rule_completion_fol,
     run_layer_rollout_fol,
 )
+from task.layer_gen.util.fol_rule_bank import (
+    FOLAtom,
+    FOLLayerRule,
+    build_fresh_layer0_bank,
+    build_random_fol_rule_bank,
+    generate_fresh_predicate_names,
+    sample_fol_problem,
+)
 from task.layer_gen.util import tokenize_layer_fol as tok
-from task.layer_gen.util.fol_rule_bank import build_random_fol_rule_bank, sample_fol_problem
 
 
 class _ScriptedAdapter:
@@ -418,3 +426,255 @@ def test_autoregressive_logits_adapter_jit_step_uses_cache_when_supported_fol() 
         tokenizer=tokenizer,
     )
     assert decoded.tolist() == target
+
+
+# ── Schema-matching tests ──────────────────────────────────────────────────────
+
+
+def _rename_predicates(rule: FOLLayerRule, pred_map: dict[str, str]) -> FOLLayerRule:
+    """Return a new rule with predicate names renamed according to *pred_map*."""
+    def _rename_atom(atom: FOLAtom) -> FOLAtom:
+        return FOLAtom(pred_map.get(atom.predicate, atom.predicate), atom.args)
+
+    return FOLLayerRule(
+        src_layer=rule.src_layer,
+        dst_layer=rule.dst_layer,
+        lhs=tuple(_rename_atom(a) for a in rule.lhs),
+        rhs=tuple(_rename_atom(a) for a in rule.rhs),
+    )
+
+
+def _bank_identifiers(bank):
+    """Collect identifiers the tokenizer needs for *bank*."""
+    ids: set[str] = set(bank.constants)
+    ids.update(bank.predicate_arities)
+    ids.update(f"x{idx}" for idx in range(1, int(bank.vars_per_rule_max) + 1))
+    return sorted(ids)
+
+
+def _extended_tokenizer(bank, extra_predicates):
+    """Build a tokenizer that knows both *bank* identifiers and *extra_predicates*."""
+    ids = _bank_identifiers(bank)
+    for name in sorted(extra_predicates):
+        if name not in ids:
+            ids.append(name)
+    return tok.build_tokenizer_from_identifiers(ids)
+
+
+def test_schema_match_renamed_predicates_is_wrong_rule() -> None:
+    """A rule with the right structure but renamed predicates should be
+    classified as wrong_rule_error (not unknown_rule_error)."""
+    bank, tokenizer, rng = _sampled_bank(seed=50)
+    sampled = sample_fol_problem(bank=bank, distance=1, initial_ant_max=3, rng=rng)
+    src_layer = sampled.step_layers[0]
+    rule = sampled.step_rules[0]
+
+    # Rename to fresh predicate names that match _PREDICATE_RE (r\d+_\d+)
+    # but don't exist in the bank (which uses layers 0-5)
+    src_preds = list(bank.predicates_for_layer(src_layer))
+    dst_preds = list(bank.predicates_for_layer(src_layer + 1))
+    pred_map = {}
+    for idx, pred in enumerate(src_preds):
+        pred_map[pred] = f"r90_{idx + 1}"
+    for idx, pred in enumerate(dst_preds):
+        pred_map[pred] = f"r91_{idx + 1}"
+
+    renamed = _rename_predicates(rule, pred_map)
+    # Instantiate the renamed rule so it's ground
+    subst = {var: list(bank.constants)[i % len(bank.constants)]
+             for i, var in enumerate(sorted(renamed.variables()))}
+    instantiated = renamed.instantiate(subst)
+
+    fresh_tokenizer = _extended_tokenizer(bank, set(pred_map.values()))
+
+    result = match_rule_completion_fol(
+        rule_bank=bank,
+        src_layer=src_layer,
+        completion_tokens=fresh_tokenizer.encode_completion(instantiated.statement_text),
+        tokenizer=fresh_tokenizer,
+    )
+    # Schema should match (same arity pattern, same variable binding structure)
+    assert not result.unknown_rule_error, "Expected schema match, got unknown_rule_error"
+    assert result.wrong_rule_error, "Expected wrong_rule_error for renamed predicates"
+    assert result.matched_rule is None
+    assert not result.is_valid_rule
+
+
+def test_schema_mismatch_wrong_arity_is_unknown_rule() -> None:
+    """A rule with wrong arities should remain unknown_rule_error."""
+    bank, tokenizer, rng = _sampled_bank(seed=51)
+    src_layer = 0
+    unknown_statement = _make_unknown_statement(bank, src_layer)
+
+    result = match_rule_completion_fol(
+        rule_bank=bank,
+        src_layer=src_layer,
+        completion_tokens=tokenizer.encode_completion(unknown_statement),
+        tokenizer=tokenizer,
+    )
+    # _make_unknown_statement inflates arities, so schema should NOT match
+    assert result.unknown_rule_error
+    assert not result.wrong_rule_error
+
+
+def test_schema_match_with_demo_rules() -> None:
+    """When demo_rules are provided, schema matching should consider them."""
+    bank, tokenizer, rng = _sampled_bank(seed=52)
+    src_layer = 0
+    # Pick a bank rule to use as a structural template
+    template_rule = bank.transition_rules(src_layer)[0]
+
+    # Create a fresh rule with renamed predicates (using r\d+_\d+ format)
+    src_preds = bank.predicates_for_layer(src_layer)
+    dst_preds = bank.predicates_for_layer(src_layer + 1)
+    pred_map = {}
+    for idx, pred in enumerate(src_preds):
+        pred_map[pred] = f"r80_{idx + 1}"
+    for idx, pred in enumerate(dst_preds):
+        pred_map[pred] = f"r81_{idx + 1}"
+
+    demo_rule = _rename_predicates(template_rule, pred_map)
+
+    # Instantiate the demo rule
+    subst = {var: list(bank.constants)[i % len(bank.constants)]
+             for i, var in enumerate(sorted(demo_rule.variables()))}
+    instantiated = demo_rule.instantiate(subst)
+
+    demo_tokenizer = _extended_tokenizer(bank, set(pred_map.values()))
+
+    # Without demo_rules: schema still matches bank rules (same arity pattern)
+    result_no_demo = match_rule_completion_fol(
+        rule_bank=bank,
+        src_layer=src_layer,
+        completion_tokens=demo_tokenizer.encode_completion(instantiated.statement_text),
+        tokenizer=demo_tokenizer,
+    )
+    # Schema should match against bank rules since the structural pattern is the same
+    assert not result_no_demo.unknown_rule_error
+
+    # With demo_rules: should also schema-match
+    result_with_demo = match_rule_completion_fol(
+        rule_bank=bank,
+        src_layer=src_layer,
+        completion_tokens=demo_tokenizer.encode_completion(instantiated.statement_text),
+        tokenizer=demo_tokenizer,
+        demo_rules=[demo_rule],
+    )
+    assert not result_with_demo.unknown_rule_error
+    assert result_with_demo.wrong_rule_error
+
+
+def test_rollout_wrong_rule_failure_reason() -> None:
+    """A rollout where the model predicts a schema-matched but wrong rule
+    should fail with FAILURE_WRONG_RULE_ERROR."""
+    bank, tokenizer, rng = _sampled_bank(seed=53)
+    sampled = sample_fol_problem(bank=bank, distance=2, initial_ant_max=3, rng=rng)
+    src_layer = sampled.start_layer
+    rule = sampled.step_rules[0]
+
+    # Rename predicates to produce a schema-matched but unrecognised rule
+    src_preds = list(bank.predicates_for_layer(src_layer))
+    dst_preds = list(bank.predicates_for_layer(src_layer + 1))
+    pred_map = {}
+    for idx, pred in enumerate(src_preds):
+        pred_map[pred] = f"r70_{idx + 1}"
+    for idx, pred in enumerate(dst_preds):
+        pred_map[pred] = f"r71_{idx + 1}"
+
+    renamed = _rename_predicates(rule, pred_map)
+    subst = {var: list(bank.constants)[i % len(bank.constants)]
+             for i, var in enumerate(sorted(renamed.variables()))}
+    instantiated = renamed.instantiate(subst)
+
+    rollout_tokenizer = _extended_tokenizer(bank, set(pred_map.values()))
+
+    adapter = _ScriptedAdapter([rollout_tokenizer.encode_completion(instantiated.statement_text)])
+    example = FOLLayerRolloutExample(
+        distance=sampled.distance,
+        start_layer=sampled.start_layer,
+        goal_atom=sampled.goal_atom.text,
+        initial_ants=tuple(atom.text for atom in sampled.step_ants[0]),
+        max_steps=sampled.distance,
+    )
+
+    result = run_layer_rollout_fol(
+        rule_bank=bank,
+        example=example,
+        model=lambda x: x,
+        adapter=adapter,
+        tokenizer=rollout_tokenizer,
+    )
+    assert not result.success
+    assert result.failure_reason == FAILURE_WRONG_RULE_ERROR
+
+
+def test_rollout_succeeds_with_fresh_predicate_bank() -> None:
+    """A rollout using a temp_bank that contains fresh layer-0 rules should
+    succeed when the model predicts the correct fresh-predicate completions.
+
+    This mirrors the production scenario in experiment 10 where
+    ``rule_bank=temp_bank`` is built via ``build_fresh_layer0_bank``.
+    """
+    rng = np.random.default_rng(60)
+    base_bank = build_random_fol_rule_bank(
+        n_layers=3,
+        predicates_per_layer=4,
+        rules_per_transition=8,
+        arity_max=3,
+        vars_per_rule_max=4,
+        constants=("a", "b", "c"),
+        k_in_max=2,
+        k_out_max=2,
+        rng=rng,
+    )
+
+    fresh_preds = generate_fresh_predicate_names(4, rng)
+    temp_bank = build_fresh_layer0_bank(
+        base_bank=base_bank,
+        fresh_predicates=fresh_preds,
+        rules_per_transition=8,
+        k_in_min=1,
+        k_in_max=2,
+        k_out_min=1,
+        k_out_max=2,
+        rng=rng,
+    )
+
+    # Sample a problem that starts at layer 0 (fresh predicates)
+    sampled = sample_fol_problem(
+        bank=temp_bank,
+        distance=2,
+        initial_ant_max=3,
+        rng=rng,
+    )
+    assert sampled.start_layer == 0, "Need a layer-0 start for fresh-predicate test"
+    # Verify layer-0 predicates are indeed fresh
+    layer0_preds = {atom.predicate for atom in sampled.step_ants[0]}
+    assert layer0_preds.issubset(set(fresh_preds)), (
+        f"Expected fresh predicates {fresh_preds}, got {layer0_preds}"
+    )
+
+    tokenizer = tok.build_tokenizer_from_rule_bank(temp_bank)
+
+    example = FOLLayerRolloutExample(
+        distance=sampled.distance,
+        start_layer=sampled.start_layer,
+        goal_atom=sampled.goal_atom.text,
+        initial_ants=tuple(atom.text for atom in sampled.step_ants[0]),
+        max_steps=sampled.distance,
+    )
+    adapter = _ScriptedAdapter(
+        [tokenizer.encode_completion(rule.statement_text) for rule in sampled.step_rules]
+    )
+
+    result = run_layer_rollout_fol(
+        rule_bank=temp_bank,
+        example=example,
+        model=lambda x: x,
+        adapter=adapter,
+        tokenizer=tokenizer,
+    )
+    assert result.success, f"Expected success, got failure_reason={result.failure_reason}"
+    assert result.goal_reached
+    assert result.failure_reason is None
+    assert result.n_steps == sampled.distance

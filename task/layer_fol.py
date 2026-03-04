@@ -1916,11 +1916,13 @@ class FOLLayerRolloutMetrics:
     n_success: int
     n_failure_decode_error: int
     n_failure_unknown_rule_error: int
+    n_failure_wrong_rule_error: int
     n_failure_inapplicable_rule_error: int
     n_failure_goal_not_reached: int
     success_rate: float
     decode_error_rate: float
     unknown_rule_error_rate: float
+    wrong_rule_error_rate: float
     inapplicable_rule_error_rate: float
     goal_not_reached_rate: float
     avg_steps: float
@@ -1929,6 +1931,7 @@ class FOLLayerRolloutMetrics:
 
 FAILURE_DECODE_ERROR = "decode_error"
 FAILURE_UNKNOWN_RULE_ERROR = "unknown_rule_error"
+FAILURE_WRONG_RULE_ERROR = "wrong_rule_error"
 FAILURE_INAPPLICABLE_RULE_ERROR = "inapplicable_rule_error"
 FAILURE_GOAL_NOT_REACHED = "goal_not_reached"
 
@@ -2025,6 +2028,142 @@ def _find_instantiation_for_rule(
     return None
 
 
+def _unify_template_atom_with_ground_schema(
+    template: FOLAtom,
+    ground: FOLAtom,
+    subst: dict[str, str],
+    pred_map: dict[str, str],
+) -> tuple[dict[str, str], dict[str, str]] | None:
+    """Like ``_unify_template_atom_with_ground`` but matches structurally.
+
+    Instead of requiring exact predicate name equality, maintains an injective
+    mapping *pred_map* from template predicate names to ground predicate names.
+    Arity must still match, and variable bindings are consistent as before.
+
+    Returns ``(updated_subst, updated_pred_map)`` on success, ``None`` on failure.
+    """
+    if len(template.args) != len(ground.args):
+        return None
+
+    # Check / extend predicate mapping
+    new_pred_map = dict(pred_map)
+    bound_pred = new_pred_map.get(template.predicate)
+    if bound_pred is None:
+        # Injective: ground predicate must not already be a target of another template pred
+        if ground.predicate in new_pred_map.values():
+            return None
+        new_pred_map[template.predicate] = ground.predicate
+    elif bound_pred != ground.predicate:
+        return None
+
+    # Unify variable / constant arguments (identical to the exact version)
+    out = dict(subst)
+    for templ_term, ground_term in zip(template.args, ground.args):
+        if _is_variable(templ_term):
+            bound = out.get(templ_term)
+            if bound is None:
+                out[templ_term] = ground_term
+            elif bound != ground_term:
+                return None
+        elif templ_term != ground_term:
+            return None
+    return out, new_pred_map
+
+
+def _find_multiset_matches_schema(
+    *,
+    templates: tuple[FOLAtom, ...],
+    grounds: tuple[FOLAtom, ...],
+    seed_subst: dict[str, str],
+    seed_pred_map: dict[str, str],
+    max_solutions: int,
+) -> list[tuple[dict[str, str], dict[str, str]]]:
+    """Like ``_find_multiset_matches`` but threads *pred_map* alongside *subst*."""
+    if len(templates) != len(grounds):
+        return []
+
+    solutions: list[tuple[dict[str, str], dict[str, str]]] = []
+    used = [False] * len(grounds)
+
+    def _search(idx: int, subst: dict[str, str], pred_map: dict[str, str]) -> None:
+        if len(solutions) >= max_solutions:
+            return
+        if idx >= len(templates):
+            solutions.append((dict(subst), dict(pred_map)))
+            return
+
+        template = templates[idx]
+        for ground_idx, ground in enumerate(grounds):
+            if used[ground_idx]:
+                continue
+            maybe = _unify_template_atom_with_ground_schema(
+                template, ground, subst, pred_map,
+            )
+            if maybe is None:
+                continue
+            new_subst, new_pred_map = maybe
+            used[ground_idx] = True
+            _search(idx + 1, new_subst, new_pred_map)
+            used[ground_idx] = False
+            if len(solutions) >= max_solutions:
+                return
+
+    _search(0, dict(seed_subst), dict(seed_pred_map))
+    return solutions
+
+
+def _find_schema_match_for_rule(
+    *,
+    template: FOLLayerRule,
+    lhs_ground: tuple[FOLAtom, ...],
+    rhs_ground: tuple[FOLAtom, ...],
+    max_solutions: int = 64,
+) -> bool:
+    """Like ``_find_instantiation_for_rule`` but uses schema unification.
+
+    Returns ``True`` if the structural pattern (atom counts, arities,
+    variable-binding pattern) of *template* can be matched against the ground
+    atoms, allowing arbitrary predicate-name renaming.
+    """
+    lhs_sols = _find_multiset_matches_schema(
+        templates=template.lhs,
+        grounds=lhs_ground,
+        seed_subst={},
+        seed_pred_map={},
+        max_solutions=max_solutions,
+    )
+    if not lhs_sols:
+        return False
+
+    for lhs_subst, lhs_pred_map in lhs_sols:
+        rhs_sols = _find_multiset_matches_schema(
+            templates=template.rhs,
+            grounds=rhs_ground,
+            seed_subst=lhs_subst,
+            seed_pred_map=lhs_pred_map,
+            max_solutions=1,
+        )
+        if rhs_sols:
+            return True
+    return False
+
+
+def _any_rule_schema_matches(
+    lhs_ground: tuple[FOLAtom, ...],
+    rhs_ground: tuple[FOLAtom, ...],
+    candidates: Iterable[FOLLayerRule],
+) -> bool:
+    """Return ``True`` if any candidate rule's schema matches the ground atoms."""
+    for rule in candidates:
+        if _find_schema_match_for_rule(
+            template=rule,
+            lhs_ground=lhs_ground,
+            rhs_ground=rhs_ground,
+        ):
+            return True
+    return False
+
+
 def _match_instantiated_rule(
     *,
     rule_bank: FOLRuleBank,
@@ -2050,6 +2189,7 @@ def match_rule_completion_fol(
     completion_tokens: list[int] | np.ndarray,
     expected_statement_text: str | None = None,
     tokenizer: tokenize_layer_fol.FOLLayerTokenizer | None = None,
+    demo_rules: Iterable[FOLLayerRule] | None = None,
 ) -> FOLRuleMatchResult:
     tokenizer = _resolve_fol_tokenizer(rule_bank=rule_bank, tokenizer=tokenizer)
     src_layer = int(src_layer)
@@ -2082,14 +2222,19 @@ def match_rule_completion_fol(
         rhs_ground=rhs_ground,
     )
     if matched_rule is None:
+        candidates = list(rule_bank.transition_rules(src_layer))
+        candidates.extend(demo_rules or ())
+        schema_matches = _any_rule_schema_matches(
+            lhs_ground, rhs_ground, candidates,
+        )
         return FOLRuleMatchResult(
             src_layer=src_layer,
             decoded_statement=decoded_statement,
             expected_statement_text=expected_statement_text,
             matched_rule=None,
             decode_error=False,
-            unknown_rule_error=True,
-            wrong_rule_error=False,
+            unknown_rule_error=not schema_matches,
+            wrong_rule_error=schema_matches,
             is_valid_rule=False,
             is_correct=False,
         )
@@ -2122,6 +2267,7 @@ def evaluate_rule_matches_fol(
     completion_tokens: Iterable[list[int] | np.ndarray],
     expected_statement_texts: Iterable[str | None] | None = None,
     tokenizer: tokenize_layer_fol.FOLLayerTokenizer | None = None,
+    demo_rules: Iterable[FOLLayerRule] | None = None,
 ) -> FOLRuleMatchMetrics:
     src_layers = [int(layer) for layer in src_layers]
     completion_tokens = list(completion_tokens)
@@ -2141,6 +2287,8 @@ def evaluate_rule_matches_fol(
                 f"{len(expected_statement_texts)} and {len(src_layers)}"
             )
 
+    demo_rules_list = list(demo_rules) if demo_rules is not None else None
+
     results = tuple(
         match_rule_completion_fol(
             rule_bank=rule_bank,
@@ -2148,6 +2296,7 @@ def evaluate_rule_matches_fol(
             completion_tokens=completion,
             expected_statement_text=expected_statement,
             tokenizer=tokenizer,
+            demo_rules=demo_rules_list,
         )
         for src_layer, completion, expected_statement in zip(
             src_layers, completion_tokens, expected_statement_texts
@@ -2224,8 +2373,10 @@ def run_layer_rollout_fol(
     tokenizer: tokenize_layer_fol.FOLLayerTokenizer | None = None,
     temperature: float = 0.0,
     rng: np.random.Generator | None = None,
+    demo_rules: Iterable[FOLLayerRule] | None = None,
 ) -> FOLLayerRolloutResult:
     tokenizer = _resolve_fol_tokenizer(rule_bank=rule_bank, tokenizer=tokenizer)
+    demo_rules_list = list(demo_rules) if demo_rules is not None else None
     if rng is None:
         rng = np.random.default_rng()
 
@@ -2254,6 +2405,7 @@ def run_layer_rollout_fol(
             src_layer=src_layer,
             completion_tokens=completion,
             tokenizer=tokenizer,
+            demo_rules=demo_rules_list,
         )
 
         if matched.decode_error:
@@ -2283,6 +2435,10 @@ def run_layer_rollout_fol(
             )
 
         if matched.unknown_rule_error or matched.matched_rule is None:
+            failure = (
+                FAILURE_UNKNOWN_RULE_ERROR if matched.unknown_rule_error
+                else FAILURE_WRONG_RULE_ERROR
+            )
             traces.append(
                 FOLLayerRolloutTraceStep(
                     step_idx=step_idx,
@@ -2292,14 +2448,14 @@ def run_layer_rollout_fol(
                     decoded_statement=matched.decoded_statement,
                     matched_rule_statement=None,
                     decode_error=False,
-                    unknown_rule_error=True,
+                    unknown_rule_error=matched.unknown_rule_error,
                     inapplicable_rule_error=False,
                     goal_reached=False,
                 )
             )
             return FOLLayerRolloutResult(
                 success=False,
-                failure_reason=FAILURE_UNKNOWN_RULE_ERROR,
+                failure_reason=failure,
                 n_steps=len(traces),
                 goal_reached=False,
                 final_layer=src_layer,
@@ -2385,9 +2541,12 @@ def evaluate_layer_rollouts_fol(
     tokenizer: tokenize_layer_fol.FOLLayerTokenizer | None = None,
     temperature: float = 0.0,
     rng: np.random.Generator | None = None,
+    demo_rules: Iterable[FOLLayerRule] | None = None,
 ) -> FOLLayerRolloutMetrics:
     if rng is None:
         rng = np.random.default_rng()
+
+    demo_rules_list = list(demo_rules) if demo_rules is not None else None
 
     results = tuple(
         run_layer_rollout_fol(
@@ -2398,6 +2557,7 @@ def evaluate_layer_rollouts_fol(
             tokenizer=tokenizer,
             temperature=temperature,
             rng=rng,
+            demo_rules=demo_rules_list,
         )
         for example in examples
     )
@@ -2410,6 +2570,10 @@ def evaluate_layer_rollouts_fol(
     )
     n_failure_unknown_rule_error = sum(
         int(result.failure_reason == FAILURE_UNKNOWN_RULE_ERROR)
+        for result in results
+    )
+    n_failure_wrong_rule_error = sum(
+        int(result.failure_reason == FAILURE_WRONG_RULE_ERROR)
         for result in results
     )
     n_failure_inapplicable_rule_error = sum(
@@ -2427,11 +2591,13 @@ def evaluate_layer_rollouts_fol(
         n_success=n_success,
         n_failure_decode_error=n_failure_decode_error,
         n_failure_unknown_rule_error=n_failure_unknown_rule_error,
+        n_failure_wrong_rule_error=n_failure_wrong_rule_error,
         n_failure_inapplicable_rule_error=n_failure_inapplicable_rule_error,
         n_failure_goal_not_reached=n_failure_goal_not_reached,
         success_rate=_safe_rate(n_success, n_examples),
         decode_error_rate=_safe_rate(n_failure_decode_error, n_examples),
         unknown_rule_error_rate=_safe_rate(n_failure_unknown_rule_error, n_examples),
+        wrong_rule_error_rate=_safe_rate(n_failure_wrong_rule_error, n_examples),
         inapplicable_rule_error_rate=_safe_rate(n_failure_inapplicable_rule_error, n_examples),
         goal_not_reached_rate=_safe_rate(n_failure_goal_not_reached, n_examples),
         avg_steps=avg_steps,
