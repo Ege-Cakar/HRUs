@@ -458,6 +458,7 @@ class DemoAugmentedAdapter:
         self.max_n_demos = int(max_n_demos)
         self.max_unify_solutions = int(max_unify_solutions)
         self._last_demo_rules: list[FOLLayerRule] = []
+        self.augmented_prompts: list[list[int]] = []
 
     def get_last_demo_rules(self) -> list[FOLLayerRule]:
         return list(self._last_demo_rules)
@@ -473,6 +474,8 @@ class DemoAugmentedAdapter:
     ):
         self._last_demo_rules = []
         if self.max_n_demos <= 0:
+            prompt = np.asarray(prompt_tokens, dtype=np.int32).tolist()
+            self.augmented_prompts.append(prompt)
             return self.base_adapter.predict_completion(
                 model=model,
                 prompt_tokens=prompt_tokens,
@@ -516,6 +519,7 @@ class DemoAugmentedAdapter:
         except ValueError:
             self._last_demo_rules = []
 
+        self.augmented_prompts.append(prompt)
         return self.base_adapter.predict_completion(
             model=model,
             prompt_tokens=prompt,
@@ -573,6 +577,7 @@ def preview_rollout(
             max_n_demos=int(TASK_CFG["eval_max_n_demos"]),
             max_unify_solutions=MAX_UNIFY_SOLUTIONS,
         )
+        demo_adapter.augmented_prompts.clear()
 
         print(f"{'=' * 60}")
         print(f"ROLLOUT EXAMPLE {i}")
@@ -602,6 +607,26 @@ def preview_rollout(
             comp_text = tokenizer.decode_completion_text(list(step.completion_tokens))
             print(f"  step[{step.step_idx}] layer={step.src_layer}")
             print(f"    prompt:     {prompt_text}")
+
+            # Show demos from the augmented prompt
+            if step.step_idx < len(demo_adapter.augmented_prompts):
+                aug_prompt = demo_adapter.augmented_prompts[step.step_idx]
+                segments = _split_prompt_segments(
+                    np.asarray(aug_prompt, dtype=np.int32),
+                    tokenizer.sep_token_id,
+                )
+                demo_segments = segments[:-1]
+                if demo_segments:
+                    for demo_idx, demo in enumerate(demo_segments):
+                        demo_text = tokenizer.decode_completion_text(
+                            list(demo) + [int(tokenizer.eot_token_id)]
+                        )
+                        print(f"    demo[{demo_idx}]: {demo_text}")
+                else:
+                    print(f"    (no demos prepended)")
+            else:
+                print(f"    (augmented prompt not captured for step {step.step_idx})")
+
             print(f"    completion: {comp_text}")
             print(f"    decoded:    {step.decoded_statement}")
             print(f"    matched:    {step.matched_rule_statement}")
