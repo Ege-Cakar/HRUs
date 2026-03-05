@@ -425,7 +425,6 @@ def _plot_role_metric_group(
         aspect=1.15,
     )
     for ax in np.ravel(g.axes):
-        ax.set_xscale("symlog", linthresh=1)
         ax.set_xlim(left=0.0)
     g.set_axis_labels("Eval max_n_demos", "Metric value")
     g.set_titles("{col_name}")
@@ -456,7 +455,6 @@ def _plot_role_demo_lines(
         hue="model_family",
         marker="o",
     )
-    plt.xscale("symlog", linthresh=1)
     plt.xlim(left=0.0)
     plt.xlabel("Eval max_n_demos")
     plt.ylabel(metric)
@@ -493,7 +491,6 @@ def _plot_transfer_gap(
         hue="model_family",
         marker="o",
     )
-    plt.xscale("symlog", linthresh=1)
     plt.xlim(left=0.0)
     plt.axhline(0.0, color="0.35", linestyle="--", linewidth=1.0)
     plt.xlabel("Eval max_n_demos")
@@ -698,7 +695,5 @@ for train_iters in train_iters_values:
     )
 
 print("Saved:", OUT_DIR)
-
-# %%
 
 # %%
