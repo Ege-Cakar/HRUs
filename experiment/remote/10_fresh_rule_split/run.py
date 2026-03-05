@@ -31,7 +31,6 @@ from task.layer_fol import (
     _build_tokenizer_for_fresh_icl,
     _fresh_predicate_sentinels,
     evaluate_rule_matches,
-    match_rule_completion_fol,
     run_layer_rollout_fol,
     sample_rollout_examples,
 )
@@ -44,10 +43,7 @@ from train import Case, ce_mask, warmup_cosine_schedule
 
 from utils import (
     _layer_from_predicate,
-    extract_ar_free_run_eval_inputs,
     extract_ar_rule_match_inputs,
-    predicted_rule_reaches_goal,
-    summarize_first_transition_counts,
     summarize_rule_match_metrics,
 )
 from experiment.utils.metrics_utils import final_token_accuracy
@@ -352,97 +348,12 @@ def make_ar_metrics_fn(*, tokenizer, rule_bank, model_fn, n_seq: int, max_comple
         )
         rule_metrics = summarize_rule_match_metrics(rule_matches)
 
-        (
-            prompt_tokens,
-            fr_src_layers,
-            fr_goals,
-            fr_goal_layers,
-            fr_expected_statements,
-        ) = extract_ar_free_run_eval_inputs(
-            xs=np.asarray(xs),
-            labels=np.asarray(labels),
-            tokenizer=tokenizer,
-        )
-        n_examples = 0
-        n_valid = 0
-        n_reachable = 0
-        n_decode_error = 0
-        n_unknown_rule_error = 0
-        n_wrong_rule_error = 0
-        n_correct_rule = 0
-
-        for prompt, src_layer, goal, goal_layer, expected_statement in zip(
-            prompt_tokens,
-            fr_src_layers,
-            fr_goals,
-            fr_goal_layers,
-            fr_expected_statements,
-        ):
-            if int(src_layer) != 0:
-                continue
-            n_examples += 1
-
-            completion = adapter.predict_completion(
-                model=model_fn,
-                prompt_tokens=prompt,
-                tokenizer=tokenizer,
-                temperature=0.0,
-                rng=None,
-            )
-            matched = match_rule_completion_fol(
-                rule_bank=rule_bank,
-                src_layer=int(src_layer),
-                completion_tokens=completion,
-                expected_statement_text=expected_statement,
-                tokenizer=tokenizer,
-            )
-
-            if matched.decode_error:
-                n_decode_error += 1
-                continue
-            if matched.unknown_rule_error:
-                n_unknown_rule_error += 1
-                continue
-            if matched.matched_rule is None:
-                # Schema matched but no exact match (wrong_rule_error)
-                n_wrong_rule_error += 1
-                continue
-
-            n_valid += 1
-            if matched.wrong_rule_error:
-                n_wrong_rule_error += 1
-            else:
-                n_correct_rule += 1
-
-            if predicted_rule_reaches_goal(
-                rule_bank=rule_bank,
-                matched_rule=matched.matched_rule,
-                goal=goal,
-                goal_layer=int(goal_layer),
-                max_unify_solutions=MAX_UNIFY_SOLUTIONS,
-            ):
-                n_reachable += 1
-
-        first_transition_metrics = summarize_first_transition_counts(
-            n_examples=n_examples,
-            n_valid=n_valid,
-            n_reachable=n_reachable,
-            n_decode_error=n_decode_error,
-            n_unknown_rule_error=n_unknown_rule_error,
-            n_wrong_rule_error=n_wrong_rule_error,
-        )
-        first_transition_metrics["first_transition_n_correct_rule"] = int(n_correct_rule)
-        first_transition_metrics["first_transition_correct_rule_rate"] = (
-            float(n_correct_rule) / float(n_examples) if n_examples > 0 else 0.0
-        )
-
         return {
             "loss": loss_val,
             "token_acc": token_acc,
             "final_token_acc": final_acc,
             "seq_exact_acc": seq_exact_acc,
             **rule_metrics,
-            **first_transition_metrics,
         }
 
     return _metrics
@@ -1025,7 +936,7 @@ for case in tqdm(all_cases, desc="cases", leave=True):
 
     post_eval_wall_s = time.perf_counter() - post_eval_start
 
-    selection_metric_name = "first_transition_rule_reachable_rate"
+    selection_metric_name = "rollout_success_rate"
     selection_metric_value = _metric_by_role_demo(
         metrics_by_role_eval_demo,
         role="eval",
@@ -1052,29 +963,11 @@ for case in tqdm(all_cases, desc="cases", leave=True):
         "selection_eval_max_n_demos": int(SELECTION_EVAL_MAX_N_DEMOS),
         "selection_metric_name": selection_metric_name,
         "selection_metric_value": float(selection_metric_value),
-        "eval_first_transition_rule_reachable_rate": _metric_by_role_demo(
-            metrics_by_role_eval_demo,
-            role="eval",
-            eval_max_n_demos=int(SELECTION_EVAL_MAX_N_DEMOS),
-            metric_name="first_transition_rule_reachable_rate",
-        ),
-        "eval_first_transition_rule_valid_rate": _metric_by_role_demo(
-            metrics_by_role_eval_demo,
-            role="eval",
-            eval_max_n_demos=int(SELECTION_EVAL_MAX_N_DEMOS),
-            metric_name="first_transition_rule_valid_rate",
-        ),
         "eval_rollout_success_rate": _metric_by_role_demo(
             metrics_by_role_eval_demo,
             role="eval",
             eval_max_n_demos=int(SELECTION_EVAL_MAX_N_DEMOS),
             metric_name="rollout_success_rate",
-        ),
-        "train_first_transition_rule_reachable_rate": _metric_by_role_demo(
-            metrics_by_role_eval_demo,
-            role="train",
-            eval_max_n_demos=int(SELECTION_EVAL_MAX_N_DEMOS),
-            metric_name="first_transition_rule_reachable_rate",
         ),
         "train_rollout_success_rate": _metric_by_role_demo(
             metrics_by_role_eval_demo,

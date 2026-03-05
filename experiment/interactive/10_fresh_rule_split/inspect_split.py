@@ -8,6 +8,7 @@ Trains a small Transformer locally and inspects decoded model outputs.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 import sys
 
@@ -22,11 +23,16 @@ from model.transformer import TransformerConfig
 from task.layer_fol import (
     AutoregressiveLogitsAdapter,
     FOLLayerTask,
+    _augment_prompt_with_demos,
     _build_tokenizer_for_fresh_icl,
     match_rule_completion_fol,
+    run_layer_rollout_fol,
+    sample_rollout_examples,
 )
 from task.layer_gen.util.fol_rule_bank import (
+    build_fresh_layer0_bank,
     build_random_fol_rule_bank,
+    generate_fresh_predicate_names,
 )
 from train import train
 
@@ -382,6 +388,196 @@ print("=" * 60)
 print("EVAL SAMPLES")
 print("=" * 60)
 inspect_samples(eval_task_ar, role="eval", n_samples=N_INSPECT_SAMPLES)
+
+
+# <codecell>
+# --- Rollout preview with per-example fresh banks ---
+
+_PRED_RE = re.compile(r"r(\d+)_(\d+)$")
+_FRESH_PRED_RE = re.compile(r"r_[a-z0-9]{4}$")
+
+
+def _layer_from_predicate(predicate: str) -> int:
+    match = _PRED_RE.fullmatch(str(predicate))
+    if match is not None:
+        return int(match.group(1))
+    if _FRESH_PRED_RE.fullmatch(str(predicate)):
+        return 0
+    raise ValueError(f"Unsupported layered predicate name: {predicate}")
+
+
+class DemoAugmentedAdapter:
+    """Prepend sampled demo completions before calling a base adapter."""
+
+    def __init__(
+        self,
+        *,
+        base_adapter,
+        rule_bank,
+        tokenizer,
+        min_n_demos: int,
+        max_n_demos: int,
+        max_unify_solutions: int,
+    ) -> None:
+        self.base_adapter = base_adapter
+        self.rule_bank = rule_bank
+        self.tokenizer = tokenizer
+        self.min_n_demos = int(min_n_demos)
+        self.max_n_demos = int(max_n_demos)
+        self.max_unify_solutions = int(max_unify_solutions)
+
+    def predict_completion(
+        self,
+        *,
+        model,
+        prompt_tokens,
+        tokenizer,
+        temperature: float = 0.0,
+        rng=None,
+    ):
+        if self.max_n_demos <= 0:
+            return self.base_adapter.predict_completion(
+                model=model,
+                prompt_tokens=prompt_tokens,
+                tokenizer=tokenizer,
+                temperature=temperature,
+                rng=rng,
+            )
+
+        if rng is None:
+            rng = np.random.default_rng()
+
+        prompt = np.asarray(prompt_tokens, dtype=np.int32).tolist()
+        try:
+            sequent = self.tokenizer.decode_prompt(prompt)
+            src_layer = int(min(_layer_from_predicate(atom.predicate) for atom in sequent.ants))
+            prompt = _augment_prompt_with_demos(
+                prompt_tokens=prompt,
+                rule_bank=self.rule_bank,
+                tokenizer=self.tokenizer,
+                rng=rng,
+                src_layer=src_layer,
+                ants=tuple(sequent.ants),
+                min_n_demos=self.min_n_demos,
+                max_n_demos=self.max_n_demos,
+                max_unify_solutions=self.max_unify_solutions,
+            )
+        except ValueError:
+            pass
+
+        return self.base_adapter.predict_completion(
+            model=model,
+            prompt_tokens=prompt,
+            tokenizer=tokenizer,
+            temperature=temperature,
+            rng=rng,
+        )
+
+
+N_ROLLOUT_PREVIEW = 5
+MAX_UNIFY_SOLUTIONS = 128
+rollout_rng = np.random.default_rng(42)
+
+
+def preview_rollout(
+    *,
+    model_fn,
+    adapter,
+    tokenizer,
+    base_bank,
+    n_examples: int,
+    rng,
+):
+    for i in range(n_examples):
+        fresh_preds = generate_fresh_predicate_names(
+            int(FRESH_ICL_CFG["fresh_icl_n_predicates"]), rng
+        )
+        temp_bank = build_fresh_layer0_bank(
+            base_bank=base_bank,
+            fresh_predicates=fresh_preds,
+            rules_per_transition=int(FRESH_ICL_CFG["rules_per_transition"]),
+            k_in_min=1,
+            k_in_max=int(FRESH_ICL_CFG["k_in_max"]),
+            k_out_min=1,
+            k_out_max=int(FRESH_ICL_CFG["k_out_max"]),
+            rng=rng,
+        )
+
+        examples = sample_rollout_examples(
+            rule_bank=temp_bank,
+            distance=2,
+            n_examples=1,
+            initial_ant_max=INITIAL_ANT_MAX,
+            max_steps=2,
+            max_unify_solutions=MAX_UNIFY_SOLUTIONS,
+            rng=rng,
+        )
+        example = examples[0]
+
+        demo_adapter = DemoAugmentedAdapter(
+            base_adapter=adapter,
+            rule_bank=temp_bank,
+            tokenizer=tokenizer,
+            min_n_demos=int(TASK_CFG["eval_max_n_demos"]),
+            max_n_demos=int(TASK_CFG["eval_max_n_demos"]),
+            max_unify_solutions=MAX_UNIFY_SOLUTIONS,
+        )
+
+        print(f"{'=' * 60}")
+        print(f"ROLLOUT EXAMPLE {i}")
+        print(f"  initial_facts: {example.initial_ants}")
+        print(f"  goal:          {example.goal_atom}")
+        print(f"  oracle_rules:  {example.oracle_rule_statements}")
+
+        result = run_layer_rollout_fol(
+            rule_bank=temp_bank,
+            example=example,
+            model=model_fn,
+            adapter=demo_adapter,
+            tokenizer=tokenizer,
+            temperature=0.0,
+            rng=rng,
+        )
+
+        status = "SUCCESS" if result.success else f"FAIL ({result.failure_reason})"
+        print(f"  result: {status}  n_steps={result.n_steps}")
+
+        for step in result.steps:
+            prompt_text = tokenizer.decode_batch_ids(
+                np.asarray(step.prompt_tokens, dtype=np.int32).reshape(1, -1),
+                skip_pad=True,
+                include_special_tokens=True,
+            )[0]
+            comp_text = tokenizer.decode_completion_text(list(step.completion_tokens))
+            print(f"  step[{step.step_idx}] layer={step.src_layer}")
+            print(f"    prompt:     {prompt_text}")
+            print(f"    completion: {comp_text}")
+            print(f"    decoded:    {step.decoded_statement}")
+            print(f"    matched:    {step.matched_rule_statement}")
+            if step.decode_error:
+                print(f"    >> decode_error")
+            if step.unknown_rule_error:
+                print(f"    >> unknown_rule_error")
+            if step.inapplicable_rule_error:
+                print(f"    >> inapplicable_rule_error")
+            if step.goal_reached:
+                print(f"    >> goal_reached!")
+
+        print(f"  final_facts: {result.final_facts}")
+        print()
+
+
+print("=" * 60)
+print("ROLLOUT PREVIEWS")
+print("=" * 60)
+preview_rollout(
+    model_fn=model_fn,
+    adapter=adapter,
+    tokenizer=tokenizer,
+    base_bank=base_bank,
+    n_examples=N_ROLLOUT_PREVIEW,
+    rng=rollout_rng,
+)
 
 
 # <codecell>
