@@ -1088,7 +1088,7 @@ def test_layer_fol_task_fresh_icl_produces_fresh_predicates() -> None:
         max_n_demos=0,
         online_prefetch_backend="sync",
     )
-    fresh_re = re.compile(r"r_[a-z0-9]{4}")
+    fresh_re = re.compile(r"r_[a-z0-9]+")
     saw_fresh = False
     for _ in range(20):
         rec = task._sample_online_record()

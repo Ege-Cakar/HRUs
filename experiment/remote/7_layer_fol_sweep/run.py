@@ -29,6 +29,7 @@ from task.layer_fol import (
     AutoregressiveLogitsAdapter,
     CompletionLogitsAdapter,
     FOLLayerTask,
+    compute_fol_dims,
     evaluate_layer_rollouts,
     evaluate_rule_matches,
     sample_rollout_examples,
@@ -151,46 +152,13 @@ def _build_shared_rule_bank(save_dir: Path):
 
 
 def _compute_dims(rule_bank, tokenizer):
-    max_rhs_atoms = max(
-        len(rule.rhs)
-        for rules in rule_bank.transitions.values()
-        for rule in rules
+    dims = compute_fol_dims(
+        rule_banks=[rule_bank],
+        tokenizer=tokenizer,
+        initial_ant_max=int(INITIAL_ANT_MAX),
     )
-    max_prompt_facts = max(int(INITIAL_ANT_MAX), int(max_rhs_atoms))
-    max_atom_len = 1
-    first_const = str(rule_bank.constants[0])
-    for predicate, arity in rule_bank.predicate_arities.items():
-        atom_text = f"{str(predicate)}({','.join(first_const for _ in range(int(arity)))})"
-        max_atom_len = max(
-            int(max_atom_len),
-            len(tokenizer.encode_completion(atom_text)) - 1,
-        )
-    max_prompt_len = (
-        max_prompt_facts * max_atom_len
-        + max(0, max_prompt_facts - 1)
-        + 1
-        + max_atom_len
-        + 1
-    )
-    max_completion_len = 1
-    for rules in rule_bank.transitions.values():
-        for rule in rules:
-            max_completion_len = max(
-                max_completion_len,
-                len(tokenizer.encode_completion(rule.statement_text)),
-            )
-
-    n_seq_ar = int(max_prompt_len + max_completion_len - 1)
-    n_seq_completion = max(32, n_seq_ar)
-    n_vocab = max(512, int(tokenizer.vocab_size))
-
-    return {
-        "n_vocab": int(n_vocab),
-        "max_prompt_len": int(max_prompt_len),
-        "max_completion_len": int(max_completion_len),
-        "n_seq_ar": int(n_seq_ar),
-        "n_seq_completion": int(n_seq_completion),
-    }
+    dims["n_seq_completion"] = max(32, int(dims["n_seq_ar"]))
+    return dims
 
 
 def _train_distances_for_k(k: int) -> list[int]:

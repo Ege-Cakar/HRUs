@@ -61,14 +61,14 @@ def _build_tokenizer_for_split_bundle(
     )
 
 
-def _fresh_predicate_sentinels() -> list[str]:
+def _fresh_predicate_sentinels(*, name_len: int = 1) -> list[str]:
     """Generate sentinel predicates covering all chars in the fresh predicate charset."""
     from task.layer_gen.util.fol_rule_bank import _FRESH_PREDICATE_CHARSET
 
     charset = _FRESH_PREDICATE_CHARSET
     sentinels: list[str] = []
-    for i in range(0, len(charset), 4):
-        chunk = charset[i : i + 4].ljust(4, charset[0])
+    for i in range(0, len(charset), name_len):
+        chunk = charset[i : i + name_len].ljust(name_len, charset[0])
         sentinels.append(f"r_{chunk}")
     return sentinels
 
@@ -76,6 +76,7 @@ def _fresh_predicate_sentinels() -> list[str]:
 def _build_tokenizer_for_fresh_icl(
     *,
     base_bank: FOLRuleBank,
+    predicate_name_len: int = 1,
 ) -> tokenize_layer_fol.FOLLayerTokenizer:
     """Build a tokenizer for fresh-ICL that covers all possible fresh predicate chars."""
     identifiers: set[str] = set(base_bank.constants)
@@ -84,7 +85,7 @@ def _build_tokenizer_for_fresh_icl(
 
     predicate_identifiers = set(base_bank.predicate_arities)
     # Add sentinel predicates covering all alphanumeric chars used by fresh names.
-    sentinels = _fresh_predicate_sentinels()
+    sentinels = _fresh_predicate_sentinels(name_len=predicate_name_len)
     identifiers.update(sentinels)
     predicate_identifiers.update(sentinels)
 
@@ -92,6 +93,109 @@ def _build_tokenizer_for_fresh_icl(
         sorted(identifiers),
         predicate_identifiers=sorted(predicate_identifiers),
     )
+
+
+def compute_fol_dims(
+    *,
+    rule_banks: Iterable[FOLRuleBank],
+    tokenizer: tokenize_layer_fol.FOLLayerTokenizer,
+    initial_ant_max: int,
+    max_n_demos: int = 0,
+    extra_predicate_arities: dict[str, int] | None = None,
+    fresh_k_in_max: int | None = None,
+    fresh_k_out_max: int | None = None,
+) -> dict:
+    """Compute max sequence-length dimensions from one or more FOL rule banks.
+
+    Parameters
+    ----------
+    rule_banks : iterable of FOLRuleBank
+        One or more rule banks whose rules and predicate arities are merged.
+    tokenizer : FOLLayerTokenizer
+    initial_ant_max : int
+        Maximum initial antecedents.
+    max_n_demos : int
+        Maximum number of demos (0 = no demos).
+    extra_predicate_arities : dict or None
+        Additional predicate->arity entries (e.g. fresh sentinels) merged into
+        atom-length computation.
+    fresh_k_in_max, fresh_k_out_max : int or None
+        When both set, adds fresh clause/completion length estimates.
+
+    Returns
+    -------
+    dict with keys: n_vocab, max_prompt_len, max_completion_len, n_seq_ar, max_atom_len
+    """
+    all_rules = []
+    merged_predicate_arities: dict[str, int] = {}
+    first_const: str | None = None
+    for bank in rule_banks:
+        for rules in bank.transitions.values():
+            all_rules.extend(rules)
+        merged_predicate_arities.update(bank.predicate_arities)
+        if first_const is None and bank.constants:
+            first_const = str(bank.constants[0])
+
+    if not all_rules:
+        raise ValueError("Rule banks have no rules.")
+    if first_const is None:
+        raise ValueError("Rule banks have no constants.")
+
+    if extra_predicate_arities:
+        for pred, arity in extra_predicate_arities.items():
+            if pred not in merged_predicate_arities:
+                merged_predicate_arities[pred] = int(arity)
+
+    max_rhs_atoms = max(len(rule.rhs) for rule in all_rules)
+    max_prompt_facts = max(int(initial_ant_max), int(max_rhs_atoms))
+
+    max_atom_len = 1
+    for predicate, arity in merged_predicate_arities.items():
+        atom = FOLAtom(
+            predicate=str(predicate),
+            args=tuple(first_const for _ in range(int(arity))),
+        )
+        max_atom_len = max(
+            int(max_atom_len),
+            len(tokenizer.encode_completion(atom.text)) - 1,
+        )
+
+    max_prompt_len = (
+        max_prompt_facts * max_atom_len
+        + max(0, max_prompt_facts - 1)
+        + 1  # turnstile
+        + max_atom_len  # consequent
+        + 1  # SEP
+    )
+
+    if int(max_n_demos) > 0:
+        max_demo_clause_len = max(
+            len(tokenizer.encode_completion(rule.statement_text)) - 1
+            for rule in all_rules
+        )
+        if fresh_k_in_max is not None and fresh_k_out_max is not None:
+            fresh_clause_estimate = max_atom_len * (int(fresh_k_in_max) + int(fresh_k_out_max)) + 5
+            max_demo_clause_len = max(max_demo_clause_len, fresh_clause_estimate)
+        max_prompt_len += int(max_n_demos) * (int(max_demo_clause_len) + 1)
+
+    max_completion_len = max(
+        len(tokenizer.encode_completion(rule.statement_text))
+        for rule in all_rules
+    )
+    if fresh_k_in_max is not None and fresh_k_out_max is not None:
+        fresh_completion_estimate = max_atom_len * (int(fresh_k_in_max) + int(fresh_k_out_max)) + 5
+        max_completion_len = max(max_completion_len, fresh_completion_estimate)
+
+    n_seq_ar = int(max_prompt_len + max_completion_len - 1)
+    n_vocab = max(512, int(tokenizer.vocab_size))
+
+    return {
+        "n_vocab": int(n_vocab),
+        "max_prompt_len": int(max_prompt_len),
+        "max_completion_len": int(max_completion_len),
+        "n_seq_ar": int(n_seq_ar),
+        "max_atom_len": int(max_atom_len),
+    }
 
 
 def _pick_sampled_step_index(
@@ -234,6 +338,7 @@ def _init_fol_online_fresh_worker(
     max_n_demos: int,
     min_n_demos: int,
     forced_step_idx: int | None,
+    predicate_name_len: int = 1,
 ) -> None:
     base_bank = FOLRuleBank.from_dict(base_bank_payload)
     tokenizer = tokenize_layer_fol.FOLLayerTokenizer.from_dict(tokenizer_payload)
@@ -259,6 +364,7 @@ def _init_fol_online_fresh_worker(
         "forced_step_idx": (
             None if forced_step_idx is None else int(forced_step_idx)
         ),
+        "predicate_name_len": int(predicate_name_len),
         "rng": np.random.default_rng(worker_seed),
     }
 
@@ -273,7 +379,8 @@ def _sample_fol_online_fresh_worker_record() -> dict:
     tokenizer = state["tokenizer"]
 
     fresh_preds = generate_fresh_predicate_names(
-        state["fresh_icl_n_predicates"], rng
+        state["fresh_icl_n_predicates"], rng,
+        name_len=state["predicate_name_len"],
     )
     temp_bank = build_fresh_layer0_bank(
         base_bank=base_bank,
@@ -725,6 +832,8 @@ class FOLLayerTask:
         online_prefetch_workers=None,
         online_prefetch_buffer_size=None,
         fresh_icl_n_predicates=None,
+        arity_min=1,
+        predicate_name_len=1,
     ) -> None:
         self.mode = str(mode)
         if self.mode not in {"offline", "online"}:
@@ -831,6 +940,8 @@ class FOLLayerTask:
         self._k_in_max = int(k_in_max)
         self._k_out_min = int(k_out_min)
         self._k_out_max = int(k_out_max)
+        self._arity_min = int(arity_min)
+        self._predicate_name_len = int(predicate_name_len)
         self.max_n_demos = int(max_n_demos)
         if self.max_n_demos < 0:
             raise ValueError(f"max_n_demos must be >= 0, got {self.max_n_demos}")
@@ -912,6 +1023,7 @@ class FOLLayerTask:
                     predicates_per_layer=int(predicates_per_layer),
                     rules_per_transition=int(rules_per_transition),
                     arity_max=int(arity_max),
+                    arity_min=int(arity_min),
                     vars_per_rule_max=int(vars_per_rule_max),
                     constants=tuple(str(tok) for tok in constants),
                     k_in_min=int(k_in_min),
@@ -923,6 +1035,7 @@ class FOLLayerTask:
                 self._rule_bank = self._base_bank
                 self._tokenizer = _build_tokenizer_for_fresh_icl(
                     base_bank=self._base_bank,
+                    predicate_name_len=int(predicate_name_len),
                 )
             elif rule_bank_path is not None:
                 self._rule_bank = load_fol_rule_bank(Path(rule_bank_path))
@@ -932,6 +1045,7 @@ class FOLLayerTask:
                     predicates_per_layer=int(predicates_per_layer),
                     rules_per_transition=int(rules_per_transition),
                     arity_max=int(arity_max),
+                    arity_min=int(arity_min),
                     vars_per_rule_max=int(vars_per_rule_max),
                     constants=tuple(str(tok) for tok in constants),
                     k_in_min=int(k_in_min),
@@ -1150,6 +1264,7 @@ class FOLLayerTask:
             int(self.max_n_demos),
             int(self.min_n_demos),
             None if self._online_forced_step_idx is None else int(self._online_forced_step_idx),
+            int(self._predicate_name_len),
         )
 
     def _init_online_prefetch_executor_backend(
@@ -1500,7 +1615,8 @@ class FOLLayerTask:
             raise RuntimeError("depth3_fresh_icl requires _fresh_icl_n_predicates.")
 
         fresh_preds = generate_fresh_predicate_names(
-            self._fresh_icl_n_predicates, self._rng
+            self._fresh_icl_n_predicates, self._rng,
+            name_len=self._predicate_name_len,
         )
         temp_bank = build_fresh_layer0_bank(
             base_bank=self._base_bank,
@@ -1597,48 +1713,13 @@ class FOLLayerTask:
             if self._tokenizer is None:
                 raise RuntimeError("Online global fixed length requires a tokenizer.")
 
-            max_rhs_atoms = max(
-                len(rule.rhs)
-                for rules in self._rule_bank.transitions.values()
-                for rule in rules
+            dims = compute_fol_dims(
+                rule_banks=[self._rule_bank],
+                tokenizer=self._tokenizer,
+                initial_ant_max=self.initial_ant_max,
+                max_n_demos=self.max_n_demos,
             )
-            max_prompt_facts = max(int(self.initial_ant_max), int(max_rhs_atoms))
-            max_atom_len = 1
-            first_const = str(self._rule_bank.constants[0])
-            for predicate, arity in self._rule_bank.predicate_arities.items():
-                atom = FOLAtom(
-                    predicate=str(predicate),
-                    args=tuple(first_const for _ in range(int(arity))),
-                )
-                max_atom_len = max(
-                    int(max_atom_len),
-                    len(self._tokenizer.encode_completion(atom.text)) - 1,
-                )
-            max_prompt_len = (
-                max_prompt_facts * max_atom_len
-                + max(0, max_prompt_facts - 1)
-                + 1
-                + max_atom_len
-                + 1
-            )
-            if self.max_n_demos > 0:
-                max_demo_clause_len = 1
-                for rules in self._rule_bank.transitions.values():
-                    for rule in rules:
-                        max_demo_clause_len = max(
-                            max_demo_clause_len,
-                            len(self._tokenizer.encode_completion(rule.statement_text)) - 1,
-                        )
-                max_prompt_len += int(self.max_n_demos) * (int(max_demo_clause_len) + 1)
-
-            max_completion_len = 1
-            for rules in self._rule_bank.transitions.values():
-                for rule in rules:
-                    max_completion_len = max(
-                        max_completion_len,
-                        len(self._tokenizer.encode_completion(rule.statement_text)),
-                    )
-            n_seq = int(max_prompt_len + max_completion_len - 1)
+            n_seq = int(dims["n_seq_ar"])
 
         if n_seq < 2:
             raise ValueError(f"Resolved global fixed length must be >= 2, got {n_seq}")

@@ -1,7 +1,7 @@
-"""Stress test: verify _compute_dims does not underestimate sequence lengths.
+"""Stress test: verify compute_fol_dims does not underestimate sequence lengths.
 
 Samples many batches from FOLLayerTask with depth3_fresh_icl and checks that
-actual (unpadded) sequence lengths never exceed the estimates from _compute_dims.
+actual (unpadded) sequence lengths never exceed the estimates from compute_fol_dims.
 
 The main concern is ARITY_MAX=1, where fresh predicates (char-tokenized, e.g.,
 r_abcd -> 6 tokens) are much longer than base-bank predicates (single-token).
@@ -15,12 +15,12 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(ROOT / "experiment" / "remote" / "10_fresh_rule_split"))
 
 from task.layer_fol import (
     FOLLayerTask,
     _build_tokenizer_for_fresh_icl,
     _fresh_predicate_sentinels,
+    compute_fol_dims,
 )
 from task.layer_gen.util.fol_rule_bank import (
     build_fresh_layer0_bank,
@@ -65,64 +65,23 @@ def _build_base_bank_and_tokenizer():
         constants=CONSTANTS,
         rng=np.random.default_rng(BASE_BANK_SEED),
     )
-    tokenizer = _build_tokenizer_for_fresh_icl(base_bank=base_bank)
+    tokenizer = _build_tokenizer_for_fresh_icl(base_bank=base_bank, predicate_name_len=4)
     return base_bank, tokenizer
 
 
 def _compute_dims(base_bank, tokenizer, *, max_n_demos_for_shapes):
-    """Replica of run.py _compute_dims (the function under test)."""
-    all_rules = []
-    for _src_layer, rules in base_bank.transitions.items():
-        all_rules.extend(rules)
-    if not all_rules:
-        raise ValueError("Base bank has no rules.")
-
-    max_rhs_atoms = max(len(rule.rhs) for rule in all_rules)
-    max_prompt_facts = max(INITIAL_ANT_MAX, max_rhs_atoms)
-
-    sentinels = _fresh_predicate_sentinels()
-    merged_predicate_arities = dict(base_bank.predicate_arities)
-    for s in sentinels:
-        if s not in merged_predicate_arities:
-            merged_predicate_arities[s] = base_bank.arity_max
-
-    first_const = str(base_bank.constants[0])
-    max_atom_len = 1
-    for predicate, arity in merged_predicate_arities.items():
-        atom_text = f"{predicate}({','.join(first_const for _ in range(arity))})"
-        max_atom_len = max(max_atom_len, len(tokenizer.encode_completion(atom_text)) - 1)
-
-    max_prompt_len = (
-        max_prompt_facts * max_atom_len
-        + max(0, max_prompt_facts - 1)
-        + 1
-        + max_atom_len
-        + 1
+    """Delegate to unified compute_fol_dims with fresh sentinel estimates."""
+    sentinels = _fresh_predicate_sentinels(name_len=4)
+    extra_arities = {s: int(base_bank.arity_max) for s in sentinels}
+    return compute_fol_dims(
+        rule_banks=[base_bank],
+        tokenizer=tokenizer,
+        initial_ant_max=int(INITIAL_ANT_MAX),
+        max_n_demos=int(max_n_demos_for_shapes),
+        extra_predicate_arities=extra_arities,
+        fresh_k_in_max=int(K_IN_MAX),
+        fresh_k_out_max=int(K_OUT_MAX),
     )
-
-    if max_n_demos_for_shapes > 0:
-        max_demo_clause_len = max(
-            len(tokenizer.encode_completion(rule.statement_text)) - 1
-            for rule in all_rules
-        )
-        fresh_clause_estimate = max_atom_len * (K_IN_MAX + K_OUT_MAX) + 5
-        max_demo_clause_len = max(max_demo_clause_len, fresh_clause_estimate)
-        max_prompt_len += max_n_demos_for_shapes * (max_demo_clause_len + 1)
-
-    max_completion_len = max(
-        len(tokenizer.encode_completion(rule.statement_text))
-        for rule in all_rules
-    )
-    fresh_completion_estimate = max_atom_len * (K_IN_MAX + K_OUT_MAX) + 5
-    max_completion_len = max(max_completion_len, fresh_completion_estimate)
-
-    n_seq_ar = max_prompt_len + max_completion_len - 1
-    return {
-        "max_prompt_len": max_prompt_len,
-        "max_completion_len": max_completion_len,
-        "n_seq_ar": n_seq_ar,
-        "max_atom_len": max_atom_len,
-    }
 
 
 def _actual_seq_lengths(batch):
@@ -166,18 +125,19 @@ def _make_task(*, max_n_demos, n_seq_cap, seed=42):
         fixed_length_mode="next_pow2",
         fixed_length_n_seq=n_seq_cap,
         online_prefetch_backend="sync",
+        predicate_name_len=4,
     )
 
 
 # ── Sentinel coverage: verify fresh predicates are never longer ─────────────
 def test_sentinel_covers_all_fresh_names():
     """All fresh predicate names should be the same length as the sentinels."""
-    sentinels = _fresh_predicate_sentinels()
+    sentinels = _fresh_predicate_sentinels(name_len=4)
     sentinel_lens = {len(s) for s in sentinels}
 
     rng = np.random.default_rng(123)
     for _ in range(1000):
-        names = generate_fresh_predicate_names(64, rng)
+        names = generate_fresh_predicate_names(64, rng, name_len=4)
         for name in names:
             assert len(name) in sentinel_lens, (
                 f"Fresh name {name!r} (len={len(name)}) not covered by sentinel "
@@ -194,7 +154,7 @@ def test_fresh_atom_tokenization_bounded():
 
     rng = np.random.default_rng(456)
     for _ in range(500):
-        names = generate_fresh_predicate_names(64, rng)
+        names = generate_fresh_predicate_names(64, rng, name_len=4)
         for name in names:
             for const in CONSTANTS:
                 atom_text = f"{name}({const})"
@@ -214,7 +174,7 @@ def test_fresh_clause_tokenization_bounded():
 
     rng = np.random.default_rng(789)
     for _ in range(200):
-        fresh_preds = generate_fresh_predicate_names(FRESH_ICL_N_PREDICATES, rng)
+        fresh_preds = generate_fresh_predicate_names(FRESH_ICL_N_PREDICATES, rng, name_len=4)
         temp_bank = build_fresh_layer0_bank(
             base_bank=base_bank,
             fresh_predicates=fresh_preds,

@@ -262,6 +262,18 @@ eval_task_ar = FOLLayerTask(
     k_out_max=int(FRESH_ICL_CFG["k_out_max"]),
 )
 
+# <codecell>
+# --- Preview a few train examples before training ---
+N_PREVIEW = 5
+print("=" * 60)
+print(f"TRAIN TASK PREVIEW ({N_PREVIEW} examples)")
+print("=" * 60)
+for i in range(N_PREVIEW):
+    record = train_task_ar._sample_online_record()
+    preview_record(train_task_ar, record, role=f"train_preview #{i}")
+print()
+
+# <codecell>
 model_config = TransformerConfig(
     n_vocab=N_VOCAB,
     n_seq=N_SEQ,

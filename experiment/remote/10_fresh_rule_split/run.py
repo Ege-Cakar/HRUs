@@ -30,6 +30,7 @@ from task.layer_fol import (
     _augment_prompt_with_demos,
     _build_tokenizer_for_fresh_icl,
     _fresh_predicate_sentinels,
+    compute_fol_dims,
     evaluate_rule_matches,
     run_layer_rollout_fol,
     sample_rollout_examples,
@@ -182,65 +183,17 @@ def _compute_dims(
     max_n_demos_for_shapes: int,
 ):
     """Compute tensor dims from the base bank + fresh predicate estimates."""
-    # Gather all rules from the base bank (layers 0→1 and 1→2)
-    all_rules = []
-    for _src_layer, rules in base_bank.transitions.items():
-        all_rules.extend(rules)
-    if not all_rules:
-        raise ValueError("Base bank has no rules.")
-
-    max_rhs_atoms = max(len(rule.rhs) for rule in all_rules)
-    max_prompt_facts = max(int(INITIAL_ANT_MAX), int(max_rhs_atoms))
-
-    # Merge predicate arities with sentinel fresh predicates for max atom length
     sentinels = _fresh_predicate_sentinels()
-    merged_predicate_arities = dict(base_bank.predicate_arities)
-    for s in sentinels:
-        if s not in merged_predicate_arities:
-            merged_predicate_arities[s] = int(base_bank.arity_max)
-
-    first_const = str(base_bank.constants[0])
-    max_atom_len = 1
-    for predicate, arity in merged_predicate_arities.items():
-        atom_text = f"{str(predicate)}({','.join(first_const for _ in range(int(arity)))})"
-        max_atom_len = max(int(max_atom_len), len(tokenizer.encode_completion(atom_text)) - 1)
-
-    max_prompt_len = (
-        max_prompt_facts * max_atom_len
-        + max(0, max_prompt_facts - 1)
-        + 1
-        + max_atom_len
-        + 1
+    extra_arities = {s: int(base_bank.arity_max) for s in sentinels}
+    return compute_fol_dims(
+        rule_banks=[base_bank],
+        tokenizer=tokenizer,
+        initial_ant_max=int(INITIAL_ANT_MAX),
+        max_n_demos=int(max_n_demos_for_shapes),
+        extra_predicate_arities=extra_arities,
+        fresh_k_in_max=int(K_IN_MAX),
+        fresh_k_out_max=int(K_OUT_MAX),
     )
-
-    if int(max_n_demos_for_shapes) > 0:
-        # Estimate max demo clause length: use both base bank rules and fresh estimate
-        max_demo_clause_len = max(
-            len(tokenizer.encode_completion(rule.statement_text)) - 1
-            for rule in all_rules
-        )
-        # Fresh layer-0 rules may produce longer clauses; use sentinel-based estimate
-        fresh_clause_estimate = max_atom_len * (int(K_IN_MAX) + int(K_OUT_MAX)) + 5
-        max_demo_clause_len = max(max_demo_clause_len, fresh_clause_estimate)
-        max_prompt_len += int(max_n_demos_for_shapes) * (int(max_demo_clause_len) + 1)
-
-    max_completion_len = max(
-        len(tokenizer.encode_completion(rule.statement_text))
-        for rule in all_rules
-    )
-    # Account for fresh layer-0 rules which may be longer
-    fresh_completion_estimate = max_atom_len * (int(K_IN_MAX) + int(K_OUT_MAX)) + 5
-    max_completion_len = max(max_completion_len, fresh_completion_estimate)
-
-    n_seq_ar = int(max_prompt_len + max_completion_len - 1)
-    n_vocab = max(512, int(tokenizer.vocab_size))
-
-    return {
-        "n_vocab": int(n_vocab),
-        "max_prompt_len": int(max_prompt_len),
-        "max_completion_len": int(max_completion_len),
-        "n_seq_ar": int(n_seq_ar),
-    }
 
 
 def _make_layer_task(

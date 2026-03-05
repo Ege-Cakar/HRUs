@@ -25,7 +25,7 @@ EOT_TOKEN = "<EOT>"
 _LOGIC_TOKENS = ("⊢", "∧", "→", "(", ")", ",")
 _RESERVED_TOKENS = (PAD_TOKEN, SEP_TOKEN, EOT_TOKEN)
 _IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-_PREDICATE_RE = re.compile(r"r\d+_\d+$|r_[a-z0-9]{4}$")
+_PREDICATE_RE = re.compile(r"r\d+_\d+$|r_[a-z0-9]+$")
 _PREDICATE_CHAR_RE = re.compile(r"[A-Za-z0-9_]")
 
 
@@ -243,10 +243,11 @@ class FOLLayerTokenizer:
     def _encode_atom(self, atom: FOLAtom) -> list[int]:
         tokens: list[int] = []
         tokens.extend(self._encode_predicate(atom.predicate))
-        tokens.append(self.char_to_id("("))
-        for arg in atom.args:
-            tokens.append(self.char_to_id(arg))
-        tokens.append(self.char_to_id(")"))
+        if atom.args:
+            tokens.append(self.char_to_id("("))
+            for arg in atom.args:
+                tokens.append(self.char_to_id(arg))
+            tokens.append(self.char_to_id(")"))
         return tokens
 
     def tokenize_prompt(self, sequent: FOLSequent) -> list[int]:
@@ -372,22 +373,25 @@ def _parse_atom_from_symbols(
     while idx < len(symbols) and symbols[idx] != "(":
         sym = symbols[idx]
         if sym in {"⊢", "∧", "→", ")", ","}:
-            raise ValueError(f"Invalid predicate token {sym!r} in atom symbol stream.")
+            break
         idx += 1
 
-    if idx <= start or idx >= len(symbols) or symbols[idx] != "(":
-        raise ValueError("Malformed atom: missing predicate or opening parenthesis.")
+    if idx <= start:
+        raise ValueError("Malformed atom: missing predicate in atom symbol stream.")
     predicate = "".join(symbols[start:idx])
     if _IDENTIFIER_RE.fullmatch(predicate) is None:
         raise ValueError(f"Invalid predicate {predicate!r} in atom symbol stream.")
+
+    # Arity-0: no opening parenthesis follows the predicate.
+    if idx >= len(symbols) or symbols[idx] != "(":
+        return FOLAtom(predicate=predicate, args=()), idx
+
     idx += 1
 
     args: list[str] = []
     while idx < len(symbols):
         sym = symbols[idx]
         if sym == ")":
-            if not args:
-                raise ValueError("Atom must contain at least one argument.")
             idx += 1
             return FOLAtom(predicate=predicate, args=tuple(args)), idx
         if sym == ",":

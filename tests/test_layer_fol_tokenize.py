@@ -132,3 +132,32 @@ def test_standard_predicates_still_char_tokenized_alongside_fresh() -> None:
         assert ch in tokenizer.token_to_id
     for ch in "r_x9z3":
         assert ch in tokenizer.token_to_id
+
+
+def test_arity_zero_atom_roundtrip_tokenize() -> None:
+    """Encode/decode arity-0 atoms (no parentheses)."""
+    tokenizer = tok.build_tokenizer_from_identifiers(
+        ["r0_1", "r0_2", "r1_1", "a", "b", "x1"],
+        predicate_identifiers=["r0_1", "r0_2", "r1_1"],
+    )
+    # Arity-0 atoms appear without parentheses.
+    # Test a clause: r0_1 ∧ r0_2 → r1_1
+    statement = "r0_1 ∧ r0_2 → r1_1"
+    completion = tokenizer.encode_completion(statement)
+    decoded = tokenizer.decode_completion_text(completion)
+    assert decoded == statement
+
+    # Test a prompt with arity-0 atoms.
+    sequent = FOLSequent(
+        ants=(FOLAtom("r0_1", ()), FOLAtom("r0_2", ())),
+        cons=FOLAtom("r1_1", ()),
+    )
+    prompt = tokenizer.tokenize_prompt(sequent)
+    decoded_seq = tokenizer.decode_prompt(prompt)
+    assert decoded_seq == sequent
+
+    # Mixed: some arity-0 and some arity-1.
+    statement_mixed = "r0_1 ∧ r0_2(a) → r1_1(b)"
+    completion_mixed = tokenizer.encode_completion(statement_mixed)
+    decoded_mixed = tokenizer.decode_completion_text(completion_mixed)
+    assert decoded_mixed == statement_mixed

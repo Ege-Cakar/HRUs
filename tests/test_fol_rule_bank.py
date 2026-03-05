@@ -237,14 +237,23 @@ def test_fol_rule_bank_layer_predicates_override_predicates_for_layer() -> None:
 
 def test_generate_fresh_predicate_names_format_and_uniqueness() -> None:
     rng = np.random.default_rng(42)
+    # Default name_len=1 produces 3-char names: r_ + 1 char.
     names = generate_fresh_predicate_names(10, rng)
     assert len(names) == 10
     assert len(set(names)) == 10
     for name in names:
         assert name.startswith("r_")
-        assert len(name) == 6
+        assert len(name) == 3
         suffix = name[2:]
         assert all(ch in "abcdefghijklmnopqrstuvwxyz0123456789" for ch in suffix)
+
+    # name_len=4 produces 6-char names (legacy behavior).
+    rng2 = np.random.default_rng(42)
+    names4 = generate_fresh_predicate_names(10, rng2, name_len=4)
+    assert len(names4) == 10
+    for name in names4:
+        assert name.startswith("r_")
+        assert len(name) == 6
 
 
 def test_generate_fresh_predicate_names_rejects_zero() -> None:
@@ -330,3 +339,98 @@ def test_build_fresh_layer0_bank_supports_sampling() -> None:
     assert sampled.distance == 2
     assert sampled.start_layer == 0
     assert len(sampled.step_rules) == 2
+
+
+def test_fol_atom_arity_zero() -> None:
+    atom = FOLAtom(predicate="p", args=())
+    assert atom.arity == 0
+    assert atom.text == "p"
+    # Roundtrip through parse_atom_text.
+    from task.layer_gen.util.fol_rule_bank import parse_atom_text
+    parsed = parse_atom_text("p")
+    assert parsed == atom
+    assert parsed.text == "p"
+    # Also test arity-0 with parentheses (empty args).
+    parsed_empty = parse_atom_text("q()")
+    assert parsed_empty == FOLAtom(predicate="q", args=())
+    assert parsed_empty.text == "q"
+
+
+def test_build_random_fol_rule_bank_with_arity_min_zero() -> None:
+    rng = np.random.default_rng(99)
+    bank = build_random_fol_rule_bank(
+        n_layers=3,
+        predicates_per_layer=6,
+        rules_per_transition=8,
+        arity_max=2,
+        arity_min=0,
+        vars_per_rule_max=4,
+        k_in_max=2,
+        k_out_max=2,
+        constants=("a", "b"),
+        rng=rng,
+    )
+    assert bank.arity_min == 0
+    assert bank.arity_max == 2
+    # Should contain some arity-0 predicates.
+    zero_arity_preds = [
+        pred for pred, arity in bank.predicate_arities.items() if arity == 0
+    ]
+    assert len(zero_arity_preds) > 0, "Expected at least one arity-0 predicate with arity_min=0"
+    # Rules should still be valid.
+    for rules in bank.transitions.values():
+        for rule in rules:
+            lhs_vars = {t for a in rule.lhs for t in a.args if t.startswith("x")}
+            rhs_vars = {t for a in rule.rhs for t in a.args if t.startswith("x")}
+            assert rhs_vars.issubset(lhs_vars)
+
+
+def test_build_fresh_layer0_bank_with_arity_min_zero() -> None:
+    rng = np.random.default_rng(42)
+    base_bank = build_random_fol_rule_bank(
+        n_layers=3,
+        predicates_per_layer=6,
+        rules_per_transition=8,
+        arity_max=2,
+        arity_min=0,
+        vars_per_rule_max=4,
+        k_in_max=2,
+        k_out_max=2,
+        constants=("a", "b"),
+        rng=rng,
+    )
+    fresh_preds = generate_fresh_predicate_names(4, rng)
+    fresh_bank = build_fresh_layer0_bank(
+        base_bank=base_bank,
+        fresh_predicates=fresh_preds,
+        rules_per_transition=6,
+        k_in_min=1,
+        k_in_max=2,
+        k_out_min=1,
+        k_out_max=2,
+        rng=rng,
+    )
+    assert fresh_bank.arity_min == 0
+    assert fresh_bank.n_layers == 3
+    assert fresh_bank.predicates_for_layer(0) == fresh_preds
+
+
+def test_fol_rule_bank_from_dict_defaults_arity_min() -> None:
+    """Backward compat: missing arity_min in payload defaults to 1."""
+    rng = np.random.default_rng(7)
+    bank = build_random_fol_rule_bank(
+        n_layers=3,
+        predicates_per_layer=4,
+        rules_per_transition=4,
+        arity_max=2,
+        vars_per_rule_max=3,
+        k_in_max=2,
+        k_out_max=2,
+        constants=("a",),
+        rng=rng,
+    )
+    payload = bank.to_dict()
+    # Remove arity_min to simulate legacy payload.
+    payload.pop("arity_min")
+    loaded = FOLRuleBank.from_dict(payload)
+    assert loaded.arity_min == 1

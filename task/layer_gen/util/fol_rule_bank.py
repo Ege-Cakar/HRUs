@@ -97,8 +97,6 @@ class FOLAtom:
     def __post_init__(self) -> None:
         if not _is_identifier(self.predicate):
             raise ValueError(f"Invalid predicate name: {self.predicate!r}")
-        if len(self.args) < 1:
-            raise ValueError("FOL atoms must have at least one argument.")
         for arg in self.args:
             if not _is_identifier(arg):
                 raise ValueError(f"Invalid atom argument: {arg!r}")
@@ -109,6 +107,8 @@ class FOLAtom:
 
     @property
     def text(self) -> str:
+        if not self.args:
+            return self.predicate
         return f"{self.predicate}({','.join(self.args)})"
 
     def to_dict(self) -> dict:
@@ -205,6 +205,7 @@ class FOLRuleBank:
     predicate_arities: dict[str, int]
     transitions: dict[int, tuple[FOLLayerRule, ...]]
     layer_predicates: dict[int, tuple[str, ...]] | None = None
+    arity_min: int = 1
 
     def transition_rules(self, src_layer: int) -> tuple[FOLLayerRule, ...]:
         return self.transitions.get(src_layer, ())
@@ -226,6 +227,7 @@ class FOLRuleBank:
             "n_layers": int(self.n_layers),
             "predicates_per_layer": int(self.predicates_per_layer),
             "arity_max": int(self.arity_max),
+            "arity_min": int(self.arity_min),
             "constants": list(self.constants),
             "vars_per_rule_max": int(self.vars_per_rule_max),
             "predicate_arities": {
@@ -269,6 +271,7 @@ class FOLRuleBank:
             n_layers=int(payload["n_layers"]),
             predicates_per_layer=int(payload["predicates_per_layer"]),
             arity_max=int(payload["arity_max"]),
+            arity_min=int(payload.get("arity_min", 1)),
             constants=tuple(str(tok) for tok in payload["constants"]),
             vars_per_rule_max=int(payload["vars_per_rule_max"]),
             predicate_arities={
@@ -384,7 +387,11 @@ def parse_atom_text(text: str) -> FOLAtom:
     predicate, idx = _parse_ident(text, idx)
     idx = _skip_ws(text, idx)
     if idx >= len(text) or text[idx] != "(":
-        raise ValueError(f"Expected '(' after predicate in {text!r}")
+        # Arity-0 atom: no parentheses.
+        idx = _skip_ws(text, idx)
+        if idx != len(text):
+            raise ValueError(f"Unexpected trailing content in {text!r}")
+        return FOLAtom(predicate=predicate, args=())
     idx += 1
 
     args: list[str] = []
@@ -411,8 +418,6 @@ def parse_atom_text(text: str) -> FOLAtom:
     idx = _skip_ws(text, idx)
     if idx != len(text):
         raise ValueError(f"Unexpected trailing content in {text!r}")
-    if not args:
-        raise ValueError(f"Atom must contain at least one argument in {text!r}")
 
     return FOLAtom(predicate=predicate, args=tuple(args))
 
@@ -584,14 +589,20 @@ def _sample_transition_rules(
             for term in atom.args
             if _is_variable(term)
         }
+        # When all LHS atoms are arity-0 there are no variables.
+        # Allow the rule only if all RHS predicates also have arity 0.
         if not lhs_vars:
-            continue
+            all_rhs_zero = all(
+                int(predicate_arities.get(pred, 1)) == 0 for pred in rhs_chosen
+            )
+            if not all_rhs_zero:
+                continue
 
         rhs_atoms = tuple(
             _build_random_atom(
                 predicate=pred,
                 predicate_arities=predicate_arities,
-                term_pool=tuple(sorted(lhs_vars)),
+                term_pool=tuple(sorted(lhs_vars)) if lhs_vars else (),
                 rng=rng,
             )
             for pred in rhs_chosen
@@ -647,6 +658,7 @@ def build_random_fol_rule_bank(
     rng: np.random.Generator,
     k_in_min: int = 1,
     k_out_min: int = 1,
+    arity_min: int = 1,
 ) -> FOLRuleBank:
     if n_layers < 2:
         raise ValueError(f"n_layers must be >= 2, got {n_layers}")
@@ -658,8 +670,14 @@ def build_random_fol_rule_bank(
         raise ValueError(
             f"rules_per_transition must be >= 1, got {rules_per_transition}"
         )
-    if arity_max < 1:
-        raise ValueError(f"arity_max must be >= 1, got {arity_max}")
+    if arity_max < 0:
+        raise ValueError(f"arity_max must be >= 0, got {arity_max}")
+    if arity_min < 0:
+        raise ValueError(f"arity_min must be >= 0, got {arity_min}")
+    if arity_min > arity_max:
+        raise ValueError(
+            f"arity_min must be <= arity_max, got arity_min={arity_min}, arity_max={arity_max}"
+        )
     if vars_per_rule_max < 1:
         raise ValueError(f"vars_per_rule_max must be >= 1, got {vars_per_rule_max}")
     if k_in_min < 1 or k_out_min < 1:
@@ -698,7 +716,7 @@ def build_random_fol_rule_bank(
 
     for layer in range(n_layers):
         for predicate in layer_predicates[int(layer)]:
-            predicate_arities[predicate] = int(rng.integers(1, arity_max + 1))
+            predicate_arities[predicate] = int(rng.integers(int(arity_min), arity_max + 1))
 
     for src_layer in range(n_layers - 1):
         transitions[src_layer] = _sample_transition_rules(
@@ -719,6 +737,7 @@ def build_random_fol_rule_bank(
         n_layers=int(n_layers),
         predicates_per_layer=int(predicates_per_layer),
         arity_max=int(arity_max),
+        arity_min=int(arity_min),
         constants=constants,
         vars_per_rule_max=int(vars_per_rule_max),
         predicate_arities=predicate_arities,
@@ -733,17 +752,22 @@ _FRESH_PREDICATE_CHARSET = "abcdefghijklmnopqrstuvwxyz0123456789"
 def generate_fresh_predicate_names(
     n: int,
     rng: np.random.Generator,
+    *,
+    name_len: int = 1,
 ) -> tuple[str, ...]:
-    """Generate ``n`` unique ``r_XXXX`` predicate names (4 random alphanumeric chars each)."""
+    """Generate ``n`` unique ``r_XX..`` predicate names with *name_len* random alphanumeric chars."""
     n = int(n)
     if n < 1:
         raise ValueError(f"n must be >= 1, got {n}")
+    name_len = int(name_len)
+    if name_len < 1:
+        raise ValueError(f"name_len must be >= 1, got {name_len}")
     charset = np.array(list(_FRESH_PREDICATE_CHARSET), dtype="U1")
     seen: set[str] = set()
     names: list[str] = []
     max_attempts = max(1_000, n * 50)
     for _ in range(max_attempts):
-        suffix = "".join(rng.choice(charset, size=4))
+        suffix = "".join(rng.choice(charset, size=name_len))
         name = f"r_{suffix}"
         if name in seen:
             continue
@@ -781,7 +805,7 @@ def build_fresh_layer0_bank(
     # Assign random arities to fresh predicates.
     predicate_arities: dict[str, int] = dict(base_bank.predicate_arities)
     for pred in fresh_predicates:
-        predicate_arities[pred] = int(rng.integers(1, int(base_bank.arity_max) + 1))
+        predicate_arities[pred] = int(rng.integers(int(base_bank.arity_min), int(base_bank.arity_max) + 1))
 
     var_pool = tuple(f"x{idx}" for idx in range(1, int(base_bank.vars_per_rule_max) + 1))
 
@@ -803,6 +827,7 @@ def build_fresh_layer0_bank(
         n_layers=3,
         predicates_per_layer=int(base_bank.predicates_per_layer),
         arity_max=int(base_bank.arity_max),
+        arity_min=int(base_bank.arity_min),
         constants=tuple(base_bank.constants),
         vars_per_rule_max=int(base_bank.vars_per_rule_max),
         predicate_arities=predicate_arities,
@@ -926,6 +951,7 @@ def build_depth3_icl_split_bundle(
     rng: np.random.Generator,
     k_in_min: int = 1,
     k_out_min: int = 1,
+    arity_min: int = 1,
 ) -> FOLDepth3ICLSplitBundle:
     if int(predicates_per_layer) < 1:
         raise ValueError(
@@ -933,8 +959,14 @@ def build_depth3_icl_split_bundle(
         )
     if int(rules_01_train) < 1 or int(rules_01_eval) < 1 or int(rules_12_shared) < 1:
         raise ValueError("All split transition rule counts must be >= 1.")
-    if int(arity_max) < 1:
-        raise ValueError(f"arity_max must be >= 1, got {arity_max}")
+    if int(arity_max) < 0:
+        raise ValueError(f"arity_max must be >= 0, got {arity_max}")
+    if int(arity_min) < 0:
+        raise ValueError(f"arity_min must be >= 0, got {arity_min}")
+    if int(arity_min) > int(arity_max):
+        raise ValueError(
+            f"arity_min must be <= arity_max, got arity_min={arity_min}, arity_max={arity_max}"
+        )
     if int(vars_per_rule_max) < 1:
         raise ValueError(f"vars_per_rule_max must be >= 1, got {vars_per_rule_max}")
     if int(k_in_min) < 1 or int(k_out_min) < 1:
@@ -965,6 +997,7 @@ def build_depth3_icl_split_bundle(
 
     predicates_per_layer = int(predicates_per_layer)
     arity_max = int(arity_max)
+    arity_min = int(arity_min)
     vars_per_rule_max = int(vars_per_rule_max)
     k_in_min = int(k_in_min)
     k_in_max = int(k_in_max)
@@ -988,7 +1021,7 @@ def build_depth3_icl_split_bundle(
     for predicate in train_layer0 + eval_layer0 + shared_layer1 + shared_layer2:
         if predicate in predicate_arities_all:
             continue
-        predicate_arities_all[predicate] = int(rng.integers(1, arity_max + 1))
+        predicate_arities_all[predicate] = int(rng.integers(arity_min, arity_max + 1))
 
     train_predicate_arities = {
         predicate: int(predicate_arities_all[predicate])
@@ -1044,6 +1077,7 @@ def build_depth3_icl_split_bundle(
         n_layers=3,
         predicates_per_layer=predicates_per_layer,
         arity_max=arity_max,
+        arity_min=arity_min,
         constants=constants,
         vars_per_rule_max=vars_per_rule_max,
         predicate_arities=train_predicate_arities,
@@ -1061,6 +1095,7 @@ def build_depth3_icl_split_bundle(
         n_layers=3,
         predicates_per_layer=predicates_per_layer,
         arity_max=arity_max,
+        arity_min=arity_min,
         constants=constants,
         vars_per_rule_max=vars_per_rule_max,
         predicate_arities=eval_predicate_arities,

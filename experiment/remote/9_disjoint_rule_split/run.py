@@ -30,6 +30,7 @@ from task.layer_fol import (
     AutoregressiveLogitsAdapter,
     FOLLayerTask,
     _augment_prompt_with_demos,
+    compute_fol_dims,
     evaluate_layer_rollouts,
     evaluate_rule_matches,
     match_rule_completion_fol,
@@ -240,51 +241,12 @@ def _compute_dims(
     *,
     max_n_demos_for_shapes: int,
 ):
-    all_rules = list(_iter_bundle_rules(bundle))
-    if not all_rules:
-        raise ValueError("Split bundle has no rules.")
-
-    max_rhs_atoms = max(len(rule.rhs) for rule in all_rules)
-    max_prompt_facts = max(int(INITIAL_ANT_MAX), int(max_rhs_atoms))
-
-    merged_predicate_arities = dict(bundle.train_bank.predicate_arities)
-    merged_predicate_arities.update(bundle.eval_bank.predicate_arities)
-
-    first_const = str(bundle.train_bank.constants[0])
-    max_atom_len = 1
-    for predicate, arity in merged_predicate_arities.items():
-        atom_text = f"{str(predicate)}({','.join(first_const for _ in range(int(arity)))})"
-        max_atom_len = max(int(max_atom_len), len(tokenizer.encode_completion(atom_text)) - 1)
-
-    max_prompt_len = (
-        max_prompt_facts * max_atom_len
-        + max(0, max_prompt_facts - 1)
-        + 1
-        + max_atom_len
-        + 1
+    return compute_fol_dims(
+        rule_banks=[bundle.train_bank, bundle.eval_bank],
+        tokenizer=tokenizer,
+        initial_ant_max=int(INITIAL_ANT_MAX),
+        max_n_demos=int(max_n_demos_for_shapes),
     )
-
-    if int(max_n_demos_for_shapes) > 0:
-        max_demo_clause_len = max(
-            len(tokenizer.encode_completion(rule.statement_text)) - 1
-            for rule in all_rules
-        )
-        max_prompt_len += int(max_n_demos_for_shapes) * (int(max_demo_clause_len) + 1)
-
-    max_completion_len = max(
-        len(tokenizer.encode_completion(rule.statement_text))
-        for rule in all_rules
-    )
-
-    n_seq_ar = int(max_prompt_len + max_completion_len - 1)
-    n_vocab = max(512, int(tokenizer.vocab_size))
-
-    return {
-        "n_vocab": int(n_vocab),
-        "max_prompt_len": int(max_prompt_len),
-        "max_completion_len": int(max_completion_len),
-        "n_seq_ar": int(n_seq_ar),
-    }
 
 
 def _make_layer_task(
