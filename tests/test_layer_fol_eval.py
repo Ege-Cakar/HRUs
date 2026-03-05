@@ -41,6 +41,15 @@ class _ScriptedAdapter:
         return completion
 
 
+class _ScriptedAdapterWithDemoRules(_ScriptedAdapter):
+    def __init__(self, completions, demo_rules):
+        super().__init__(completions)
+        self._demo_rules = list(demo_rules)
+
+    def get_last_demo_rules(self):
+        return list(self._demo_rules)
+
+
 def _sampled_bank(seed: int = 0):
     rng = np.random.default_rng(seed)
     bank = build_random_fol_rule_bank(
@@ -148,6 +157,72 @@ def test_evaluate_rule_matches_aggregates_fol() -> None:
     assert metrics.n_wrong_rule_error == 1
     assert metrics.n_unknown_rule_error == 1
     assert metrics.n_decode_error == 1
+
+
+def test_evaluate_rule_matches_uses_demo_rules_by_example() -> None:
+    base_bank, temp_bank, fresh_preds, tokenizer, rng = _fresh_demo_setup(seed=73)
+    _ = fresh_preds
+
+    sampled = sample_fol_problem(bank=temp_bank, distance=1, initial_ant_max=3, rng=rng)
+    while sampled.start_layer != 0:
+        sampled = sample_fol_problem(bank=temp_bank, distance=1, initial_ant_max=3, rng=rng)
+
+    src_layer = sampled.step_layers[0]
+    expected = sampled.step_rules[0].statement_text
+
+    demo_rule = None
+    for rule in temp_bank.transition_rules(src_layer):
+        subst = _find_instantiation_for_rule(
+            template=rule,
+            lhs_ground=sampled.step_rules[0].lhs,
+            rhs_ground=sampled.step_rules[0].rhs,
+        )
+        if subst is not None:
+            demo_rule = rule
+            break
+    assert demo_rule is not None
+
+    metrics_without_demo = evaluate_rule_matches_fol(
+        rule_bank=base_bank,
+        src_layers=[src_layer],
+        completion_tokens=[tokenizer.encode_completion(expected)],
+        expected_statement_texts=[expected],
+        tokenizer=tokenizer,
+    )
+    assert metrics_without_demo.n_correct == 0
+
+    metrics_with_demo = evaluate_rule_matches_fol(
+        rule_bank=base_bank,
+        src_layers=[src_layer],
+        completion_tokens=[tokenizer.encode_completion(expected)],
+        expected_statement_texts=[expected],
+        tokenizer=tokenizer,
+        demo_rules_by_example=[[demo_rule]],
+    )
+    assert metrics_with_demo.n_correct == 1
+    assert metrics_with_demo.n_wrong_rule_error == 0
+    assert metrics_with_demo.n_unknown_rule_error == 0
+    assert metrics_with_demo.n_decode_error == 0
+
+
+def test_evaluate_rule_matches_rejects_demo_rules_by_example_len_mismatch() -> None:
+    bank, tokenizer, rng = _sampled_bank(seed=74)
+    sampled = sample_fol_problem(bank=bank, distance=1, initial_ant_max=3, rng=rng)
+    src_layer = sampled.step_layers[0]
+    expected = sampled.step_rules[0].statement_text
+
+    with pytest.raises(ValueError, match="demo_rules_by_example"):
+        evaluate_rule_matches_fol(
+            rule_bank=bank,
+            src_layers=[src_layer, src_layer],
+            completion_tokens=[
+                tokenizer.encode_completion(expected),
+                tokenizer.encode_completion(expected),
+            ],
+            expected_statement_texts=[expected, expected],
+            tokenizer=tokenizer,
+            demo_rules_by_example=[[]],
+        )
 
 
 def test_run_layer_rollout_success_with_scripted_rules_fol() -> None:
@@ -681,6 +756,62 @@ def test_rollout_succeeds_with_fresh_predicate_bank() -> None:
     assert result.goal_reached
     assert result.failure_reason is None
     assert result.n_steps == sampled.distance
+
+
+def test_rollout_uses_adapter_demo_rules() -> None:
+    base_bank, temp_bank, fresh_preds, tokenizer, rng = _fresh_demo_setup(seed=75)
+    _ = fresh_preds
+
+    sampled = sample_fol_problem(bank=temp_bank, distance=1, initial_ant_max=3, rng=rng)
+    while sampled.start_layer != 0:
+        sampled = sample_fol_problem(bank=temp_bank, distance=1, initial_ant_max=3, rng=rng)
+
+    src_layer = sampled.step_layers[0]
+    expected = sampled.step_rules[0].statement_text
+    example = FOLLayerRolloutExample(
+        distance=sampled.distance,
+        start_layer=sampled.start_layer,
+        goal_atom=sampled.goal_atom.text,
+        initial_ants=tuple(atom.text for atom in sampled.step_ants[0]),
+        max_steps=sampled.distance,
+    )
+
+    demo_rule = None
+    for rule in temp_bank.transition_rules(src_layer):
+        subst = _find_instantiation_for_rule(
+            template=rule,
+            lhs_ground=sampled.step_rules[0].lhs,
+            rhs_ground=sampled.step_rules[0].rhs,
+        )
+        if subst is not None:
+            demo_rule = rule
+            break
+    assert demo_rule is not None
+
+    no_demo_adapter = _ScriptedAdapter([tokenizer.encode_completion(expected)])
+    no_demo_result = run_layer_rollout_fol(
+        rule_bank=base_bank,
+        example=example,
+        model=lambda x: x,
+        adapter=no_demo_adapter,
+        tokenizer=tokenizer,
+    )
+    assert not no_demo_result.success
+    assert no_demo_result.failure_reason == FAILURE_WRONG_RULE_ERROR
+
+    with_demo_adapter = _ScriptedAdapterWithDemoRules(
+        [tokenizer.encode_completion(expected)],
+        [demo_rule],
+    )
+    with_demo_result = run_layer_rollout_fol(
+        rule_bank=base_bank,
+        example=example,
+        model=lambda x: x,
+        adapter=with_demo_adapter,
+        tokenizer=tokenizer,
+    )
+    assert with_demo_result.success
+    assert with_demo_result.failure_reason is None
 
 
 # ── Demo-rule exact matching tests ─────────────────────────────────────────────

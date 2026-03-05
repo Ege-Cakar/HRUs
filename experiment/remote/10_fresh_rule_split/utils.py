@@ -2,30 +2,20 @@
 
 from __future__ import annotations
 
-import re
-
 import numpy as np
 
 from task.layer_fol import (
     FOLRuleMatchMetrics,
     _find_lhs_substitutions_for_facts,
     _subst_binds_rhs_variables,
+    infer_fol_predicate_layer,
 )
 from task.layer_gen.util.fol_rule_bank import FOLAtom, FOLLayerRule, FOLRuleBank, FOLSequent
 from task.layer_gen.util.tokenize_layer_fol import FOLLayerTokenizer
 
 
-_PRED_RE = re.compile(r"r(\d+)_(\d+)$")
-_FRESH_PRED_RE = re.compile(r"r_[a-z0-9]{4}$")
-
-
 def _layer_from_predicate(predicate: str) -> int:
-    match = _PRED_RE.fullmatch(str(predicate))
-    if match is not None:
-        return int(match.group(1))
-    if _FRESH_PRED_RE.fullmatch(str(predicate)):
-        return 0
-    raise ValueError(f"Unsupported layered predicate name: {predicate}")
+    return infer_fol_predicate_layer(predicate)
 
 
 def _find_sequent_prompt_in_tokens(

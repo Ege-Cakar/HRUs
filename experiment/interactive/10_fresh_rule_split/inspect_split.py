@@ -8,7 +8,6 @@ Trains a small Transformer locally and inspects decoded model outputs.
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 import sys
 
@@ -25,14 +24,17 @@ from task.layer_fol import (
     FOLLayerTask,
     _augment_prompt_with_demos,
     _build_tokenizer_for_fresh_icl,
+    infer_fol_predicate_layer,
     match_rule_completion_fol,
     run_layer_rollout_fol,
     sample_rollout_examples,
 )
 from task.layer_gen.util.fol_rule_bank import (
+    FOLLayerRule,
     build_fresh_layer0_bank,
     build_random_fol_rule_bank,
     generate_fresh_predicate_names,
+    parse_clause_text,
 )
 from train import train, warmup_cosine_schedule
 
@@ -71,6 +73,23 @@ def _split_prompt_segments(prompt_tokens: np.ndarray, sep_token_id: int) -> list
             current = []
             continue
         current.append(int(tok))
+    return out
+
+
+def _demo_segments_to_rules(
+    *,
+    demo_segments: list[list[int]],
+    src_layer: int,
+    tokenizer,
+) -> list[FOLLayerRule]:
+    out: list[FOLLayerRule] = []
+    for demo in demo_segments:
+        try:
+            demo_text = tokenizer.decode_completion_text(list(demo) + [int(tokenizer.eot_token_id)])
+            lhs, rhs = parse_clause_text(demo_text)
+            out.append(FOLLayerRule(src_layer=int(src_layer), dst_layer=int(src_layer) + 1, lhs=lhs, rhs=rhs))
+        except ValueError:
+            continue
     return out
 
 
@@ -365,6 +384,11 @@ def inspect_samples(task, *, role: str, n_samples: int):
             completion_tokens=pred_completion,
             expected_statement_text=gt_text,
             tokenizer=tokenizer,
+            demo_rules=_demo_segments_to_rules(
+                demo_segments=demo_segments,
+                src_layer=src_layer,
+                tokenizer=tokenizer,
+            ),
         )
 
         # Classify result
@@ -409,17 +433,9 @@ inspect_samples(eval_task_ar, role="eval", n_samples=N_INSPECT_SAMPLES)
 # <codecell>
 # --- Rollout preview with per-example fresh banks ---
 
-_PRED_RE = re.compile(r"r(\d+)_(\d+)$")
-_FRESH_PRED_RE = re.compile(r"r_[a-z0-9]{4}$")
-
 
 def _layer_from_predicate(predicate: str) -> int:
-    match = _PRED_RE.fullmatch(str(predicate))
-    if match is not None:
-        return int(match.group(1))
-    if _FRESH_PRED_RE.fullmatch(str(predicate)):
-        return 0
-    raise ValueError(f"Unsupported layered predicate name: {predicate}")
+    return infer_fol_predicate_layer(predicate)
 
 
 class DemoAugmentedAdapter:
@@ -441,6 +457,10 @@ class DemoAugmentedAdapter:
         self.min_n_demos = int(min_n_demos)
         self.max_n_demos = int(max_n_demos)
         self.max_unify_solutions = int(max_unify_solutions)
+        self._last_demo_rules: list[FOLLayerRule] = []
+
+    def get_last_demo_rules(self) -> list[FOLLayerRule]:
+        return list(self._last_demo_rules)
 
     def predict_completion(
         self,
@@ -451,6 +471,7 @@ class DemoAugmentedAdapter:
         temperature: float = 0.0,
         rng=None,
     ):
+        self._last_demo_rules = []
         if self.max_n_demos <= 0:
             return self.base_adapter.predict_completion(
                 model=model,
@@ -465,7 +486,12 @@ class DemoAugmentedAdapter:
 
         prompt = np.asarray(prompt_tokens, dtype=np.int32).tolist()
         try:
-            sequent = self.tokenizer.decode_prompt(prompt)
+            segments = _split_prompt_segments(
+                np.asarray(prompt, dtype=np.int32),
+                self.tokenizer.sep_token_id,
+            )
+            main_segment = segments[-1] + [int(self.tokenizer.sep_token_id)]
+            sequent = self.tokenizer.decode_prompt(main_segment)
             src_layer = int(min(_layer_from_predicate(atom.predicate) for atom in sequent.ants))
             prompt = _augment_prompt_with_demos(
                 prompt_tokens=prompt,
@@ -478,8 +504,17 @@ class DemoAugmentedAdapter:
                 max_n_demos=self.max_n_demos,
                 max_unify_solutions=self.max_unify_solutions,
             )
+            all_segments = _split_prompt_segments(
+                np.asarray(prompt, dtype=np.int32),
+                self.tokenizer.sep_token_id,
+            )
+            self._last_demo_rules = _demo_segments_to_rules(
+                demo_segments=all_segments[:-1],
+                src_layer=src_layer,
+                tokenizer=self.tokenizer,
+            )
         except ValueError:
-            pass
+            self._last_demo_rules = []
 
         return self.base_adapter.predict_completion(
             model=model,

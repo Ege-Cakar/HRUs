@@ -35,9 +35,11 @@ from task.layer_fol import (
     sample_rollout_examples,
 )
 from task.layer_gen.util.fol_rule_bank import (
+    FOLLayerRule,
     build_fresh_layer0_bank,
     build_random_fol_rule_bank,
     generate_fresh_predicate_names,
+    parse_clause_text,
 )
 from train import Case, ce_mask, warmup_cosine_schedule
 
@@ -275,6 +277,46 @@ class DemoAugmentedAdapter:
         self.min_n_demos = int(min_n_demos)
         self.max_n_demos = int(max_n_demos)
         self.max_unify_solutions = int(max_unify_solutions)
+        self._last_demo_rules: list[FOLLayerRule] = []
+
+    def _split_prompt_segments(self, prompt_tokens: np.ndarray) -> list[list[int]]:
+        out: list[list[int]] = []
+        current: list[int] = []
+        for tok in prompt_tokens.tolist():
+            if int(tok) == int(self.tokenizer.sep_token_id):
+                out.append(current)
+                current = []
+                continue
+            current.append(int(tok))
+        return out
+
+    def _demo_segments_to_rules(
+        self,
+        *,
+        demo_segments: list[list[int]],
+        src_layer: int,
+    ) -> list[FOLLayerRule]:
+        out: list[FOLLayerRule] = []
+        for demo in demo_segments:
+            try:
+                demo_text = self.tokenizer.decode_completion_text(
+                    list(demo) + [int(self.tokenizer.eot_token_id)]
+                )
+                lhs, rhs = parse_clause_text(demo_text)
+                out.append(
+                    FOLLayerRule(
+                        src_layer=int(src_layer),
+                        dst_layer=int(src_layer) + 1,
+                        lhs=lhs,
+                        rhs=rhs,
+                    )
+                )
+            except ValueError:
+                continue
+        return out
+
+    def get_last_demo_rules(self) -> list[FOLLayerRule]:
+        return list(self._last_demo_rules)
 
     def predict_completion(
         self,
@@ -285,6 +327,7 @@ class DemoAugmentedAdapter:
         temperature: float = 0.0,
         rng: np.random.Generator | None = None,
     ) -> np.ndarray:
+        self._last_demo_rules = []
         if self.max_n_demos <= 0:
             return self.base_adapter.predict_completion(
                 model=model,
@@ -299,7 +342,9 @@ class DemoAugmentedAdapter:
 
         prompt = np.asarray(prompt_tokens, dtype=np.int32).tolist()
         try:
-            sequent = self.tokenizer.decode_prompt(prompt)
+            segments = self._split_prompt_segments(np.asarray(prompt, dtype=np.int32))
+            main_segment = segments[-1] + [int(self.tokenizer.sep_token_id)]
+            sequent = self.tokenizer.decode_prompt(main_segment)
             src_layer = int(min(_layer_from_predicate(atom.predicate) for atom in sequent.ants))
             prompt = _augment_prompt_with_demos(
                 prompt_tokens=prompt,
@@ -312,8 +357,13 @@ class DemoAugmentedAdapter:
                 max_n_demos=self.max_n_demos,
                 max_unify_solutions=self.max_unify_solutions,
             )
+            all_segments = self._split_prompt_segments(np.asarray(prompt, dtype=np.int32))
+            self._last_demo_rules = self._demo_segments_to_rules(
+                demo_segments=all_segments[:-1],
+                src_layer=src_layer,
+            )
         except ValueError:
-            pass
+            self._last_demo_rules = []
 
         return self.base_adapter.predict_completion(
             model=model,

@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import pickle
+import re
 import subprocess
 import sys
 import threading
@@ -1917,6 +1918,21 @@ def completion_is_valid_for_layer_fol(
 completion_is_valid_for_layer = completion_is_valid_for_layer_fol
 
 
+_LAYERED_PREDICATE_RE = re.compile(r"r(\d+)_(\d+)$")
+_FRESH_PREDICATE_RE = re.compile(r"r_[a-z0-9]+$")
+
+
+def infer_fol_predicate_layer(predicate: str) -> int:
+    """Infer logical layer from a layered or fresh predicate identifier."""
+    token = str(predicate)
+    match = _LAYERED_PREDICATE_RE.fullmatch(token)
+    if match is not None:
+        return int(match.group(1))
+    if _FRESH_PREDICATE_RE.fullmatch(token):
+        return 0
+    raise ValueError(f"Unsupported layered predicate name: {predicate}")
+
+
 class FOLLayerPredictionAdapter(Protocol):
     def predict_completion(
         self,
@@ -2360,6 +2376,7 @@ def evaluate_rule_matches_fol(
     expected_statement_texts: Iterable[str | None] | None = None,
     tokenizer: tokenize_layer_fol.FOLLayerTokenizer | None = None,
     demo_rules: Iterable[FOLLayerRule] | None = None,
+    demo_rules_by_example: Iterable[Iterable[FOLLayerRule] | None] | None = None,
 ) -> FOLRuleMatchMetrics:
     src_layers = [int(layer) for layer in src_layers]
     completion_tokens = list(completion_tokens)
@@ -2380,6 +2397,18 @@ def evaluate_rule_matches_fol(
             )
 
     demo_rules_list = list(demo_rules) if demo_rules is not None else None
+    if demo_rules_by_example is None:
+        demo_rules_per_example: list[list[FOLLayerRule] | None] = [None] * len(src_layers)
+    else:
+        demo_rules_per_example = [
+            None if rules is None else list(rules)
+            for rules in demo_rules_by_example
+        ]
+        if len(demo_rules_per_example) != len(src_layers):
+            raise ValueError(
+                "demo_rules_by_example must match src_layers length, got "
+                f"{len(demo_rules_per_example)} and {len(src_layers)}"
+            )
 
     results = tuple(
         match_rule_completion_fol(
@@ -2388,10 +2417,20 @@ def evaluate_rule_matches_fol(
             completion_tokens=completion,
             expected_statement_text=expected_statement,
             tokenizer=tokenizer,
-            demo_rules=demo_rules_list,
+            demo_rules=(
+                [
+                    *(demo_rules_list or ()),
+                    *(example_demo_rules or ()),
+                ]
+                if demo_rules_list is not None or example_demo_rules is not None
+                else None
+            ),
         )
-        for src_layer, completion, expected_statement in zip(
-            src_layers, completion_tokens, expected_statement_texts
+        for src_layer, completion, expected_statement, example_demo_rules in zip(
+            src_layers,
+            completion_tokens,
+            expected_statement_texts,
+            demo_rules_per_example,
         )
     )
 
@@ -2456,6 +2495,26 @@ def sample_rollout_examples_fol(
     return out
 
 
+def _adapter_last_demo_rules(
+    adapter: FOLLayerPredictionAdapter,
+) -> list[FOLLayerRule] | None:
+    getter = getattr(adapter, "get_last_demo_rules", None)
+    if not callable(getter):
+        return None
+    try:
+        raw = getter()
+    except Exception:
+        return None
+    if raw is None:
+        return None
+    out = [
+        rule
+        for rule in raw
+        if isinstance(rule, FOLLayerRule)
+    ]
+    return out
+
+
 def run_layer_rollout_fol(
     *,
     rule_bank: FOLRuleBank,
@@ -2491,13 +2550,22 @@ def run_layer_rollout_fol(
             temperature=temperature,
             rng=rng,
         )
+        step_demo_rules = _adapter_last_demo_rules(adapter)
+        combined_demo_rules = (
+            [
+                *(demo_rules_list or ()),
+                *(step_demo_rules or ()),
+            ]
+            if demo_rules_list is not None or step_demo_rules is not None
+            else None
+        )
 
         matched = match_rule_completion_fol(
             rule_bank=rule_bank,
             src_layer=src_layer,
             completion_tokens=completion,
             tokenizer=tokenizer,
-            demo_rules=demo_rules_list,
+            demo_rules=combined_demo_rules,
         )
 
         if matched.decode_error:

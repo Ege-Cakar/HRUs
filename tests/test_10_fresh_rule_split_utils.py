@@ -62,10 +62,13 @@ def test_layer_from_predicate_standard() -> None:
 
 
 def test_layer_from_predicate_fresh() -> None:
+    assert _layer_from_predicate("r_a") == 0
+    assert _layer_from_predicate("r_ab") == 0
     assert _layer_from_predicate("r_a1b2") == 0
     assert _layer_from_predicate("r_zzzz") == 0
     assert _layer_from_predicate("r_0000") == 0
     assert _layer_from_predicate("r_ab12") == 0
+    assert _layer_from_predicate("r_abcde") == 0
 
 
 def test_layer_from_predicate_invalid() -> None:
@@ -74,9 +77,7 @@ def test_layer_from_predicate_invalid() -> None:
     with pytest.raises(ValueError):
         _layer_from_predicate("foo")
     with pytest.raises(ValueError):
-        _layer_from_predicate("r_abc")  # too short
-    with pytest.raises(ValueError):
-        _layer_from_predicate("r_abcde")  # too long
+        _layer_from_predicate("r_ABC")  # uppercase not allowed
 
 
 def test_extract_prompt_info_from_demo_prefixed_row_tokens() -> None:
