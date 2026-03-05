@@ -78,14 +78,14 @@ PREDICATES_PER_LAYER = 64
 RULES_PER_TRANSITION = 64
 FRESH_ICL_N_PREDICATES = 64
 N_LAYERS = 3
-# ARITY_MAX = 3
-ARITY_MAX = 1
+ARITY_MAX = 3
+# ARITY_MAX = 1
 VARS_PER_RULE_MAX = 6
 K_IN_MAX = 1
 K_OUT_MAX = 3
 INITIAL_ANT_MAX = 3
-# CONSTANTS = [f"p{i}" for i in range(16)]
-CONSTANTS = [f"p{i}" for i in range(1)]
+CONSTANTS = [f"p{i}" for i in range(16)]
+# CONSTANTS = [f"p{i}" for i in range(1)]
 SAMPLE_MAX_ATTEMPTS = 4096
 MAX_UNIFY_SOLUTIONS = 128
 BASE_BANK_SEED = 2042
@@ -93,18 +93,18 @@ BASE_BANK_SEED = 2042
 TRAIN_FIXED_LENGTH_MODE = "next_pow2"
 EVAL_FIXED_LENGTH_MODE = "next_pow2"
 
-TRANSFORMER_LAYERS = [4]
+TRANSFORMER_LAYERS = [12]
 TRANSFORMER_WIDTH_HEADS = [(768, 12)]
-TRANSFORMER_LRS = [7e-4]
+TRANSFORMER_LRS = [5e-4]
 TRANSFORMER_POS = ["rope"]
 TRANSFORMER_SWIGLU = [True]
 
-MAMBA2_BONSAI_LAYERS = [4]
+MAMBA2_BONSAI_LAYERS = [12]
 MAMBA2_BONSAI_WIDTH_HEADS = [(1024, 8)]
 MAMBA2_BONSAI_D_STATE = [32]
 MAMBA2_BONSAI_D_CONV = [4]
 MAMBA2_BONSAI_SCAN_CHUNK_LEN = [64]
-MAMBA2_BONSAI_LRS = [7e-4]
+MAMBA2_BONSAI_LRS = [5e-4]
 
 ### START TEST CONFIGS
 # BATCH_SIZE = 8
@@ -860,7 +860,7 @@ for n_layers, (n_hidden, n_heads), lr, pos_encoding, use_swiglu, train_iters in 
 
     case = Case(
         (
-            f"10_fresh_rule_split_transformer_"
+            f"11_fresh_rule_split_transformer_"
             f"l{int(n_layers)}_h{int(n_hidden)}_heads{int(n_heads)}_"
             f"lr{_lr_tag(lr)}_ti{int(train_iters)}"
         ),
@@ -958,7 +958,7 @@ for n_layers, (n_hidden, n_heads), d_state, d_conv, scan_chunk_len, lr, train_it
 
     case = Case(
         (
-            "10_fresh_rule_split_mamba2_bonsai_"
+            "11_fresh_rule_split_mamba2_bonsai_"
             f"l{int(n_layers)}_h{int(n_hidden)}_heads{int(n_heads)}_"
             f"ds{int(d_state)}_lr{_lr_tag(lr)}_ti{int(train_iters)}"
         ),
