@@ -5,7 +5,6 @@ from __future__ import annotations
 
 from collections import Counter
 import itertools
-import re
 import sys
 import time
 from pathlib import Path
@@ -26,8 +25,8 @@ from model.ssm_bonsai import Mamba2BonsaiConfig
 from model.transformer import TransformerConfig
 from task.layer_fol import (
     AutoregressiveLogitsAdapter,
+    FOLDemoAugmentedAdapter,
     FOLLayerTask,
-    _augment_prompt_with_demos,
     _build_tokenizer_for_fresh_icl,
     _fresh_predicate_sentinels,
     compute_fol_dims,
@@ -35,15 +34,12 @@ from task.layer_fol import (
     sample_rollout_examples,
 )
 from task.layer_gen.util.fol_rule_bank import (
-    FOLLayerRule,
     build_fresh_layer0_bank,
     build_random_fol_rule_bank,
     generate_fresh_predicate_names,
-    parse_clause_text,
 )
 from train import Case, ce_mask, warmup_cosine_schedule
 
-from utils import _layer_from_predicate
 from experiment.utils.metrics_utils import final_token_accuracy
 
 
@@ -258,122 +254,6 @@ def make_ar_light_metrics_fn():
     return _metrics
 
 
-class DemoAugmentedAdapter:
-    """Prepend sampled demo completions before calling a base adapter."""
-
-    def __init__(
-        self,
-        *,
-        base_adapter,
-        rule_bank,
-        tokenizer,
-        min_n_demos: int,
-        max_n_demos: int,
-        max_unify_solutions: int,
-    ) -> None:
-        self.base_adapter = base_adapter
-        self.rule_bank = rule_bank
-        self.tokenizer = tokenizer
-        self.min_n_demos = int(min_n_demos)
-        self.max_n_demos = int(max_n_demos)
-        self.max_unify_solutions = int(max_unify_solutions)
-        self._last_demo_rules: list[FOLLayerRule] = []
-
-    def _split_prompt_segments(self, prompt_tokens: np.ndarray) -> list[list[int]]:
-        out: list[list[int]] = []
-        current: list[int] = []
-        for tok in prompt_tokens.tolist():
-            if int(tok) == int(self.tokenizer.sep_token_id):
-                out.append(current)
-                current = []
-                continue
-            current.append(int(tok))
-        return out
-
-    def _demo_segments_to_rules(
-        self,
-        *,
-        demo_segments: list[list[int]],
-        src_layer: int,
-    ) -> list[FOLLayerRule]:
-        out: list[FOLLayerRule] = []
-        for demo in demo_segments:
-            try:
-                demo_text = self.tokenizer.decode_completion_text(
-                    list(demo) + [int(self.tokenizer.eot_token_id)]
-                )
-                lhs, rhs = parse_clause_text(demo_text)
-                out.append(
-                    FOLLayerRule(
-                        src_layer=int(src_layer),
-                        dst_layer=int(src_layer) + 1,
-                        lhs=lhs,
-                        rhs=rhs,
-                    )
-                )
-            except ValueError:
-                continue
-        return out
-
-    def get_last_demo_rules(self) -> list[FOLLayerRule]:
-        return list(self._last_demo_rules)
-
-    def predict_completion(
-        self,
-        *,
-        model,
-        prompt_tokens,
-        tokenizer,
-        temperature: float = 0.0,
-        rng: np.random.Generator | None = None,
-    ) -> np.ndarray:
-        self._last_demo_rules = []
-        if self.max_n_demos <= 0:
-            return self.base_adapter.predict_completion(
-                model=model,
-                prompt_tokens=prompt_tokens,
-                tokenizer=tokenizer,
-                temperature=temperature,
-                rng=rng,
-            )
-
-        if rng is None:
-            rng = np.random.default_rng()
-
-        prompt = np.asarray(prompt_tokens, dtype=np.int32).tolist()
-        try:
-            segments = self._split_prompt_segments(np.asarray(prompt, dtype=np.int32))
-            main_segment = segments[-1] + [int(self.tokenizer.sep_token_id)]
-            sequent = self.tokenizer.decode_prompt(main_segment)
-            src_layer = int(min(_layer_from_predicate(atom.predicate) for atom in sequent.ants))
-            prompt = _augment_prompt_with_demos(
-                prompt_tokens=prompt,
-                rule_bank=self.rule_bank,
-                tokenizer=self.tokenizer,
-                rng=rng,
-                src_layer=src_layer,
-                ants=tuple(sequent.ants),
-                min_n_demos=self.min_n_demos,
-                max_n_demos=self.max_n_demos,
-                max_unify_solutions=self.max_unify_solutions,
-            )
-            all_segments = self._split_prompt_segments(np.asarray(prompt, dtype=np.int32))
-            self._last_demo_rules = self._demo_segments_to_rules(
-                demo_segments=all_segments[:-1],
-                src_layer=src_layer,
-            )
-        except ValueError:
-            self._last_demo_rules = []
-
-        return self.base_adapter.predict_completion(
-            model=model,
-            prompt_tokens=prompt,
-            tokenizer=tokenizer,
-            temperature=temperature,
-            rng=rng,
-        )
-
-
 def make_print_fn(metric_key: str):
     def _print(step, hist):
         train_metrics = hist["train"][-1]
@@ -478,7 +358,7 @@ def _evaluate_role_for_demo(
 
         # Build/reuse a rollout adapter that uses the temp bank for demos
         if rollout_demo_adapter is None:
-            rollout_demo_adapter = DemoAugmentedAdapter(
+            rollout_demo_adapter = FOLDemoAugmentedAdapter(
                 base_adapter=shared_adapter,
                 rule_bank=temp_bank,
                 tokenizer=tokenizer,

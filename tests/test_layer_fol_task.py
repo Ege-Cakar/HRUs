@@ -12,12 +12,15 @@ from task.layer_fol import (
     FOLLayerTask,
     _collect_applicable_demo_schemas,
     _find_instantiation_for_rule,
+    match_rule_completion_fol,
 )
 from task.layer_gen.util import tokenize_layer_fol as tok
 from task.layer_gen.util.fol_rule_bank import (
     FOLAtom,
+    FOLLayerRule,
     FOLSequent,
     build_depth3_icl_split_bundle,
+    parse_clause_text,
     save_fol_depth3_icl_split_bundle,
 )
 
@@ -764,7 +767,7 @@ def test_layer_fol_task_online_prefetch_process_fallback(monkeypatch) -> None:
     def _raise_process(*args, **kwargs):
         raise OSError("process pool unavailable")
 
-    monkeypatch.setattr("task.layer_fol.ProcessPoolExecutor", _raise_process)
+    monkeypatch.setattr("task.layer_fol_task.ProcessPoolExecutor", _raise_process)
     task = FOLLayerTask(
         distance_range=(1, 2),
         batch_size=2,
@@ -798,7 +801,7 @@ def test_layer_fol_task_online_prefetch_server_fallback(monkeypatch) -> None:
         def __init__(self, **kwargs):
             raise RuntimeError("server unavailable")
 
-    monkeypatch.setattr("task.layer_fol._FOLOnlineSamplerServerClient", _FailServerClient)
+    monkeypatch.setattr("task.layer_fol_task._FOLOnlineSamplerServerClient", _FailServerClient)
     task = FOLLayerTask(
         distance_range=(1, 2),
         batch_size=2,
@@ -1270,3 +1273,118 @@ def test_layer_fol_task_fresh_icl_demos_use_fresh_rules() -> None:
             saw_demo = True
             break
     assert saw_demo
+
+
+def test_layer_fol_task_fresh_icl_records_include_rule_context() -> None:
+    task = FOLLayerTask(
+        mode="online",
+        task_split="depth3_fresh_icl",
+        split_role="train",
+        distance_range=(2, 2),
+        batch_size=1,
+        seed=309,
+        predicates_per_layer=4,
+        rules_per_transition=8,
+        arity_max=3,
+        vars_per_rule_max=4,
+        constants=("a", "b", "c"),
+        k_in_max=2,
+        k_out_max=2,
+        initial_ant_max=3,
+        max_n_demos=0,
+        online_prefetch_backend="sync",
+    )
+    seen: set[int] = set()
+    for _ in range(100):
+        rec = task._sample_online_record()
+        src_layer = int(rec["src_layer"])
+        ctx = rec["rule_context"]
+        assert int(ctx["src_layer"]) == src_layer
+        assert isinstance(ctx["active_rule_texts"], list)
+        assert isinstance(ctx["fixed_rule_texts"], list)
+        assert isinstance(ctx["demo_schema_texts"], list)
+        assert isinstance(ctx["demo_instance_texts"], list)
+        assert len(ctx["active_rule_texts"]) > 0
+        if src_layer == 0:
+            assert ctx["fixed_rule_texts"] == []
+        else:
+            assert len(ctx["fixed_rule_texts"]) > 0
+        seen.add(src_layer)
+        if seen == {0, 1}:
+            break
+    assert seen == {0, 1}
+
+
+def test_layer_fol_task_fresh_icl_rule_context_matches_active_rules() -> None:
+    task = FOLLayerTask(
+        mode="online",
+        task_split="depth3_fresh_icl",
+        split_role="eval",
+        distance_range=(2, 2),
+        batch_size=1,
+        seed=310,
+        predicates_per_layer=4,
+        rules_per_transition=8,
+        arity_max=3,
+        vars_per_rule_max=4,
+        constants=("a", "b", "c"),
+        k_in_max=2,
+        k_out_max=2,
+        initial_ant_max=3,
+        max_n_demos=4,
+        online_prefetch_backend="sync",
+    )
+
+    def _rules_from_texts(src_layer: int, texts: list[str]) -> list[FOLLayerRule]:
+        out: list[FOLLayerRule] = []
+        for text in texts:
+            lhs, rhs = parse_clause_text(str(text))
+            out.append(
+                FOLLayerRule(
+                    src_layer=int(src_layer),
+                    dst_layer=int(src_layer) + 1,
+                    lhs=lhs,
+                    rhs=rhs,
+                )
+            )
+        return out
+
+    saw_demo_context = False
+    for _ in range(80):
+        rec = task._sample_online_record()
+        src_layer = int(rec["src_layer"])
+        assert src_layer == 0
+        ctx = rec["rule_context"]
+        active_rules = _rules_from_texts(src_layer, list(ctx["active_rule_texts"]))
+        fixed_rules = _rules_from_texts(src_layer, list(ctx["fixed_rule_texts"]))
+        demo_rules = _rules_from_texts(src_layer, list(ctx["demo_schema_texts"]))
+        gt_completion = np.asarray(rec["completions"][0], dtype=np.int32)
+
+        matched = match_rule_completion_fol(
+            rule_bank=task.rule_bank,
+            src_layer=src_layer,
+            completion_tokens=gt_completion,
+            tokenizer=task.tokenizer,
+            active_rules=active_rules,
+            fixed_rules=fixed_rules,
+            demo_rules=demo_rules,
+        )
+        assert matched.is_valid_rule
+        assert matched.match_source == "active"
+
+        if ctx["demo_schema_texts"] and ctx["demo_instance_texts"]:
+            saw_demo_context = True
+            schemas = _rules_from_texts(src_layer, list(ctx["demo_schema_texts"]))
+            for instance_text in ctx["demo_instance_texts"]:
+                lhs, rhs = parse_clause_text(str(instance_text))
+                assert any(
+                    _find_instantiation_for_rule(
+                        template=schema,
+                        lhs_ground=lhs,
+                        rhs_ground=rhs,
+                    )
+                    is not None
+                    for schema in schemas
+                )
+            break
+    assert saw_demo_context

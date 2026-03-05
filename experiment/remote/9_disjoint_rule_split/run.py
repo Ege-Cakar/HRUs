@@ -7,7 +7,6 @@ from collections import Counter
 import hashlib
 import itertools
 import json
-import re
 import sys
 import time
 from pathlib import Path
@@ -28,15 +27,15 @@ from model.ssm_bonsai import Mamba2BonsaiConfig
 from model.transformer import TransformerConfig
 from task.layer_fol import (
     AutoregressiveLogitsAdapter,
+    FOLDemoAugmentedAdapter,
     FOLLayerTask,
-    _augment_prompt_with_demos,
+    _build_tokenizer_for_split_bundle,
     compute_fol_dims,
     evaluate_layer_rollouts,
     evaluate_rule_matches,
     match_rule_completion_fol,
     sample_rollout_examples,
 )
-from task.layer_gen.util import tokenize_layer_fol
 from task.layer_gen.util.fol_rule_bank import (
     FOLDepth3ICLSplitBundle,
     build_depth3_icl_split_bundle,
@@ -53,8 +52,6 @@ from utils import (
 )
 from experiment.utils.metrics_utils import final_token_accuracy
 
-
-_LAYERED_PRED_RE = re.compile(r"r(\d+)_(\d+)$")
 
 RUN_ID = new_seed()
 print("RUN ID", RUN_ID)
@@ -142,13 +139,6 @@ MAMBA2_BONSAI_LRS = [5e-4]
 ### END TEST CONFIGS
 
 
-def _layer_from_predicate(predicate: str) -> int:
-    match = _LAYERED_PRED_RE.fullmatch(str(predicate))
-    if match is None:
-        raise ValueError(f"Unsupported layered predicate name: {predicate}")
-    return int(match.group(1))
-
-
 def _safe_mean(values: list[float]) -> float:
     if not values:
         return float("nan")
@@ -177,25 +167,6 @@ def _mean_metrics(metrics_list):
         if vals:
             out[key] = float(np.mean(vals))
     return out
-
-
-def _build_tokenizer_for_split_bundle(
-    bundle: FOLDepth3ICLSplitBundle,
-) -> tokenize_layer_fol.FOLLayerTokenizer:
-    max_vars = max(
-        int(bundle.train_bank.vars_per_rule_max),
-        int(bundle.eval_bank.vars_per_rule_max),
-    )
-    identifiers: set[str] = set(bundle.train_bank.constants) | set(bundle.eval_bank.constants)
-    identifiers.update(bundle.train_bank.predicate_arities)
-    identifiers.update(bundle.eval_bank.predicate_arities)
-    identifiers.update(f"x{idx}" for idx in range(1, int(max_vars) + 1))
-    predicate_identifiers = set(bundle.train_bank.predicate_arities)
-    predicate_identifiers.update(bundle.eval_bank.predicate_arities)
-    return tokenize_layer_fol.build_tokenizer_from_identifiers(
-        sorted(identifiers),
-        predicate_identifiers=sorted(predicate_identifiers),
-    )
 
 
 def _iter_bundle_rules(bundle: FOLDepth3ICLSplitBundle):
@@ -443,74 +414,6 @@ def make_ar_metrics_fn(*, tokenizer, rule_bank, model_fn, n_seq: int, max_comple
     return _metrics
 
 
-class DemoAugmentedAdapter:
-    """Prepend sampled demo completions before calling a base adapter."""
-
-    def __init__(
-        self,
-        *,
-        base_adapter,
-        rule_bank,
-        tokenizer,
-        min_n_demos: int,
-        max_n_demos: int,
-        max_unify_solutions: int,
-    ) -> None:
-        self.base_adapter = base_adapter
-        self.rule_bank = rule_bank
-        self.tokenizer = tokenizer
-        self.min_n_demos = int(min_n_demos)
-        self.max_n_demos = int(max_n_demos)
-        self.max_unify_solutions = int(max_unify_solutions)
-
-    def predict_completion(
-        self,
-        *,
-        model,
-        prompt_tokens,
-        tokenizer,
-        temperature: float = 0.0,
-        rng: np.random.Generator | None = None,
-    ) -> np.ndarray:
-        if self.max_n_demos <= 0:
-            return self.base_adapter.predict_completion(
-                model=model,
-                prompt_tokens=prompt_tokens,
-                tokenizer=tokenizer,
-                temperature=temperature,
-                rng=rng,
-            )
-
-        if rng is None:
-            rng = np.random.default_rng()
-
-        prompt = np.asarray(prompt_tokens, dtype=np.int32).tolist()
-        try:
-            sequent = self.tokenizer.decode_prompt(prompt)
-            src_layer = int(min(_layer_from_predicate(atom.predicate) for atom in sequent.ants))
-            prompt = _augment_prompt_with_demos(
-                prompt_tokens=prompt,
-                rule_bank=self.rule_bank,
-                tokenizer=self.tokenizer,
-                rng=rng,
-                src_layer=src_layer,
-                ants=tuple(sequent.ants),
-                min_n_demos=self.min_n_demos,
-                max_n_demos=self.max_n_demos,
-                max_unify_solutions=self.max_unify_solutions,
-            )
-        except ValueError:
-            pass
-
-        return self.base_adapter.predict_completion(
-            model=model,
-            prompt_tokens=prompt,
-            tokenizer=tokenizer,
-            temperature=temperature,
-            rng=rng,
-        )
-
-
 def make_print_fn(metric_key: str):
     def _print(step, hist):
         train_metrics = hist["train"][-1]
@@ -557,7 +460,7 @@ def _evaluate_role_for_demo(
         pad_token_id=0,
         jit_step=True,
     )
-    rollout_adapter = DemoAugmentedAdapter(
+    rollout_adapter = FOLDemoAugmentedAdapter(
         base_adapter=base_rollout_adapter,
         rule_bank=rule_bank,
         tokenizer=tokenizer,

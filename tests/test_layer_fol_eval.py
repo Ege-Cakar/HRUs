@@ -888,6 +888,7 @@ def test_match_rule_demo_rules_exact_instantiation() -> None:
     assert result.is_correct
     assert not result.wrong_rule_error
     assert not result.unknown_rule_error
+    assert result.match_source == "demo"
 
 
 def test_match_rule_demo_rules_wrong_prediction() -> None:
@@ -950,3 +951,41 @@ def test_match_rule_fresh_bank_correct() -> None:
     assert result.matched_rule is not None
     assert not result.wrong_rule_error
     assert not result.unknown_rule_error
+    assert result.match_source == "active"
+
+
+def test_match_rule_completion_uses_active_then_fixed_sources() -> None:
+    base_bank, temp_bank, _, tokenizer, rng = _fresh_demo_setup(seed=76)
+    sampled = sample_fol_problem(bank=temp_bank, distance=1, initial_ant_max=3, rng=rng)
+    while sampled.start_layer != 0:
+        sampled = sample_fol_problem(bank=temp_bank, distance=1, initial_ant_max=3, rng=rng)
+
+    src_layer = sampled.step_layers[0]
+    expected = sampled.step_rules[0].statement_text
+    active_match = match_rule_completion_fol(
+        rule_bank=base_bank,
+        src_layer=src_layer,
+        completion_tokens=tokenizer.encode_completion(expected),
+        expected_statement_text=expected,
+        tokenizer=tokenizer,
+        active_rules=list(temp_bank.transition_rules(src_layer)),
+    )
+    assert active_match.is_correct
+    assert active_match.match_source == "active"
+
+    sampled_l1 = sample_fol_problem(bank=base_bank, distance=1, initial_ant_max=3, rng=rng)
+    while sampled_l1.start_layer != 1:
+        sampled_l1 = sample_fol_problem(bank=base_bank, distance=1, initial_ant_max=3, rng=rng)
+    src_layer_l1 = sampled_l1.step_layers[0]
+    expected_l1 = sampled_l1.step_rules[0].statement_text
+    fixed_match = match_rule_completion_fol(
+        rule_bank=base_bank,
+        src_layer=src_layer_l1,
+        completion_tokens=tokenizer.encode_completion(expected_l1),
+        expected_statement_text=expected_l1,
+        tokenizer=tokenizer,
+        active_rules=[],
+        fixed_rules=list(base_bank.transition_rules(src_layer_l1)),
+    )
+    assert fixed_match.is_correct
+    assert fixed_match.match_source == "fixed"

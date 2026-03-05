@@ -26,7 +26,7 @@ import pandas as pd
 import seaborn as sns
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
@@ -43,7 +43,7 @@ from task.layer_gen.util.fol_rule_bank import (  # noqa: E402
 # Edit all settings here (no argparse by design).
 CONFIG = {
     "seed": np.random.randint(0, np.iinfo(np.int32).max),
-    "out_dir": ROOT / "task" / "layer_fol_stats" / "set",
+    "out_dir": ROOT / "task" / "interactive" / "set" / "layer_fol_stats",
     # one of: "reachability", "sensitivity", "both"
     "study_mode": "both",
     "base_rule_bank": {

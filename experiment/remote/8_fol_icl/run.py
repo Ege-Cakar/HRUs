@@ -7,7 +7,6 @@ from collections import Counter
 import hashlib
 import itertools
 import json
-import re
 import sys
 import time
 from pathlib import Path
@@ -28,17 +27,13 @@ from model.ssm_bonsai import Mamba2BonsaiConfig
 from model.transformer import TransformerConfig
 from task.layer_fol import (
     AutoregressiveLogitsAdapter,
+    FOLDemoAugmentedAdapter,
     FOLLayerTask,
-    FOLAtom,
-    FOLLayerRule,
-    FOLRuleBank,
-    _augment_prompt_with_demos,
-    _find_lhs_substitutions_for_facts,
-    _subst_binds_rhs_variables,
     compute_fol_dims,
     evaluate_layer_rollouts,
     evaluate_rule_matches,
     match_rule_completion_fol,
+    predicted_rule_reaches_goal,
     sample_rollout_examples,
 )
 from task.layer_gen.util import tokenize_layer_fol
@@ -54,9 +49,6 @@ from utils import (
     summarize_rule_match_metrics,
 )
 from experiment.utils.metrics_utils import final_token_accuracy
-
-
-_LAYERED_PRED_RE = re.compile(r"r(\d+)_(\d+)$")
 
 RUN_ID = new_seed()
 print("RUN ID", RUN_ID)
@@ -137,13 +129,6 @@ MAMBA2_BONSAI_LRS = [5e-4]
 # MAMBA2_BONSAI_SCAN_CHUNK_LEN = [16]
 # MAMBA2_BONSAI_LRS = [3e-4]
 ### END TEST CONFIGS
-
-
-def _layer_from_predicate(predicate: str) -> int:
-    match = _LAYERED_PRED_RE.fullmatch(str(predicate))
-    if match is None:
-        raise ValueError(f"Unsupported layered predicate name: {predicate}")
-    return int(match.group(1))
 
 
 def _safe_mean(values: list[float]) -> float:
@@ -229,158 +214,6 @@ def _summarize_task_probe(probe: _TaskProbe) -> dict:
         "max_seq_len": int(max(seq_lens)) if seq_lens else None,
         "top_seq_lens": top_seq_lens,
     }
-
-
-def _facts_key(facts: tuple[FOLAtom, ...]) -> tuple[str, ...]:
-    return tuple(sorted(atom.text for atom in facts))
-
-
-def _reachable_goal_exact_steps(
-    *,
-    rule_bank: FOLRuleBank,
-    layer: int,
-    facts: tuple[FOLAtom, ...],
-    goal: FOLAtom,
-    steps_remaining: int,
-    max_unify_solutions: int,
-    memo: dict[tuple[int, int, tuple[str, ...]], bool],
-) -> bool:
-    key = (int(layer), int(steps_remaining), _facts_key(facts))
-    cached = memo.get(key)
-    if cached is not None:
-        return bool(cached)
-
-    if int(steps_remaining) == 0:
-        out = bool(goal in set(facts))
-        memo[key] = out
-        return out
-
-    if int(layer) >= int(rule_bank.n_layers) - 1:
-        memo[key] = False
-        return False
-
-    facts_tuple = tuple(facts)
-    for rule in rule_bank.transition_rules(int(layer)):
-        substitutions = _find_lhs_substitutions_for_facts(
-            lhs=rule.lhs,
-            facts=facts_tuple,
-            max_solutions=int(max_unify_solutions),
-        )
-        if not substitutions:
-            continue
-
-        for subst in substitutions:
-            if not _subst_binds_rhs_variables(rule=rule, subst=subst):
-                continue
-            next_rule = rule.instantiate(subst)
-            next_facts = tuple(next_rule.rhs)
-            if _reachable_goal_exact_steps(
-                rule_bank=rule_bank,
-                layer=int(layer) + 1,
-                facts=next_facts,
-                goal=goal,
-                steps_remaining=int(steps_remaining) - 1,
-                max_unify_solutions=max_unify_solutions,
-                memo=memo,
-            ):
-                memo[key] = True
-                return True
-
-    memo[key] = False
-    return False
-
-
-def _predicted_rule_reaches_goal(
-    *,
-    rule_bank: FOLRuleBank,
-    matched_rule: FOLLayerRule,
-    goal: FOLAtom,
-    goal_layer: int,
-    max_unify_solutions: int,
-) -> bool:
-    dst_layer = int(matched_rule.dst_layer)
-    remaining = int(goal_layer) - dst_layer
-    if remaining < 0:
-        return False
-
-    memo: dict[tuple[int, int, tuple[str, ...]], bool] = {}
-    return _reachable_goal_exact_steps(
-        rule_bank=rule_bank,
-        layer=dst_layer,
-        facts=tuple(matched_rule.rhs),
-        goal=goal,
-        steps_remaining=remaining,
-        max_unify_solutions=int(max_unify_solutions),
-        memo=memo,
-    )
-
-
-class DemoAugmentedAdapter:
-    """Prepend sampled demo completions before calling a base adapter."""
-
-    def __init__(
-        self,
-        *,
-        base_adapter,
-        rule_bank: FOLRuleBank,
-        tokenizer,
-        min_n_demos: int,
-        max_n_demos: int,
-        max_unify_solutions: int,
-    ) -> None:
-        self.base_adapter = base_adapter
-        self.rule_bank = rule_bank
-        self.tokenizer = tokenizer
-        self.min_n_demos = int(min_n_demos)
-        self.max_n_demos = int(max_n_demos)
-        self.max_unify_solutions = int(max_unify_solutions)
-
-    def predict_completion(
-        self,
-        *,
-        model,
-        prompt_tokens,
-        tokenizer,
-        temperature: float = 0.0,
-        rng: np.random.Generator | None = None,
-    ) -> np.ndarray:
-        if self.max_n_demos <= 0:
-            return self.base_adapter.predict_completion(
-                model=model,
-                prompt_tokens=prompt_tokens,
-                tokenizer=tokenizer,
-                temperature=temperature,
-                rng=rng,
-            )
-
-        if rng is None:
-            rng = np.random.default_rng()
-
-        prompt = np.asarray(prompt_tokens, dtype=np.int32).tolist()
-        try:
-            sequent = self.tokenizer.decode_prompt(prompt)
-            src_layer = int(min(_layer_from_predicate(atom.predicate) for atom in sequent.ants))
-            prompt = _augment_prompt_with_demos(
-                prompt_tokens=prompt,
-                rule_bank=self.rule_bank,
-                tokenizer=self.tokenizer,
-                rng=rng,
-                src_layer=src_layer,
-                ants=tuple(sequent.ants),
-                min_n_demos=self.min_n_demos,
-                max_n_demos=self.max_n_demos,
-                max_unify_solutions=self.max_unify_solutions,
-            )
-        except ValueError:
-            pass
-
-        return self.base_adapter.predict_completion(
-            model=model,
-            prompt_tokens=prompt,
-            tokenizer=tokenizer,
-            temperature=temperature,
-            rng=rng,
-        )
 
 
 def _build_shared_rule_bank(save_dir: Path):
@@ -566,7 +399,7 @@ def make_ar_metrics_fn(*, tokenizer, rule_bank, model_fn, n_seq: int, max_comple
                 continue
 
             n_valid += 1
-            if _predicted_rule_reaches_goal(
+            if predicted_rule_reaches_goal(
                 rule_bank=rule_bank,
                 matched_rule=matched.matched_rule,
                 goal=goal,
@@ -647,7 +480,7 @@ def _evaluate_by_distance_for_demo(
         pad_token_id=0,
         jit_step=True,
     )
-    rollout_adapter = DemoAugmentedAdapter(
+    rollout_adapter = FOLDemoAugmentedAdapter(
         base_adapter=base_rollout_adapter,
         rule_bank=rule_bank,
         tokenizer=tokenizer,

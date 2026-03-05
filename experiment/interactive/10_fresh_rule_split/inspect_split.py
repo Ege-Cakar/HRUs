@@ -93,6 +93,24 @@ def _demo_segments_to_rules(
     return out
 
 
+def _rule_texts_to_rules(*, src_layer: int, rule_texts: list[str]) -> list[FOLLayerRule]:
+    out: list[FOLLayerRule] = []
+    for text in rule_texts:
+        try:
+            lhs, rhs = parse_clause_text(str(text))
+            out.append(
+                FOLLayerRule(
+                    src_layer=int(src_layer),
+                    dst_layer=int(src_layer) + 1,
+                    lhs=lhs,
+                    rhs=rhs,
+                )
+            )
+        except ValueError:
+            continue
+    return out
+
+
 def preview_record(task: FOLLayerTask, record: dict, *, role: str) -> None:
     tokenizer = task.tokenizer
     prompt = np.asarray(record["prompt"], dtype=np.int32)
@@ -348,7 +366,7 @@ def inspect_samples(task, *, role: str, n_samples: int):
     rule_bank = task.rule_bank
     for i in range(n_samples):
         record = task._sample_online_record()
-        effective_bank = record.get("_temp_bank", rule_bank)
+        rule_context = record.get("rule_context", {})
         prompt = np.asarray(record["prompt"], dtype=np.int32)
         completion_gt = np.asarray(record["completions"][0], dtype=np.int32)
         src_layer = int(record["src_layer"])
@@ -379,15 +397,34 @@ def inspect_samples(task, *, role: str, n_samples: int):
 
         # Match predicted completion against rule bank
         matched = match_rule_completion_fol(
-            rule_bank=effective_bank,
+            rule_bank=rule_bank,
             src_layer=src_layer,
             completion_tokens=pred_completion,
             expected_statement_text=gt_text,
             tokenizer=tokenizer,
-            demo_rules=_demo_segments_to_rules(
-                demo_segments=demo_segments,
-                src_layer=src_layer,
-                tokenizer=tokenizer,
+            active_rules=(
+                _rule_texts_to_rules(
+                    src_layer=src_layer,
+                    rule_texts=list(rule_context.get("active_rule_texts", [])),
+                )
+                if "active_rule_texts" in rule_context
+                else None
+            ),
+            fixed_rules=(
+                _rule_texts_to_rules(
+                    src_layer=src_layer,
+                    rule_texts=list(rule_context.get("fixed_rule_texts", [])),
+                )
+                if "fixed_rule_texts" in rule_context
+                else None
+            ),
+            demo_rules=(
+                _rule_texts_to_rules(
+                    src_layer=src_layer,
+                    rule_texts=list(rule_context.get("demo_schema_texts", [])),
+                )
+                if "demo_schema_texts" in rule_context
+                else None
             ),
         )
 
