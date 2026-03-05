@@ -10,6 +10,7 @@ from task.layer_fol import (
     CompletionLogitsAdapter,
     FAILURE_WRONG_RULE_ERROR,
     FOLLayerRolloutExample,
+    _find_instantiation_for_rule,
     evaluate_layer_rollouts_fol,
     evaluate_rule_matches_fol,
     match_rule_completion_fol,
@@ -552,7 +553,7 @@ def test_schema_match_with_demo_rules() -> None:
     # Schema should match against bank rules since the structural pattern is the same
     assert not result_no_demo.unknown_rule_error
 
-    # With demo_rules: should also schema-match
+    # With demo_rules: should now exact-match the demo rule
     result_with_demo = match_rule_completion_fol(
         rule_bank=bank,
         src_layer=src_layer,
@@ -561,7 +562,9 @@ def test_schema_match_with_demo_rules() -> None:
         demo_rules=[demo_rule],
     )
     assert not result_with_demo.unknown_rule_error
-    assert result_with_demo.wrong_rule_error
+    assert result_with_demo.matched_rule is not None
+    # No expected_statement_text provided, so is_correct=True
+    assert result_with_demo.is_correct
 
 
 def test_rollout_wrong_rule_failure_reason() -> None:
@@ -678,3 +681,141 @@ def test_rollout_succeeds_with_fresh_predicate_bank() -> None:
     assert result.goal_reached
     assert result.failure_reason is None
     assert result.n_steps == sampled.distance
+
+
+# ── Demo-rule exact matching tests ─────────────────────────────────────────────
+
+
+def _fresh_demo_setup(seed: int = 70):
+    """Build a base bank + fresh layer-0 bank and return useful objects."""
+    rng = np.random.default_rng(seed)
+    base_bank = build_random_fol_rule_bank(
+        n_layers=3,
+        predicates_per_layer=4,
+        rules_per_transition=8,
+        arity_max=3,
+        vars_per_rule_max=4,
+        constants=("a", "b", "c"),
+        k_in_max=2,
+        k_out_max=2,
+        rng=rng,
+    )
+    fresh_preds = generate_fresh_predicate_names(4, rng)
+    temp_bank = build_fresh_layer0_bank(
+        base_bank=base_bank,
+        fresh_predicates=fresh_preds,
+        rules_per_transition=8,
+        k_in_min=1,
+        k_in_max=2,
+        k_out_min=1,
+        k_out_max=2,
+        rng=rng,
+    )
+    tokenizer = tok.build_tokenizer_from_rule_bank(temp_bank)
+    return base_bank, temp_bank, fresh_preds, tokenizer, rng
+
+
+def test_match_rule_demo_rules_exact_instantiation() -> None:
+    """A prediction matching a demo rule (with fresh predicates not in the base
+    bank) should be classified as correct when demo_rules are provided."""
+    base_bank, temp_bank, fresh_preds, tokenizer, rng = _fresh_demo_setup(seed=70)
+
+    sampled = sample_fol_problem(
+        bank=temp_bank, distance=1, initial_ant_max=3, rng=rng,
+    )
+    # Ensure we got a layer-0 rule involving fresh predicates
+    while sampled.start_layer != 0:
+        sampled = sample_fol_problem(
+            bank=temp_bank, distance=1, initial_ant_max=3, rng=rng,
+        )
+
+    src_layer = sampled.step_layers[0]
+    expected = sampled.step_rules[0].statement_text
+
+    # The demo rule is the *template* (uninstantiated) rule from temp_bank
+    demo_rule = None
+    for rule in temp_bank.transition_rules(src_layer):
+        subst = _find_instantiation_for_rule(
+            template=rule,
+            lhs_ground=sampled.step_rules[0].lhs,
+            rhs_ground=sampled.step_rules[0].rhs,
+        )
+        if subst is not None:
+            demo_rule = rule
+            break
+    assert demo_rule is not None, "Could not find template rule for sampled problem"
+
+    result = match_rule_completion_fol(
+        rule_bank=base_bank,
+        src_layer=src_layer,
+        completion_tokens=tokenizer.encode_completion(expected),
+        expected_statement_text=expected,
+        tokenizer=tokenizer,
+        demo_rules=[demo_rule],
+    )
+    assert result.matched_rule is not None, "Expected matched_rule via demo_rules"
+    assert result.is_correct
+    assert not result.wrong_rule_error
+    assert not result.unknown_rule_error
+
+
+def test_match_rule_demo_rules_wrong_prediction() -> None:
+    """A prediction that matches a different demo rule (not the expected one)
+    should be classified as wrong_rule_error with matched_rule set."""
+    base_bank, temp_bank, fresh_preds, tokenizer, rng = _fresh_demo_setup(seed=71)
+
+    # Collect two distinct layer-0 rules from temp_bank
+    layer0_rules = list(temp_bank.transition_rules(0))
+    assert len(layer0_rules) >= 2, "Need at least 2 layer-0 rules"
+
+    rule_a = layer0_rules[0]
+    rule_b = layer0_rules[1]
+
+    # Instantiate both rules
+    consts = list(temp_bank.constants)
+    subst_a = {var: consts[i % len(consts)] for i, var in enumerate(sorted(rule_a.variables()))}
+    inst_a = rule_a.instantiate(subst_a)
+    subst_b = {var: consts[i % len(consts)] for i, var in enumerate(sorted(rule_b.variables()))}
+    inst_b = rule_b.instantiate(subst_b)
+
+    # Predict inst_a but expect inst_b
+    result = match_rule_completion_fol(
+        rule_bank=base_bank,
+        src_layer=0,
+        completion_tokens=tokenizer.encode_completion(inst_a.statement_text),
+        expected_statement_text=inst_b.statement_text,
+        tokenizer=tokenizer,
+        demo_rules=[rule_a, rule_b],
+    )
+    assert result.matched_rule is not None, "Expected matched_rule via demo_rules"
+    assert result.wrong_rule_error
+    assert not result.is_correct
+
+
+def test_match_rule_fresh_bank_correct() -> None:
+    """Using temp_bank directly as rule_bank, a correct fresh-predicate
+    prediction should be classified as correct."""
+    base_bank, temp_bank, fresh_preds, tokenizer, rng = _fresh_demo_setup(seed=72)
+
+    sampled = sample_fol_problem(
+        bank=temp_bank, distance=1, initial_ant_max=3, rng=rng,
+    )
+    while sampled.start_layer != 0:
+        sampled = sample_fol_problem(
+            bank=temp_bank, distance=1, initial_ant_max=3, rng=rng,
+        )
+
+    src_layer = sampled.step_layers[0]
+    expected = sampled.step_rules[0].statement_text
+
+    result = match_rule_completion_fol(
+        rule_bank=temp_bank,
+        src_layer=src_layer,
+        completion_tokens=tokenizer.encode_completion(expected),
+        expected_statement_text=expected,
+        tokenizer=tokenizer,
+    )
+    assert result.is_correct
+    assert result.matched_rule is not None
+    assert not result.wrong_rule_error
+    assert not result.unknown_rule_error

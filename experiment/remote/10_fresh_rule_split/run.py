@@ -31,7 +31,6 @@ from task.layer_fol import (
     _build_tokenizer_for_fresh_icl,
     _fresh_predicate_sentinels,
     compute_fol_dims,
-    evaluate_rule_matches,
     run_layer_rollout_fol,
     sample_rollout_examples,
 )
@@ -42,11 +41,7 @@ from task.layer_gen.util.fol_rule_bank import (
 )
 from train import Case, ce_mask, warmup_cosine_schedule
 
-from utils import (
-    _layer_from_predicate,
-    extract_ar_rule_match_inputs,
-    summarize_rule_match_metrics,
-)
+from utils import _layer_from_predicate
 from experiment.utils.metrics_utils import final_token_accuracy
 
 
@@ -261,57 +256,6 @@ def make_ar_light_metrics_fn():
     return _metrics
 
 
-def make_ar_metrics_fn(*, tokenizer, rule_bank, model_fn, n_seq: int, max_completion_len: int, adapter=None):
-    if adapter is None:
-        adapter = AutoregressiveLogitsAdapter(
-            n_seq=int(n_seq),
-            max_completion_len=int(max_completion_len),
-            pad_token_id=0,
-            jit_step=True,
-        )
-
-    def _metrics(optimizer, batch, loss=None):
-        _ = loss
-        xs, labels = batch
-        logits = optimizer.model(xs)
-
-        loss_val = ce_mask(logits, labels)
-        preds = jnp.argmax(logits, axis=-1)
-
-        mask = labels != 0
-        total = jnp.maximum(jnp.sum(mask), 1)
-        token_acc = jnp.sum((preds == labels) & mask) / total
-
-        final_acc = final_token_accuracy(preds, labels)
-        seq_correct = (preds == labels) | (~mask)
-        seq_exact_acc = jnp.mean(jnp.all(seq_correct, axis=1))
-
-        src_layers, pred_completions, expected_statements = extract_ar_rule_match_inputs(
-            preds=np.asarray(preds),
-            labels=np.asarray(labels),
-            xs=np.asarray(xs),
-            tokenizer=tokenizer,
-        )
-        rule_matches = evaluate_rule_matches(
-            rule_bank=rule_bank,
-            src_layers=src_layers,
-            completion_tokens=pred_completions,
-            expected_statement_texts=expected_statements,
-            tokenizer=tokenizer,
-        )
-        rule_metrics = summarize_rule_match_metrics(rule_matches)
-
-        return {
-            "loss": loss_val,
-            "token_acc": token_acc,
-            "final_token_acc": final_acc,
-            "seq_exact_acc": seq_exact_acc,
-            **rule_metrics,
-        }
-
-    return _metrics
-
-
 class DemoAugmentedAdapter:
     """Prepend sampled demo completions before calling a base adapter."""
 
@@ -422,14 +366,7 @@ def _evaluate_role_for_demo(
             jit_step=True,
         )
 
-    metrics_fn = make_ar_metrics_fn(
-        tokenizer=tokenizer,
-        rule_bank=rule_bank,
-        model_fn=model_fn,
-        n_seq=int(n_seq_ar),
-        max_completion_len=int(max_completion_len),
-        adapter=shared_adapter,
-    )
+    metrics_fn = make_ar_light_metrics_fn()
 
     seq_len_counts: Counter[int] = Counter()
     n_eval_batches = 0

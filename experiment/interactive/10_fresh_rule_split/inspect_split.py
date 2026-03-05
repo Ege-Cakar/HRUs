@@ -34,7 +34,7 @@ from task.layer_gen.util.fol_rule_bank import (
     build_random_fol_rule_bank,
     generate_fresh_predicate_names,
 )
-from train import train
+from train import train, warmup_cosine_schedule
 
 
 # <codecell>
@@ -46,19 +46,18 @@ FRESH_ICL_CFG = {
     "predicates_per_layer": 16,
     "rules_per_transition": 32,
     "fresh_icl_n_predicates": 16,
-    "arity_max": 3,
+    "arity_max": 0,
     "vars_per_rule_max": 6,
-    "k_in_max": 3,
-    "k_out_max": 5,
+    "k_in_max": 1,
+    "k_out_max": 2,
     "constants": tuple(f"p{i}" for i in range(32)),
 }
 TASK_CFG = {
     "distance_range": (2, 2),
-    "batch_size": 1,
-    "initial_ant_max": 5,
+    "initial_ant_max": 2,
     "train_min_n_demos": 4,
-    "train_max_n_demos": 4,
-    "eval_max_n_demos": 4,
+    "train_max_n_demos": 8,
+    "eval_max_n_demos": 8,
 }
 
 
@@ -111,6 +110,7 @@ base_bank = build_random_fol_rule_bank(
     k_out_min=1,
     k_out_max=int(FRESH_ICL_CFG["k_out_max"]),
     rng=np.random.default_rng(int(FRESH_ICL_CFG["seed"])),
+    arity_min=0
 )
 print("base bank: n_layers=3, predicates_per_layer=", FRESH_ICL_CFG["predicates_per_layer"])
 
@@ -200,14 +200,15 @@ print("dims_eval:", dims_eval)
 print(f"N_VOCAB={N_VOCAB}  N_SEQ={N_SEQ}  MAX_COMPLETION_LEN={MAX_COMPLETION_LEN}")
 
 TRAIN_CFG = {
-    "n_layers": 4,
-    "n_hidden": 256,
-    "n_heads": 8,
-    "lr": 5e-4,
-    "train_iters": 5000,
+    "n_layers": 12,
+    "n_hidden": 768,
+    "n_heads": 12,
+    # "lr": 5e-4,
+    "lr": warmup_cosine_schedule(5e-4, 10_000),
+    "train_iters": 10_000,
     "test_every": 1000,
     "test_iters": 1,
-    "batch_size": 16,
+    "batch_size": 32,
     "train_max_n_demos": int(TASK_CFG["train_max_n_demos"]),
     "eval_max_n_demos": int(TASK_CFG["eval_max_n_demos"]),
 }
@@ -237,6 +238,7 @@ train_task_ar = FOLLayerTask(
     constants=tuple(str(c) for c in FRESH_ICL_CFG["constants"]),
     k_in_max=int(FRESH_ICL_CFG["k_in_max"]),
     k_out_max=int(FRESH_ICL_CFG["k_out_max"]),
+    arity_min=0
 )
 
 eval_task_ar = FOLLayerTask(
@@ -260,6 +262,7 @@ eval_task_ar = FOLLayerTask(
     constants=tuple(str(c) for c in FRESH_ICL_CFG["constants"]),
     k_in_max=int(FRESH_ICL_CFG["k_in_max"]),
     k_out_max=int(FRESH_ICL_CFG["k_out_max"]),
+    arity_min=0
 )
 
 # <codecell>
@@ -326,6 +329,7 @@ def inspect_samples(task, *, role: str, n_samples: int):
     rule_bank = task.rule_bank
     for i in range(n_samples):
         record = task._sample_online_record()
+        effective_bank = record.get("_temp_bank", rule_bank)
         prompt = np.asarray(record["prompt"], dtype=np.int32)
         completion_gt = np.asarray(record["completions"][0], dtype=np.int32)
         src_layer = int(record["src_layer"])
@@ -356,7 +360,7 @@ def inspect_samples(task, *, role: str, n_samples: int):
 
         # Match predicted completion against rule bank
         matched = match_rule_completion_fol(
-            rule_bank=rule_bank,
+            rule_bank=effective_bank,
             src_layer=src_layer,
             completion_tokens=pred_completion,
             expected_statement_text=gt_text,

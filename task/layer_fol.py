@@ -1678,6 +1678,7 @@ class FOLLayerTask:
             "src_layer": int(src_layer),
             "prompt": np.asarray(prompt, dtype=np.int32),
             "completions": [np.asarray(completion, dtype=np.int32)],
+            "_temp_bank": temp_bank,
         }
 
     @property
@@ -2302,6 +2303,16 @@ def match_rule_completion_fol(
         lhs_ground=lhs_ground,
         rhs_ground=rhs_ground,
     )
+    if matched_rule is None and demo_rules:
+        for dr in demo_rules:
+            subst = _find_instantiation_for_rule(
+                template=dr,
+                lhs_ground=lhs_ground,
+                rhs_ground=rhs_ground,
+            )
+            if subst is not None:
+                matched_rule = dr.instantiate(subst)
+                break
     if matched_rule is None:
         candidates = list(rule_bank.transition_rules(src_layer))
         candidates.extend(demo_rules or ())
