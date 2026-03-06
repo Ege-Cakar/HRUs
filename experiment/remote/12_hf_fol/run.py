@@ -1,4 +1,7 @@
-"""HuggingFace GPT-2 on FOL fresh-ICL (distributed via Accelerate).
+"""Multi-model finetuning sweep on FOL fresh-ICL (distributed via Accelerate).
+
+Compares pretrained Pythia 1B (Transformer) vs Mamba 2 1.3B (SSM) finetuned
+on FOL data.  The model is selected by ``RUN_SPLIT`` index (sys.argv[1]).
 
 Each GPU rank creates its own FOLLayerTask with a unique seed, so no
 DataLoader/sampler wrapping is needed.  The Accelerate library handles
@@ -7,8 +10,8 @@ gradient sync across ranks.
 Usage:
     # Single GPU test:
     python run.py
-    # Multi-GPU via torchrun:
-    python -m torch.distributed.run --nproc_per_node=N run.py 1
+    # Multi-GPU via accelerate:
+    accelerate launch --num_processes=N run.py 1
     # Via Bolt:
     python bolt/submit.py 12_hf_fol --auto --distributed
 """
@@ -39,12 +42,32 @@ from task.layer_gen.util.fol_rule_bank import build_random_fol_rule_bank
 from train_hf import HFTrainConfig, train_hf
 
 
+# ── Model configs ────────────────────────────────────────────────────────
+
+MODEL_CONFIGS = [
+    {
+        "name": "pythia-1b",
+        "model_name_or_path": "EleutherAI/pythia-1b",
+        "lr": 1e-5,
+    },
+    {
+        "name": "mamba2-1.3b",
+        "model_name_or_path": "state-spaces/mamba2-1.3b",
+        "lr": 1e-5,
+    },
+]
+
+RUN_SPLIT = 2  # one per model
+
+
 # ── Experiment parameters ───────────────────────────────────────────────
+
+run_idx = int(sys.argv[1]) - 1 if len(sys.argv) > 1 else 0
+model_cfg = MODEL_CONFIGS[run_idx % len(MODEL_CONFIGS)]
 
 RUN_ID = new_seed()
 print("RUN ID", RUN_ID)
-
-RUN_SPLIT = 1
+print(f"Model config [{run_idx}]: {model_cfg}")
 
 BATCH_SIZE = 16
 TRAIN_ITERS = 10_000
@@ -52,10 +75,10 @@ TEST_EVERY = 1_000
 TEST_ITERS = 2
 GRAD_ACCUM_STEPS = 2
 
-MODEL_NAME = "gpt2"
-FROM_SCRATCH = True
-TOKENIZE_MODE = "direct"
-LR = 3e-4
+MODEL_NAME = model_cfg["model_name_or_path"]
+FROM_SCRATCH = False
+TOKENIZE_MODE = "native"
+LR = model_cfg["lr"]
 WEIGHT_DECAY = 0.01
 WARMUP_FRAC = 0.1
 MAX_GRAD_NORM = 1.0
@@ -94,6 +117,10 @@ BASE_SEED = 1000
 # TRAIN_MAX_N_DEMOS = 4
 # EVAL_MAX_N_DEMOS = 4
 # MIXED_PRECISION = "no"
+# MODEL_NAME = "gpt2"
+# FROM_SCRATCH = True
+# TOKENIZE_MODE = "direct"
+# LR = 3e-4
 ### END TEST CONFIGS
 
 
@@ -242,6 +269,7 @@ model, hist = train_hf(
     hf_config,
     train_task,
     test_iter=eval_task,
+    fol_tokenizer=fol_tokenizer,
     vocab_size=N_VOCAB,
     accelerator=accelerator,
     seed=int(RUN_ID),
@@ -259,6 +287,7 @@ if accelerator.is_main_process:
 
     row = {
         "run_id": RUN_ID,
+        "model_config_name": model_cfg["name"],
         "model_name": MODEL_NAME,
         "from_scratch": FROM_SCRATCH,
         "tokenize_mode": TOKENIZE_MODE,
@@ -292,7 +321,7 @@ if accelerator.is_main_process:
         },
     }
 
-    out_path = save_dir / f"res.{RUN_ID}.pkl"
+    out_path = save_dir / f"res.{model_cfg['name']}.{RUN_ID}.pkl"
     pd.DataFrame([row]).to_pickle(out_path)
     print(f"Results saved to {out_path}")
 

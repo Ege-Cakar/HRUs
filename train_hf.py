@@ -22,6 +22,15 @@ from transformers import (
 )
 
 
+_SSM_MODEL_TYPES = {"mamba", "mamba2"}
+
+
+def _uses_attention_mask(model):
+    """Check whether the model accepts attention_mask (False for SSMs like Mamba)."""
+    model_type = getattr(model.config, "model_type", "")
+    return model_type not in _SSM_MODEL_TYPES
+
+
 @dataclass
 class HFTrainConfig:
     model_name_or_path: str = "gpt2"
@@ -115,7 +124,7 @@ def _build_model(config: HFTrainConfig, vocab_size: int | None = None):
 # Eval helper
 # ---------------------------------------------------------------------------
 
-def _eval_batches(model, adapter, test_iter, test_iters, accelerator):
+def _eval_batches(model, adapter, test_iter, test_iters, accelerator, uses_attn=True):
     """Run test_iters batches and return mean loss and token accuracy."""
     model.eval()
     total_loss = 0.0
@@ -128,9 +137,10 @@ def _eval_batches(model, adapter, test_iter, test_iters, accelerator):
             batch = adapter(xs, ys)
             batch = {k: v.to(accelerator.device) for k, v in batch.items()}
 
+            attn_mask = batch.get("attention_mask") if uses_attn else None
             logits = model(
                 input_ids=batch["input_ids"],
-                attention_mask=batch.get("attention_mask"),
+                attention_mask=attn_mask,
             ).logits
 
             labels = batch["labels"]
@@ -236,6 +246,7 @@ def train_hf(
 
     # --- Model ---
     model = _build_model(config, vocab_size=vocab_size)
+    uses_attn = _uses_attention_mask(model)
     model.train()
 
     # --- Optimizer & scheduler ---
@@ -268,9 +279,10 @@ def train_hf(
             batch = adapter(xs, ys)
             batch = {k: v.to(accelerator.device) for k, v in batch.items()}
 
+            attn_mask = batch.get("attention_mask") if uses_attn else None
             logits = model(
                 input_ids=batch["input_ids"],
-                attention_mask=batch.get("attention_mask"),
+                attention_mask=attn_mask,
             ).logits
 
             loss = F.cross_entropy(
@@ -292,9 +304,11 @@ def train_hf(
         if _should_eval(step, config.train_iters, config.test_every):
             train_metrics = _eval_batches(
                 model, adapter, train_iter, config.test_iters, accelerator,
+                uses_attn=uses_attn,
             )
             test_metrics = _eval_batches(
                 model, adapter, test_iter, config.test_iters, accelerator,
+                uses_attn=uses_attn,
             )
 
             hist["train"].append(train_metrics)
