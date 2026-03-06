@@ -51,11 +51,15 @@ MODEL_CONFIGS = [
         "name": "pythia-1b",
         "model_name_or_path": "EleutherAI/pythia-1b",
         "lr": 1e-5,
+        "torch_dtype": "bfloat16",
+        "attn_implementation": "flash_attention_2",
     },
     {
         "name": "mamba2-1.3b",
-        "model_name_or_path": "state-spaces/mamba2-1.3b",
+        # "model_name_or_path": "state-spaces/mamba2-1.3b",
+        "model_name_or_path": "AntonV/mamba2-1.3b-hf",
         "lr": 1e-5,
+        "torch_dtype": "bfloat16",
     },
 ]
 
@@ -298,6 +302,8 @@ hf_config = HFTrainConfig(
     grad_accum_steps=GRAD_ACCUM_STEPS,
     mixed_precision=MIXED_PRECISION,
     use_tqdm=True,
+    torch_dtype=model_cfg.get("torch_dtype"),
+    attn_implementation=model_cfg.get("attn_implementation"),
 )
 wandb_cfg = make_experiment_wandb_config(
     enabled=USE_WANDB,

@@ -50,6 +50,8 @@ class HFTrainConfig:
     mixed_precision: str = "bf16"
     use_tqdm: bool = False
     max_seq_len: int | None = None
+    torch_dtype: str | None = None
+    attn_implementation: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -111,13 +113,21 @@ def _make_native_adapter(fol_tokenizer, hf_tokenizer, max_seq_len):
 
 def _build_model(config: HFTrainConfig, vocab_size: int | None = None):
     """Build or load a HuggingFace causal LM based on config."""
+    extra_kwargs = {}
+    if config.torch_dtype is not None:
+        extra_kwargs["torch_dtype"] = getattr(torch, config.torch_dtype)
+    if config.attn_implementation is not None:
+        extra_kwargs["attn_implementation"] = config.attn_implementation
+
     if config.from_scratch:
         model_cfg = AutoConfig.from_pretrained(config.model_name_or_path)
         if config.tokenize_mode == "direct" and vocab_size is not None:
             model_cfg.vocab_size = vocab_size
-        model = AutoModelForCausalLM.from_config(model_cfg)
+        model = AutoModelForCausalLM.from_config(model_cfg, **extra_kwargs)
     else:
-        model = AutoModelForCausalLM.from_pretrained(config.model_name_or_path)
+        model = AutoModelForCausalLM.from_pretrained(
+            config.model_name_or_path, **extra_kwargs
+        )
     return model
 
 

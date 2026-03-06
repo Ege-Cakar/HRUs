@@ -46,5 +46,6 @@ hf = [
     "torch>=2.2",
     "transformers>=4.40",
     "accelerate>=0.30",
-    "mamba-ssm>=2.0",
+    "mamba-ssm[causal-conv1d]>=2.0",
+    "flash-attn>=2.5",
 ]
