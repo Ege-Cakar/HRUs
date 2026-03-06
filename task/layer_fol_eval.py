@@ -25,14 +25,40 @@ def completion_is_valid_for_layer_fol(
     src_layer: int,
     completion_tokens: list[int] | np.ndarray,
     tokenizer: tokenize_layer_fol.FOLLayerTokenizer | None = None,
+    completion_format: str = "single",
+    prompt_tokens: list[int] | np.ndarray | None = None,
+    active_rules: Iterable[FOLLayerRule] | None = None,
+    fixed_rules: Iterable[FOLLayerRule] | None = None,
+    demo_rules: Iterable[FOLLayerRule] | None = None,
 ) -> bool:
-    result = match_rule_completion_fol(
+    completion_format = str(completion_format)
+    if completion_format == "single":
+        result = match_rule_completion_fol(
+            rule_bank=rule_bank,
+            src_layer=src_layer,
+            completion_tokens=completion_tokens,
+            tokenizer=tokenizer,
+            active_rules=active_rules,
+            fixed_rules=fixed_rules,
+            demo_rules=demo_rules,
+        )
+        return result.is_valid_rule
+    if completion_format != "full":
+        raise ValueError(
+            f"completion_format must be 'single' or 'full', got {completion_format!r}"
+        )
+    if prompt_tokens is None:
+        raise ValueError("prompt_tokens are required for completion_format='full'.")
+    result = validate_completion_path_fol(
         rule_bank=rule_bank,
-        src_layer=src_layer,
+        prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
         tokenizer=tokenizer,
+        active_rules=active_rules,
+        fixed_rules=fixed_rules,
+        demo_rules=demo_rules,
     )
-    return result.is_valid_rule
+    return bool(result.success)
 
 
 completion_is_valid_for_layer = completion_is_valid_for_layer_fol
@@ -91,6 +117,46 @@ class FOLRuleMatchMetrics:
     unknown_rule_error_rate: float
     wrong_rule_error_rate: float
     results: tuple[FOLRuleMatchResult, ...]
+
+
+@dataclass(frozen=True)
+class FOLCompletionPathStep:
+    step_idx: int
+    src_layer: int
+    decoded_statement: str | None
+    matched_rule_statement: str | None
+    decode_error: bool
+    unknown_rule_error: bool
+    inapplicable_rule_error: bool
+    goal_reached: bool
+
+
+@dataclass(frozen=True)
+class FOLCompletionPathResult:
+    success: bool
+    failure_reason: str | None
+    n_steps: int
+    goal_reached: bool
+    final_layer: int
+    final_facts: tuple[str, ...]
+    steps: tuple[FOLCompletionPathStep, ...]
+
+
+@dataclass(frozen=True)
+class FOLCompletionPathMetrics:
+    n_examples: int
+    n_success: int
+    n_failure_decode_error: int
+    n_failure_unknown_rule_error: int
+    n_failure_inapplicable_rule_error: int
+    n_failure_goal_not_reached: int
+    success_rate: float
+    decode_error_rate: float
+    unknown_rule_error_rate: float
+    inapplicable_rule_error_rate: float
+    goal_not_reached_rate: float
+    avg_steps: float
+    results: tuple[FOLCompletionPathResult, ...]
 
 
 @dataclass(frozen=True)
@@ -648,6 +714,305 @@ def evaluate_rule_matches_fol(
         decode_error_rate=_safe_rate(n_decode_error, n_examples),
         unknown_rule_error_rate=_safe_rate(n_unknown_rule_error, n_examples),
         wrong_rule_error_rate=_safe_rate(n_wrong_rule_error, n_examples),
+        results=results,
+    )
+
+
+def _rule_match_unknown_for_path(result: FOLRuleMatchResult) -> bool:
+    return bool(result.unknown_rule_error or result.wrong_rule_error or result.matched_rule is None)
+
+
+def _decode_prompt_context(
+    *,
+    prompt_tokens: list[int] | np.ndarray,
+    tokenizer: tokenize_layer_fol.FOLLayerTokenizer,
+) -> FOLSequent:
+    try:
+        prompt = [int(tok) for tok in np.asarray(prompt_tokens, dtype=np.int32).tolist()]
+    except (TypeError, ValueError) as err:
+        raise ValueError("Prompt tokens must be a 1D integer sequence.") from err
+    return tokenizer.decode_prompt(prompt)
+
+
+def validate_completion_path_fol(
+    *,
+    rule_bank: FOLRuleBank,
+    prompt_tokens: list[int] | np.ndarray,
+    completion_tokens: list[int] | np.ndarray,
+    tokenizer: tokenize_layer_fol.FOLLayerTokenizer | None = None,
+    active_rules: Iterable[FOLLayerRule] | None = None,
+    fixed_rules: Iterable[FOLLayerRule] | None = None,
+    demo_rules: Iterable[FOLLayerRule] | None = None,
+) -> FOLCompletionPathResult:
+    tokenizer = _resolve_fol_tokenizer(rule_bank=rule_bank, tokenizer=tokenizer)
+    sequent = _decode_prompt_context(prompt_tokens=prompt_tokens, tokenizer=tokenizer)
+    if len(sequent.ants) == 0:
+        raise ValueError("Prompt antecedents are empty; cannot validate completion path.")
+
+    initial_layer = int(min(infer_fol_predicate_layer(atom.predicate) for atom in sequent.ants))
+    facts = set(sequent.ants)
+    goal = sequent.cons
+    steps: list[FOLCompletionPathStep] = []
+
+    try:
+        completion = [int(tok) for tok in np.asarray(completion_tokens, dtype=np.int32).tolist()]
+    except (TypeError, ValueError):
+        completion = []
+
+    try:
+        decoded_statements = tokenizer.decode_completion_sequence_texts(completion)
+    except (ValueError, TypeError):
+        return FOLCompletionPathResult(
+            success=False,
+            failure_reason=FAILURE_DECODE_ERROR,
+            n_steps=0,
+            goal_reached=False,
+            final_layer=initial_layer,
+            final_facts=tuple(atom.text for atom in _sorted_fol_atoms(facts)),
+            steps=(),
+        )
+
+    current_layer = int(initial_layer)
+    active_rules_list = list(active_rules) if active_rules is not None else None
+    fixed_rules_list = list(fixed_rules) if fixed_rules is not None else None
+    demo_rules_list = list(demo_rules) if demo_rules is not None else None
+
+    for step_idx, statement_text in enumerate(decoded_statements):
+        matched = match_rule_completion_fol(
+            rule_bank=rule_bank,
+            src_layer=current_layer,
+            completion_tokens=tokenizer.encode_completion(statement_text),
+            tokenizer=tokenizer,
+            active_rules=active_rules_list,
+            fixed_rules=fixed_rules_list,
+            demo_rules=demo_rules_list,
+        )
+
+        if matched.decode_error:
+            steps.append(
+                FOLCompletionPathStep(
+                    step_idx=int(step_idx),
+                    src_layer=int(current_layer),
+                    decoded_statement=None,
+                    matched_rule_statement=None,
+                    decode_error=True,
+                    unknown_rule_error=False,
+                    inapplicable_rule_error=False,
+                    goal_reached=False,
+                )
+            )
+            return FOLCompletionPathResult(
+                success=False,
+                failure_reason=FAILURE_DECODE_ERROR,
+                n_steps=len(steps),
+                goal_reached=False,
+                final_layer=int(current_layer),
+                final_facts=tuple(atom.text for atom in _sorted_fol_atoms(facts)),
+                steps=tuple(steps),
+            )
+
+        if _rule_match_unknown_for_path(matched):
+            steps.append(
+                FOLCompletionPathStep(
+                    step_idx=int(step_idx),
+                    src_layer=int(current_layer),
+                    decoded_statement=matched.decoded_statement,
+                    matched_rule_statement=None,
+                    decode_error=False,
+                    unknown_rule_error=True,
+                    inapplicable_rule_error=False,
+                    goal_reached=False,
+                )
+            )
+            return FOLCompletionPathResult(
+                success=False,
+                failure_reason=FAILURE_UNKNOWN_RULE_ERROR,
+                n_steps=len(steps),
+                goal_reached=False,
+                final_layer=int(current_layer),
+                final_facts=tuple(atom.text for atom in _sorted_fol_atoms(facts)),
+                steps=tuple(steps),
+            )
+
+        rule = matched.matched_rule
+        assert rule is not None
+        if not set(rule.lhs).issubset(facts):
+            steps.append(
+                FOLCompletionPathStep(
+                    step_idx=int(step_idx),
+                    src_layer=int(current_layer),
+                    decoded_statement=matched.decoded_statement,
+                    matched_rule_statement=rule.statement_text,
+                    decode_error=False,
+                    unknown_rule_error=False,
+                    inapplicable_rule_error=True,
+                    goal_reached=False,
+                )
+            )
+            return FOLCompletionPathResult(
+                success=False,
+                failure_reason=FAILURE_INAPPLICABLE_RULE_ERROR,
+                n_steps=len(steps),
+                goal_reached=False,
+                final_layer=int(current_layer),
+                final_facts=tuple(atom.text for atom in _sorted_fol_atoms(facts)),
+                steps=tuple(steps),
+            )
+
+        facts = set(rule.rhs)
+        goal_reached = goal in facts
+        steps.append(
+            FOLCompletionPathStep(
+                step_idx=int(step_idx),
+                src_layer=int(current_layer),
+                decoded_statement=matched.decoded_statement,
+                matched_rule_statement=rule.statement_text,
+                decode_error=False,
+                unknown_rule_error=False,
+                inapplicable_rule_error=False,
+                goal_reached=bool(goal_reached),
+            )
+        )
+        current_layer = int(rule.dst_layer)
+
+        if goal_reached:
+            return FOLCompletionPathResult(
+                success=True,
+                failure_reason=None,
+                n_steps=len(steps),
+                goal_reached=True,
+                final_layer=int(current_layer),
+                final_facts=tuple(atom.text for atom in _sorted_fol_atoms(facts)),
+                steps=tuple(steps),
+            )
+
+    return FOLCompletionPathResult(
+        success=False,
+        failure_reason=FAILURE_GOAL_NOT_REACHED,
+        n_steps=len(steps),
+        goal_reached=False,
+        final_layer=int(current_layer),
+        final_facts=tuple(atom.text for atom in _sorted_fol_atoms(facts)),
+        steps=tuple(steps),
+    )
+
+
+def evaluate_completion_paths_fol(
+    *,
+    rule_bank: FOLRuleBank,
+    prompt_tokens: Iterable[list[int] | np.ndarray],
+    completion_tokens: Iterable[list[int] | np.ndarray],
+    tokenizer: tokenize_layer_fol.FOLLayerTokenizer | None = None,
+    active_rules: Iterable[FOLLayerRule] | None = None,
+    fixed_rules: Iterable[FOLLayerRule] | None = None,
+    demo_rules: Iterable[FOLLayerRule] | None = None,
+    active_rules_by_example: Iterable[Iterable[FOLLayerRule] | None] | None = None,
+    fixed_rules_by_example: Iterable[Iterable[FOLLayerRule] | None] | None = None,
+    demo_rules_by_example: Iterable[Iterable[FOLLayerRule] | None] | None = None,
+) -> FOLCompletionPathMetrics:
+    prompt_tokens = list(prompt_tokens)
+    completion_tokens = list(completion_tokens)
+    if len(prompt_tokens) != len(completion_tokens):
+        raise ValueError(
+            "prompt_tokens and completion_tokens must have same length, got "
+            f"{len(prompt_tokens)} and {len(completion_tokens)}"
+        )
+
+    active_rules_list = list(active_rules) if active_rules is not None else None
+    fixed_rules_list = list(fixed_rules) if fixed_rules is not None else None
+    demo_rules_list = list(demo_rules) if demo_rules is not None else None
+    if active_rules_by_example is None:
+        active_rules_per_example: list[list[FOLLayerRule] | None] = [None] * len(prompt_tokens)
+    else:
+        active_rules_per_example = [
+            None if rules is None else list(rules)
+            for rules in active_rules_by_example
+        ]
+        if len(active_rules_per_example) != len(prompt_tokens):
+            raise ValueError(
+                "active_rules_by_example must match prompt_tokens length, got "
+                f"{len(active_rules_per_example)} and {len(prompt_tokens)}"
+            )
+    if fixed_rules_by_example is None:
+        fixed_rules_per_example: list[list[FOLLayerRule] | None] = [None] * len(prompt_tokens)
+    else:
+        fixed_rules_per_example = [
+            None if rules is None else list(rules)
+            for rules in fixed_rules_by_example
+        ]
+        if len(fixed_rules_per_example) != len(prompt_tokens):
+            raise ValueError(
+                "fixed_rules_by_example must match prompt_tokens length, got "
+                f"{len(fixed_rules_per_example)} and {len(prompt_tokens)}"
+            )
+    if demo_rules_by_example is None:
+        demo_rules_per_example: list[list[FOLLayerRule] | None] = [None] * len(prompt_tokens)
+    else:
+        demo_rules_per_example = [
+            None if rules is None else list(rules)
+            for rules in demo_rules_by_example
+        ]
+        if len(demo_rules_per_example) != len(prompt_tokens):
+            raise ValueError(
+                "demo_rules_by_example must match prompt_tokens length, got "
+                f"{len(demo_rules_per_example)} and {len(prompt_tokens)}"
+            )
+
+    results = tuple(
+        validate_completion_path_fol(
+            rule_bank=rule_bank,
+            prompt_tokens=prompt,
+            completion_tokens=completion,
+            tokenizer=tokenizer,
+            active_rules=(
+                active_rules_list if active_rules_per_example[idx] is None
+                else active_rules_per_example[idx]
+            ),
+            fixed_rules=(
+                fixed_rules_list if fixed_rules_per_example[idx] is None
+                else fixed_rules_per_example[idx]
+            ),
+            demo_rules=(
+                demo_rules_list if demo_rules_per_example[idx] is None
+                else demo_rules_per_example[idx]
+            ),
+        )
+        for idx, (prompt, completion) in enumerate(zip(prompt_tokens, completion_tokens))
+    )
+
+    n_examples = len(results)
+    n_success = sum(int(result.success) for result in results)
+    n_failure_decode_error = sum(
+        int(result.failure_reason == FAILURE_DECODE_ERROR)
+        for result in results
+    )
+    n_failure_unknown_rule_error = sum(
+        int(result.failure_reason == FAILURE_UNKNOWN_RULE_ERROR)
+        for result in results
+    )
+    n_failure_inapplicable_rule_error = sum(
+        int(result.failure_reason == FAILURE_INAPPLICABLE_RULE_ERROR)
+        for result in results
+    )
+    n_failure_goal_not_reached = sum(
+        int(result.failure_reason == FAILURE_GOAL_NOT_REACHED)
+        for result in results
+    )
+    avg_steps = float(np.mean([result.n_steps for result in results])) if results else 0.0
+
+    return FOLCompletionPathMetrics(
+        n_examples=n_examples,
+        n_success=n_success,
+        n_failure_decode_error=n_failure_decode_error,
+        n_failure_unknown_rule_error=n_failure_unknown_rule_error,
+        n_failure_inapplicable_rule_error=n_failure_inapplicable_rule_error,
+        n_failure_goal_not_reached=n_failure_goal_not_reached,
+        success_rate=_safe_rate(n_success, n_examples),
+        decode_error_rate=_safe_rate(n_failure_decode_error, n_examples),
+        unknown_rule_error_rate=_safe_rate(n_failure_unknown_rule_error, n_examples),
+        inapplicable_rule_error_rate=_safe_rate(n_failure_inapplicable_rule_error, n_examples),
+        goal_not_reached_rate=_safe_rate(n_failure_goal_not_reached, n_examples),
+        avg_steps=avg_steps,
         results=results,
     )
 

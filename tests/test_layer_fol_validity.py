@@ -4,7 +4,11 @@ import numpy as np
 
 from task.layer_fol import completion_is_valid_for_layer_fol
 from task.layer_gen.util import tokenize_layer_fol as tok
-from task.layer_gen.util.fol_rule_bank import build_random_fol_rule_bank, sample_fol_problem
+from task.layer_gen.util.fol_rule_bank import (
+    FOLSequent,
+    build_random_fol_rule_bank,
+    sample_fol_problem,
+)
 
 
 def test_completion_lookup_validity_fol() -> None:
@@ -47,4 +51,37 @@ def test_completion_lookup_validity_fol() -> None:
         src_layer=src_layer,
         completion_tokens=bad_completion,
         tokenizer=tokenizer,
+    )
+
+
+def test_full_completion_lookup_validity_fol() -> None:
+    rng = np.random.default_rng(17)
+    bank = build_random_fol_rule_bank(
+        n_layers=5,
+        predicates_per_layer=4,
+        rules_per_transition=6,
+        arity_max=3,
+        vars_per_rule_max=4,
+        constants=("a", "b", "c"),
+        k_in_max=2,
+        k_out_max=2,
+        rng=rng,
+    )
+    tokenizer = tok.build_tokenizer_from_rule_bank(bank)
+    sampled = sample_fol_problem(bank=bank, distance=2, initial_ant_max=3, rng=rng)
+
+    prompt = tokenizer.tokenize_prompt(
+        FOLSequent(ants=sampled.step_ants[0], cons=sampled.goal_atom)
+    )
+    completion = tokenizer.encode_completion_sequence(
+        [rule.statement_text for rule in sampled.step_rules]
+    )
+
+    assert completion_is_valid_for_layer_fol(
+        rule_bank=bank,
+        src_layer=sampled.step_layers[0],
+        prompt_tokens=prompt,
+        completion_tokens=completion,
+        tokenizer=tokenizer,
+        completion_format="full",
     )

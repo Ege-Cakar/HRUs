@@ -30,11 +30,15 @@ from task.layer_fol import (
     FOLDemoAugmentedAdapter,
     FOLLayerTask,
     compute_fol_dims,
+    evaluate_completion_paths,
     evaluate_layer_rollouts,
     evaluate_rule_matches,
+    extract_ar_completion_path_inputs,
     match_rule_completion_fol,
     predicted_rule_reaches_goal,
     sample_rollout_examples,
+    summarize_completion_path_metrics,
+    validate_completion_path_fol,
 )
 from task.layer_gen.util import tokenize_layer_fol
 from task.layer_gen.util.fol_rule_bank import (
@@ -82,6 +86,7 @@ VARS_PER_RULE_MAX = 6
 CONSTANTS = [f'p{i}' for i in range(512)]
 SAMPLE_MAX_ATTEMPTS = 4096
 MAX_UNIFY_SOLUTIONS = 128
+COMPLETION_FORMAT = "single"
 
 TRAIN_FIXED_LENGTH_MODE = "next_pow2"
 EVAL_FIXED_LENGTH_MODE = "next_pow2"
@@ -247,6 +252,8 @@ def _compute_dims(rule_bank, tokenizer, *, max_n_demos_for_shapes: int):
         tokenizer=tokenizer,
         initial_ant_max=int(INITIAL_ANT_MAX),
         max_n_demos=int(max_n_demos_for_shapes),
+        completion_format=str(COMPLETION_FORMAT),
+        completion_steps_max=int(max(EVAL_DISTANCES)),
     )
 
 
@@ -288,6 +295,7 @@ def _make_layer_task(
         initial_ant_max=INITIAL_ANT_MAX,
         min_n_demos=int(min_n_demos),
         max_n_demos=int(max_n_demos),
+        completion_format=str(COMPLETION_FORMAT),
         sample_max_attempts=SAMPLE_MAX_ATTEMPTS,
         max_unify_solutions=MAX_UNIFY_SOLUTIONS,
         fixed_length_mode=str(fixed_length_mode),
@@ -322,7 +330,15 @@ def make_ar_light_metrics_fn():
     return _metrics
 
 
-def make_ar_metrics_fn(*, tokenizer, rule_bank, model_fn, n_seq: int, max_completion_len: int):
+def make_ar_metrics_fn(
+    *,
+    tokenizer,
+    rule_bank,
+    model_fn,
+    n_seq: int,
+    max_completion_len: int,
+    completion_format: str,
+):
     adapter = AutoregressiveLogitsAdapter(
         n_seq=int(n_seq),
         max_completion_len=int(max_completion_len),
@@ -346,20 +362,35 @@ def make_ar_metrics_fn(*, tokenizer, rule_bank, model_fn, n_seq: int, max_comple
         seq_correct = (preds == labels) | (~mask)
         seq_exact_acc = jnp.mean(jnp.all(seq_correct, axis=1))
 
-        src_layers, pred_completions, expected_statements = extract_ar_rule_match_inputs(
-            preds=np.asarray(preds),
-            labels=np.asarray(labels),
-            xs=np.asarray(xs),
-            tokenizer=tokenizer,
-        )
-        rule_matches = evaluate_rule_matches(
-            rule_bank=rule_bank,
-            src_layers=src_layers,
-            completion_tokens=pred_completions,
-            expected_statement_texts=expected_statements,
-            tokenizer=tokenizer,
-        )
-        rule_metrics = summarize_rule_match_metrics(rule_matches)
+        if str(completion_format) == "full":
+            prompt_tokens, pred_completions, _ = extract_ar_completion_path_inputs(
+                preds=np.asarray(preds),
+                labels=np.asarray(labels),
+                xs=np.asarray(xs),
+                tokenizer=tokenizer,
+            )
+            completion_metrics = evaluate_completion_paths(
+                rule_bank=rule_bank,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=pred_completions,
+                tokenizer=tokenizer,
+            )
+            rule_metrics = summarize_completion_path_metrics(completion_metrics)
+        else:
+            src_layers, pred_completions, expected_statements = extract_ar_rule_match_inputs(
+                preds=np.asarray(preds),
+                labels=np.asarray(labels),
+                xs=np.asarray(xs),
+                tokenizer=tokenizer,
+            )
+            rule_matches = evaluate_rule_matches(
+                rule_bank=rule_bank,
+                src_layers=src_layers,
+                completion_tokens=pred_completions,
+                expected_statement_texts=expected_statements,
+                tokenizer=tokenizer,
+            )
+            rule_metrics = summarize_rule_match_metrics(rule_matches)
 
         prompt_tokens, fr_src_layers, fr_goals, fr_goal_layers = extract_ar_free_run_inputs(
             xs=np.asarray(xs),
@@ -384,6 +415,25 @@ def make_ar_metrics_fn(*, tokenizer, rule_bank, model_fn, n_seq: int, max_comple
                 temperature=0.0,
                 rng=None,
             )
+            if str(completion_format) == "full":
+                path_result = validate_completion_path_fol(
+                    rule_bank=rule_bank,
+                    prompt_tokens=prompt,
+                    completion_tokens=completion,
+                    tokenizer=tokenizer,
+                )
+                if path_result.failure_reason == "decode_error":
+                    n_decode_error += 1
+                    continue
+                if path_result.failure_reason == "unknown_rule_error":
+                    n_unknown_rule_error += 1
+                    continue
+                if path_result.failure_reason != "inapplicable_rule_error":
+                    n_valid += 1
+                if path_result.success:
+                    n_reachable += 1
+                continue
+
             matched = match_rule_completion_fol(
                 rule_bank=rule_bank,
                 src_layer=int(src_layer),
@@ -472,6 +522,7 @@ def _evaluate_by_distance_for_demo(
         model_fn=model_fn,
         n_seq=int(n_seq_ar),
         max_completion_len=int(max_completion_len),
+        completion_format=str(COMPLETION_FORMAT),
     )
 
     base_rollout_adapter = AutoregressiveLogitsAdapter(

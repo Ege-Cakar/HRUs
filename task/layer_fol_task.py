@@ -64,6 +64,44 @@ def _rule_texts(rules: tuple[FOLLayerRule, ...] | list[FOLLayerRule]) -> list[st
     return [str(rule.statement_text) for rule in rules]
 
 
+def _sampled_completion_texts(
+    *,
+    sampled,
+    step_idx: int,
+    completion_format: str,
+) -> list[str]:
+    step_idx = int(step_idx)
+    completion_format = str(completion_format)
+    if completion_format == "single":
+        return [str(sampled.step_rules[step_idx].statement_text)]
+    if completion_format == "full":
+        return [str(rule.statement_text) for rule in sampled.step_rules[step_idx:]]
+    raise ValueError(
+        f"completion_format must be 'single' or 'full', got {completion_format!r}"
+    )
+
+
+def _tokenize_sampled_completion(
+    *,
+    tokenizer: tokenize_layer_fol.FOLLayerTokenizer,
+    sequent: FOLSequent,
+    sampled,
+    step_idx: int,
+    completion_format: str,
+) -> tuple[list[int], list[int], list[str]]:
+    prompt = tokenizer.tokenize_prompt(sequent)
+    statements = _sampled_completion_texts(
+        sampled=sampled,
+        step_idx=int(step_idx),
+        completion_format=completion_format,
+    )
+    if str(completion_format) == "single":
+        completion = tokenizer.encode_completion(statements[0])
+    else:
+        completion = tokenizer.encode_completion_sequence(statements)
+    return prompt, completion, statements
+
+
 def _fresh_rule_context(
     *,
     base_bank: FOLRuleBank,
@@ -98,6 +136,7 @@ def _init_fol_online_worker(
     max_n_demos: int,
     min_n_demos: int,
     forced_step_idx: int | None,
+    completion_format: str = "single",
 ) -> None:
     bank = FOLRuleBank.from_dict(bank_payload)
     if tokenizer_payload is None:
@@ -121,6 +160,7 @@ def _init_fol_online_worker(
         "forced_step_idx": (
             None if forced_step_idx is None else int(forced_step_idx)
         ),
+        "completion_format": str(completion_format),
         "rng": np.random.default_rng(worker_seed),
     }
 
@@ -166,7 +206,13 @@ def _sample_fol_online_worker_record() -> dict:
     ants = sampled.step_ants[step_idx]
     rule = sampled.step_rules[step_idx]
     sequent = FOLSequent(ants=ants, cons=sampled.goal_atom)
-    prompt, completion = tokenizer.tokenize_example(sequent, rule.statement_text)
+    prompt, completion, completion_statements = _tokenize_sampled_completion(
+        tokenizer=tokenizer,
+        sequent=sequent,
+        sampled=sampled,
+        step_idx=step_idx,
+        completion_format=state["completion_format"],
+    )
     augmented = augment_prompt_with_demos(
         prompt_tokens=prompt,
         rule_bank=bank,
@@ -181,8 +227,10 @@ def _sample_fol_online_worker_record() -> dict:
     return {
         "distance": int(distance),
         "src_layer": int(src_layer),
+        "completion_format": str(state["completion_format"]),
         "prompt": np.asarray(augmented.prompt_tokens, dtype=np.int32),
         "completions": [np.asarray(completion, dtype=np.int32)],
+        "statement_texts": list(completion_statements),
     }
 
 
@@ -209,6 +257,7 @@ def _init_fol_online_fresh_worker(
     max_n_demos: int,
     min_n_demos: int,
     forced_step_idx: int | None,
+    completion_format: str,
     predicate_name_len: int = 1,
 ) -> None:
     base_bank = FOLRuleBank.from_dict(base_bank_payload)
@@ -235,6 +284,7 @@ def _init_fol_online_fresh_worker(
         "forced_step_idx": (
             None if forced_step_idx is None else int(forced_step_idx)
         ),
+        "completion_format": str(completion_format),
         "predicate_name_len": int(predicate_name_len),
         "rng": np.random.default_rng(worker_seed),
     }
@@ -296,7 +346,13 @@ def _sample_fol_online_fresh_worker_record() -> dict:
     ants = sampled.step_ants[step_idx]
     rule = sampled.step_rules[step_idx]
     sequent = FOLSequent(ants=ants, cons=sampled.goal_atom)
-    prompt, completion = tokenizer.tokenize_example(sequent, rule.statement_text)
+    prompt, completion, completion_statements = _tokenize_sampled_completion(
+        tokenizer=tokenizer,
+        sequent=sequent,
+        sampled=sampled,
+        step_idx=step_idx,
+        completion_format=state["completion_format"],
+    )
     augmented = augment_prompt_with_demos(
         prompt_tokens=prompt,
         rule_bank=temp_bank,
@@ -318,8 +374,10 @@ def _sample_fol_online_fresh_worker_record() -> dict:
     return {
         "distance": int(distance),
         "src_layer": int(src_layer),
+        "completion_format": str(state["completion_format"]),
         "prompt": np.asarray(augmented.prompt_tokens, dtype=np.int32),
         "completions": [np.asarray(completion, dtype=np.int32)],
+        "statement_texts": list(completion_statements),
         "rule_context": rule_context,
     }
 
@@ -514,6 +572,7 @@ class FOLLayerTask:
         reader_options=None,
         drop_remainder=False,
         prediction_objective="autoregressive",
+        completion_format="single",
         fixed_length_mode="batch_max",
         fixed_length_n_seq=None,
         task_split="none",
@@ -552,6 +611,12 @@ class FOLLayerTask:
             raise ValueError(
                 "prediction_objective must be 'autoregressive' or 'all_at_once', "
                 f"got {self.prediction_objective!r}"
+            )
+        self.completion_format = str(completion_format)
+        if self.completion_format not in {"single", "full"}:
+            raise ValueError(
+                "completion_format must be 'single' or 'full', "
+                f"got {self.completion_format!r}"
             )
         self.fixed_length_mode = str(fixed_length_mode)
         if self.fixed_length_mode not in {"batch_max", "global_max", "next_pow2"}:
@@ -773,6 +838,15 @@ class FOLLayerTask:
                 raise ValueError("ds_path is required when mode='offline'.")
             metadata_path = self.ds_path / "metadata.json"
             metadata = json.loads(metadata_path.read_text())
+            metadata_completion_format = str(
+                metadata.get("config", {}).get("completion_format", "single")
+            )
+            if metadata_completion_format != self.completion_format:
+                raise ValueError(
+                    "Dataset completion_format mismatch: "
+                    f"task requested {self.completion_format!r}, "
+                    f"but metadata declares {metadata_completion_format!r}."
+                )
             self._tokenizer = tokenize_layer_fol.tokenizer_from_metadata(metadata)
             self.stats = self._stats_from_metadata(
                 self.ds_path,
@@ -952,6 +1026,7 @@ class FOLLayerTask:
                 if self._online_forced_step_idx is None
                 else int(self._online_forced_step_idx)
             ),
+            str(self.completion_format),
         )
 
     def _online_fresh_worker_initargs(self) -> tuple:
@@ -973,6 +1048,7 @@ class FOLLayerTask:
             int(self.max_n_demos),
             int(self.min_n_demos),
             None if self._online_forced_step_idx is None else int(self._online_forced_step_idx),
+            str(self.completion_format),
             int(self._predicate_name_len),
         )
 
@@ -1070,6 +1146,7 @@ class FOLLayerTask:
                 if self._online_forced_step_idx is None
                 else int(self._online_forced_step_idx)
             ),
+            "completion_format": str(self.completion_format),
             "workers": int(workers),
             "buffer_size": int(buffer_size),
             "batch_size": int(self.batch_size),
@@ -1296,7 +1373,13 @@ class FOLLayerTask:
         ants = sampled.step_ants[step_idx]
         rule = sampled.step_rules[step_idx]
         sequent = FOLSequent(ants=ants, cons=sampled.goal_atom)
-        prompt, completion = self._tokenizer.tokenize_example(sequent, rule.statement_text)
+        prompt, completion, completion_statements = _tokenize_sampled_completion(
+            tokenizer=self._tokenizer,
+            sequent=sequent,
+            sampled=sampled,
+            step_idx=step_idx,
+            completion_format=self.completion_format,
+        )
         augmented = augment_prompt_with_demos(
             prompt_tokens=prompt,
             rule_bank=self._rule_bank,
@@ -1311,8 +1394,10 @@ class FOLLayerTask:
         return {
             "distance": int(distance),
             "src_layer": int(src_layer),
+            "completion_format": str(self.completion_format),
             "prompt": np.asarray(augmented.prompt_tokens, dtype=np.int32),
             "completions": [np.asarray(completion, dtype=np.int32)],
+            "statement_texts": list(completion_statements),
         }
 
     def _sample_online_record_fresh_icl(self) -> dict:
@@ -1370,7 +1455,13 @@ class FOLLayerTask:
         ants = sampled.step_ants[step_idx]
         rule = sampled.step_rules[step_idx]
         sequent = FOLSequent(ants=ants, cons=sampled.goal_atom)
-        prompt, completion = self._tokenizer.tokenize_example(sequent, rule.statement_text)
+        prompt, completion, completion_statements = _tokenize_sampled_completion(
+            tokenizer=self._tokenizer,
+            sequent=sequent,
+            sampled=sampled,
+            step_idx=step_idx,
+            completion_format=self.completion_format,
+        )
         augmented = augment_prompt_with_demos(
             prompt_tokens=prompt,
             rule_bank=temp_bank,
@@ -1392,8 +1483,10 @@ class FOLLayerTask:
         return {
             "distance": int(distance),
             "src_layer": int(src_layer),
+            "completion_format": str(self.completion_format),
             "prompt": np.asarray(augmented.prompt_tokens, dtype=np.int32),
             "completions": [np.asarray(completion, dtype=np.int32)],
+            "statement_texts": list(completion_statements),
             "rule_context": rule_context,
         }
 
@@ -1435,6 +1528,8 @@ class FOLLayerTask:
                 tokenizer=self._tokenizer,
                 initial_ant_max=self.initial_ant_max,
                 max_n_demos=self.max_n_demos,
+                completion_format=self.completion_format,
+                completion_steps_max=max(self._distances),
             )
             n_seq = int(dims["n_seq_ar"])
 

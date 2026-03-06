@@ -146,6 +146,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--initial-ant-max", type=int, default=3)
     parser.add_argument("--sample-max-attempts", type=int, default=4096)
     parser.add_argument("--max-unify-solutions", type=int, default=128)
+    parser.add_argument("--completion-format", type=str, default="single")
 
     parser.add_argument("--min-distance", type=int, default=1)
     parser.add_argument("--max-distance", type=int, default=4)
@@ -174,6 +175,39 @@ def _update_autoreg_stats(stats: _AutoregStats, prompt: list[int], completion: l
     stats.max_prompt_seq = max(stats.max_prompt_seq, len(prompt))
     stats.max_completion_seq = max(stats.max_completion_seq, len(completion))
     stats.max_seq = max(stats.max_seq, len(prompt) + len(completion) - 1)
+
+
+def _sampled_completion_texts(*, sampled, step_idx: int, completion_format: str) -> list[str]:
+    step_idx = int(step_idx)
+    completion_format = str(completion_format)
+    if completion_format == "single":
+        return [str(sampled.step_rules[step_idx].statement_text)]
+    if completion_format == "full":
+        return [str(rule.statement_text) for rule in sampled.step_rules[step_idx:]]
+    raise ValueError(
+        f"completion_format must be 'single' or 'full', got {completion_format!r}"
+    )
+
+
+def _tokenize_sampled_completion(
+    *,
+    tokenizer: tokenize_layer_fol.FOLLayerTokenizer,
+    sequent: FOLSequent,
+    sampled,
+    step_idx: int,
+    completion_format: str,
+) -> tuple[list[int], list[int], list[str]]:
+    prompt = tokenizer.tokenize_prompt(sequent)
+    statement_texts = _sampled_completion_texts(
+        sampled=sampled,
+        step_idx=int(step_idx),
+        completion_format=completion_format,
+    )
+    if str(completion_format) == "single":
+        completion = tokenizer.encode_completion(statement_texts[0])
+    else:
+        completion = tokenizer.encode_completion_sequence(statement_texts)
+    return prompt, completion, statement_texts
 
 
 def _build_or_load_rule_bank(args: argparse.Namespace, rng: np.random.Generator) -> FOLRuleBank:
@@ -210,6 +244,7 @@ def _generate_distance_data(
     max_unify_solutions: int,
     seed: int,
     bank_payload: dict,
+    completion_format: str,
 ) -> _DistanceResult:
     rng = np.random.default_rng(seed)
     bank = FOLRuleBank.from_dict(bank_payload)
@@ -237,9 +272,12 @@ def _generate_distance_data(
                 zip(sampled.step_layers, sampled.step_ants, sampled.step_rules)
             ):
                 sequent = FOLSequent(ants=ants, cons=sampled.goal_atom)
-                prompt, completion = tokenizer.tokenize_example(
-                    sequent,
-                    instantiated_rule.statement_text,
+                prompt, completion, statement_texts = _tokenize_sampled_completion(
+                    tokenizer=tokenizer,
+                    sequent=sequent,
+                    sampled=sampled,
+                    step_idx=step_idx,
+                    completion_format=completion_format,
                 )
                 payload = pickle.dumps(
                     {
@@ -251,6 +289,8 @@ def _generate_distance_data(
                         "prompt": np.asarray(prompt, dtype=np.int32),
                         "completions": [np.asarray(completion, dtype=np.int32)],
                         "statement_text": instantiated_rule.statement_text,
+                        "statement_texts": list(statement_texts),
+                        "completion_format": str(completion_format),
                     },
                     protocol=5,
                 )
@@ -415,6 +455,7 @@ class _FOLSamplerServerState:
                 if config.get("forced_step_idx", None) is None
                 else int(config["forced_step_idx"])
             ),
+            str(config.get("completion_format", "single")),
         )
 
         def _make_process_executor():
@@ -576,6 +617,7 @@ def main() -> None:
         "initial_ant_max": int(args.initial_ant_max),
         "sample_max_attempts": int(args.sample_max_attempts),
         "max_unify_solutions": int(args.max_unify_solutions),
+        "completion_format": str(args.completion_format),
     }
 
     created_at = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -615,6 +657,7 @@ def main() -> None:
                     max_unify_solutions=int(args.max_unify_solutions),
                     seed=_distance_seed(int(args.seed), distance),
                     bank_payload=bank_payload,
+                    completion_format=str(args.completion_format),
                 ): distance
                 for distance in distances
             }

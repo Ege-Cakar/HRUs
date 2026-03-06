@@ -66,6 +66,8 @@ def compute_fol_dims(
     tokenizer: tokenize_layer_fol.FOLLayerTokenizer,
     initial_ant_max: int,
     max_n_demos: int = 0,
+    completion_format: str = "single",
+    completion_steps_max: int = 1,
     extra_predicate_arities: dict[str, int] | None = None,
     fresh_k_in_max: int | None = None,
     fresh_k_out_max: int | None = None,
@@ -130,6 +132,24 @@ def compute_fol_dims(
     if fresh_k_in_max is not None and fresh_k_out_max is not None:
         fresh_completion_estimate = max_atom_len * (int(fresh_k_in_max) + int(fresh_k_out_max)) + 5
         max_completion_len = max(max_completion_len, fresh_completion_estimate)
+
+    completion_format = str(completion_format)
+    if completion_format not in {"single", "full"}:
+        raise ValueError(
+            f"completion_format must be 'single' or 'full', got {completion_format!r}"
+        )
+    completion_steps_max = int(completion_steps_max)
+    if completion_steps_max < 1:
+        raise ValueError(
+            f"completion_steps_max must be >= 1, got {completion_steps_max}"
+        )
+    if completion_format == "full":
+        max_completion_body_len = max(0, int(max_completion_len) - 1)
+        max_completion_len = (
+            max_completion_body_len * completion_steps_max
+            + max(0, completion_steps_max - 1)
+            + 1
+        )
 
     n_seq_ar = int(max_prompt_len + max_completion_len - 1)
     n_vocab = max(512, int(tokenizer.vocab_size))

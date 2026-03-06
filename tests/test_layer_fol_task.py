@@ -214,6 +214,34 @@ def test_layer_fol_task_online_sampling_autoreg() -> None:
     assert np.any(ys == 0)
 
 
+def test_layer_fol_task_online_sampling_full_completion() -> None:
+    task = FOLLayerTask(
+        distance_range=(2, 2),
+        batch_size=4,
+        mode="online",
+        seed=21,
+        n_layers=6,
+        predicates_per_layer=4,
+        rules_per_transition=8,
+        arity_max=3,
+        vars_per_rule_max=4,
+        constants=("a", "b", "c"),
+        k_in_max=2,
+        k_out_max=2,
+        initial_ant_max=3,
+        completion_format="full",
+        online_prefetch_backend="sync",
+    )
+
+    assert task.tokenizer is not None
+    record = task._sample_online_record()
+    completion = np.asarray(record["completions"][0], dtype=np.int32)
+    statements = task.tokenizer.decode_completion_sequence_texts(completion.tolist())
+    assert len(statements) >= 1
+    assert record["completion_format"] == "full"
+    assert record["statement_texts"] == statements
+
+
 def test_layer_fol_task_online_sampling_respects_k_in_out_min() -> None:
     task = FOLLayerTask(
         distance_range=(1, 2),
@@ -266,6 +294,32 @@ def test_layer_fol_task_online_autoreg_global_max_has_stable_length() -> None:
         assert xs.shape == ys.shape
         widths.add(xs.shape[1])
     assert widths == {task._global_autoreg_seq_len}
+
+
+def test_layer_fol_task_offline_rejects_completion_format_mismatch(tmp_path: Path) -> None:
+    distance_dir = tmp_path / "distance_001"
+    distance_dir.mkdir(parents=True)
+    shard_path = distance_dir / "shard_00000.array_record"
+
+    tokenizer = tok.build_tokenizer_from_identifiers(["r0_1", "r1_1", "a", "b", "x1"])
+    prompt, completion = _simple_prompt_and_completion(tokenizer)
+    rec = {
+        "prompt": np.array(prompt, dtype=np.int32),
+        "completions": [np.array(completion, dtype=np.int32)],
+    }
+    _write_array_record(shard_path, [rec])
+    _write_metadata_for_records(tmp_path, tokenizer, [rec])
+
+    with pytest.raises(ValueError, match="completion_format mismatch"):
+        FOLLayerTask(
+            ds_path=tmp_path,
+            distance_range=(1, 1),
+            batch_size=1,
+            mode="offline",
+            shuffle=False,
+            worker_count=0,
+            completion_format="full",
+        )
 
 
 def test_layer_fol_task_online_sampling_all_at_once() -> None:

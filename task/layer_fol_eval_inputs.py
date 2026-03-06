@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import numpy as np
 
-from task.layer_fol_eval import FOLRuleMatchMetrics, infer_fol_predicate_layer
+from task.layer_fol_eval import (
+    FOLCompletionPathMetrics,
+    FOLRuleMatchMetrics,
+    infer_fol_predicate_layer,
+)
 from task.layer_gen.util.fol_rule_bank import FOLAtom, FOLSequent
 from task.layer_gen.util.tokenize_layer_fol import FOLLayerTokenizer
 
@@ -79,6 +83,7 @@ def extract_ar_rule_match_inputs(
     labels,
     xs,
     tokenizer: FOLLayerTokenizer,
+    completion_format: str = "single",
 ) -> tuple[list[int], list[np.ndarray], list[str | None]]:
     preds = np.asarray(preds, dtype=np.int32)
     labels = np.asarray(labels, dtype=np.int32)
@@ -92,6 +97,7 @@ def extract_ar_rule_match_inputs(
     src_layers: list[int] = []
     pred_completions: list[np.ndarray] = []
     expected_statements: list[str | None] = []
+    completion_format = str(completion_format)
 
     for idx in range(labels.shape[0]):
         mask = labels[idx] != 0
@@ -103,7 +109,12 @@ def extract_ar_rule_match_inputs(
         gold_completion = labels[idx][mask].astype(np.int32)
 
         try:
-            expected_statement = tokenizer.decode_completion_text(gold_completion.tolist())
+            if completion_format == "full":
+                expected_statement = " <SEP> ".join(
+                    tokenizer.decode_completion_sequence_texts(gold_completion.tolist())
+                )
+            else:
+                expected_statement = tokenizer.decode_completion_text(gold_completion.tolist())
         except (ValueError, TypeError):
             expected_statement = None
 
@@ -172,6 +183,7 @@ def extract_completion_rule_match_inputs(
     xs,
     tokenizer: FOLLayerTokenizer,
     eot_token_id: int,
+    completion_format: str = "single",
 ) -> tuple[list[int], list[np.ndarray], list[str | None]]:
     preds = np.asarray(preds, dtype=np.int32)
     labels = np.asarray(labels, dtype=np.int32)
@@ -185,6 +197,7 @@ def extract_completion_rule_match_inputs(
     src_layers: list[int] = []
     pred_completions: list[np.ndarray] = []
     expected_statements: list[str | None] = []
+    completion_format = str(completion_format)
 
     for idx in range(labels.shape[0]):
         src_layer = infer_src_layer_from_prompt_tokens(xs[idx], tokenizer=tokenizer)
@@ -192,7 +205,12 @@ def extract_completion_rule_match_inputs(
         gold_completion = _truncate_at_first_eot(labels[idx], eot_token_id=eot_token_id)
 
         try:
-            expected_statement = tokenizer.decode_completion_text(gold_completion.tolist())
+            if completion_format == "full":
+                expected_statement = " <SEP> ".join(
+                    tokenizer.decode_completion_sequence_texts(gold_completion.tolist())
+                )
+            else:
+                expected_statement = tokenizer.decode_completion_text(gold_completion.tolist())
         except (ValueError, TypeError):
             expected_statement = None
 
@@ -223,6 +241,104 @@ def summarize_rule_match_metrics(metrics: FOLRuleMatchMetrics) -> dict[str, floa
         "decode_error_rate": float(metrics.decode_error_rate),
         "unknown_rule_error_rate": float(metrics.unknown_rule_error_rate),
         "wrong_rule_error_rate": float(metrics.wrong_rule_error_rate),
+    }
+
+
+def extract_ar_completion_path_inputs(
+    *,
+    preds,
+    labels,
+    xs,
+    tokenizer: FOLLayerTokenizer,
+) -> tuple[list[np.ndarray], list[np.ndarray], list[str | None]]:
+    preds = np.asarray(preds, dtype=np.int32)
+    labels = np.asarray(labels, dtype=np.int32)
+    xs = np.asarray(xs, dtype=np.int32)
+
+    if preds.shape != labels.shape:
+        raise ValueError(f"preds and labels must have same shape, got {preds.shape} and {labels.shape}")
+    if xs.ndim != 2 or labels.ndim != 2:
+        raise ValueError("Expected 2D xs/labels arrays.")
+
+    prompts: list[np.ndarray] = []
+    pred_completions: list[np.ndarray] = []
+    expected_completions: list[str | None] = []
+
+    for idx in range(labels.shape[0]):
+        mask = labels[idx] != 0
+        if not np.any(mask):
+            continue
+
+        prompt_tokens, _, _, _ = extract_prompt_info_from_row_tokens(xs[idx], tokenizer=tokenizer)
+        pred_completion = preds[idx][mask].astype(np.int32)
+        gold_completion = labels[idx][mask].astype(np.int32)
+        try:
+            expected_completion = " <SEP> ".join(
+                tokenizer.decode_completion_sequence_texts(gold_completion.tolist())
+            )
+        except (ValueError, TypeError):
+            expected_completion = None
+
+        prompts.append(prompt_tokens.astype(np.int32))
+        pred_completions.append(pred_completion)
+        expected_completions.append(expected_completion)
+
+    return prompts, pred_completions, expected_completions
+
+
+def extract_completion_path_inputs(
+    *,
+    preds,
+    labels,
+    xs,
+    tokenizer: FOLLayerTokenizer,
+    eot_token_id: int,
+) -> tuple[list[np.ndarray], list[np.ndarray], list[str | None]]:
+    preds = np.asarray(preds, dtype=np.int32)
+    labels = np.asarray(labels, dtype=np.int32)
+    xs = np.asarray(xs, dtype=np.int32)
+
+    if preds.shape != labels.shape:
+        raise ValueError(f"preds and labels must have same shape, got {preds.shape} and {labels.shape}")
+    if xs.ndim != 2 or labels.ndim != 2:
+        raise ValueError("Expected 2D xs/labels arrays.")
+
+    prompts: list[np.ndarray] = []
+    pred_completions: list[np.ndarray] = []
+    expected_completions: list[str | None] = []
+
+    for idx in range(labels.shape[0]):
+        prompt_tokens, _, _, _ = extract_prompt_info_from_row_tokens(xs[idx], tokenizer=tokenizer)
+        pred_completion = _truncate_at_first_eot(preds[idx], eot_token_id=eot_token_id)
+        gold_completion = _truncate_at_first_eot(labels[idx], eot_token_id=eot_token_id)
+        try:
+            expected_completion = " <SEP> ".join(
+                tokenizer.decode_completion_sequence_texts(gold_completion.tolist())
+            )
+        except (ValueError, TypeError):
+            expected_completion = None
+
+        prompts.append(prompt_tokens.astype(np.int32))
+        pred_completions.append(pred_completion.astype(np.int32))
+        expected_completions.append(expected_completion)
+
+    return prompts, pred_completions, expected_completions
+
+
+def summarize_completion_path_metrics(metrics: FOLCompletionPathMetrics) -> dict[str, float | int]:
+    return {
+        "n_completion_examples": int(metrics.n_examples),
+        "n_completion_success": int(metrics.n_success),
+        "n_completion_failure_decode_error": int(metrics.n_failure_decode_error),
+        "n_completion_failure_unknown_rule_error": int(metrics.n_failure_unknown_rule_error),
+        "n_completion_failure_inapplicable_rule_error": int(metrics.n_failure_inapplicable_rule_error),
+        "n_completion_failure_goal_not_reached": int(metrics.n_failure_goal_not_reached),
+        "completion_success_rate": float(metrics.success_rate),
+        "completion_decode_error_rate": float(metrics.decode_error_rate),
+        "completion_unknown_rule_error_rate": float(metrics.unknown_rule_error_rate),
+        "completion_inapplicable_rule_error_rate": float(metrics.inapplicable_rule_error_rate),
+        "completion_goal_not_reached_rate": float(metrics.goal_not_reached_rate),
+        "completion_avg_steps": float(metrics.avg_steps),
     }
 
 

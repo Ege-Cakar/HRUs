@@ -30,6 +30,7 @@ from task.layer_fol import (
     CompletionLogitsAdapter,
     FOLLayerTask,
     compute_fol_dims,
+    evaluate_completion_paths,
     evaluate_layer_rollouts,
     evaluate_rule_matches,
     sample_rollout_examples,
@@ -47,8 +48,11 @@ from experiment.utils.data_utils import (
     pad_completion_targets,
 )
 from utils import (
+    extract_ar_completion_path_inputs,
     extract_ar_rule_match_inputs,
+    extract_completion_path_inputs,
     extract_completion_rule_match_inputs,
+    summarize_completion_path_metrics,
     summarize_rule_match_metrics,
 )
 from experiment.utils.metrics_utils import final_token_accuracy
@@ -81,6 +85,7 @@ VARS_PER_RULE_MAX = 4
 CONSTANTS = ("a", "b", "c", "d")
 SAMPLE_MAX_ATTEMPTS = 4096
 MAX_UNIFY_SOLUTIONS = 128
+COMPLETION_FORMAT = "single"
 
 TRANSFORMER_LAYERS = [4, 8]
 TRANSFORMER_WIDTH_HEADS = [(128, 4), (256, 8)]
@@ -156,6 +161,8 @@ def _compute_dims(rule_bank, tokenizer):
         rule_banks=[rule_bank],
         tokenizer=tokenizer,
         initial_ant_max=int(INITIAL_ANT_MAX),
+        completion_format=str(COMPLETION_FORMAT),
+        completion_steps_max=int(max(EVAL_DISTANCES)),
     )
     dims["n_seq_completion"] = max(32, int(dims["n_seq_ar"]))
     return dims
@@ -195,6 +202,7 @@ def _make_layer_task(
         initial_ant_max=INITIAL_ANT_MAX,
         sample_max_attempts=SAMPLE_MAX_ATTEMPTS,
         max_unify_solutions=MAX_UNIFY_SOLUTIONS,
+        completion_format=COMPLETION_FORMAT,
     )
 
 
@@ -217,7 +225,7 @@ def _mean_metrics(metrics_list):
     return out
 
 
-def make_ar_metrics_fn(*, tokenizer, rule_bank):
+def make_ar_metrics_fn(*, tokenizer, rule_bank, completion_format: str):
     def _metrics(optimizer, batch, loss=None):
         _ = loss
         xs, labels = batch
@@ -234,20 +242,36 @@ def make_ar_metrics_fn(*, tokenizer, rule_bank):
         seq_correct = (preds == labels) | (~mask)
         seq_exact_acc = jnp.mean(jnp.all(seq_correct, axis=1))
 
-        src_layers, pred_completions, expected_statements = extract_ar_rule_match_inputs(
-            preds=np.asarray(preds),
-            labels=np.asarray(labels),
-            xs=np.asarray(xs),
-            tokenizer=tokenizer,
-        )
-        rule_matches = evaluate_rule_matches(
-            rule_bank=rule_bank,
-            src_layers=src_layers,
-            completion_tokens=pred_completions,
-            expected_statement_texts=expected_statements,
-            tokenizer=tokenizer,
-        )
-        rule_metrics = summarize_rule_match_metrics(rule_matches)
+        if str(completion_format) == "full":
+            prompt_tokens, pred_completions, _ = extract_ar_completion_path_inputs(
+                preds=np.asarray(preds),
+                labels=np.asarray(labels),
+                xs=np.asarray(xs),
+                tokenizer=tokenizer,
+            )
+            completion_metrics = evaluate_completion_paths(
+                rule_bank=rule_bank,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=pred_completions,
+                tokenizer=tokenizer,
+            )
+            rule_metrics = summarize_completion_path_metrics(completion_metrics)
+        else:
+            src_layers, pred_completions, expected_statements = extract_ar_rule_match_inputs(
+                preds=np.asarray(preds),
+                labels=np.asarray(labels),
+                xs=np.asarray(xs),
+                tokenizer=tokenizer,
+                completion_format=str(completion_format),
+            )
+            rule_matches = evaluate_rule_matches(
+                rule_bank=rule_bank,
+                src_layers=src_layers,
+                completion_tokens=pred_completions,
+                expected_statement_texts=expected_statements,
+                tokenizer=tokenizer,
+            )
+            rule_metrics = summarize_rule_match_metrics(rule_matches)
 
         return {
             "loss": loss_val,
@@ -260,7 +284,7 @@ def make_ar_metrics_fn(*, tokenizer, rule_bank):
     return _metrics
 
 
-def make_mixer_metrics_fn(*, tokenizer, rule_bank, eot_token_id: int):
+def make_mixer_metrics_fn(*, tokenizer, rule_bank, eot_token_id: int, completion_format: str):
     def _metrics(optimizer, batch, loss=None):
         _ = loss
         xs, labels = batch
@@ -285,21 +309,38 @@ def make_mixer_metrics_fn(*, tokenizer, rule_bank, eot_token_id: int):
 
         eot_pos_acc = jnp.mean(preds[batch_idx, first_eot] == int(eot_token_id))
 
-        src_layers, pred_completions, expected_statements = extract_completion_rule_match_inputs(
-            preds=np.asarray(preds),
-            labels=np.asarray(labels),
-            xs=np.asarray(xs),
-            tokenizer=tokenizer,
-            eot_token_id=eot_token_id,
-        )
-        rule_matches = evaluate_rule_matches(
-            rule_bank=rule_bank,
-            src_layers=src_layers,
-            completion_tokens=pred_completions,
-            expected_statement_texts=expected_statements,
-            tokenizer=tokenizer,
-        )
-        rule_metrics = summarize_rule_match_metrics(rule_matches)
+        if str(completion_format) == "full":
+            prompt_tokens, pred_completions, _ = extract_completion_path_inputs(
+                preds=np.asarray(preds),
+                labels=np.asarray(labels),
+                xs=np.asarray(xs),
+                tokenizer=tokenizer,
+                eot_token_id=eot_token_id,
+            )
+            completion_metrics = evaluate_completion_paths(
+                rule_bank=rule_bank,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=pred_completions,
+                tokenizer=tokenizer,
+            )
+            rule_metrics = summarize_completion_path_metrics(completion_metrics)
+        else:
+            src_layers, pred_completions, expected_statements = extract_completion_rule_match_inputs(
+                preds=np.asarray(preds),
+                labels=np.asarray(labels),
+                xs=np.asarray(xs),
+                tokenizer=tokenizer,
+                eot_token_id=eot_token_id,
+                completion_format=str(completion_format),
+            )
+            rule_matches = evaluate_rule_matches(
+                rule_bank=rule_bank,
+                src_layers=src_layers,
+                completion_tokens=pred_completions,
+                expected_statement_texts=expected_statements,
+                tokenizer=tokenizer,
+            )
+            rule_metrics = summarize_rule_match_metrics(rule_matches)
 
         return {
             "loss": loss_val,
@@ -350,9 +391,14 @@ def _evaluate_by_distance(
             tokenizer=tokenizer,
             rule_bank=rule_bank,
             eot_token_id=int(tokenizer.eot_token_id),
+            completion_format=str(COMPLETION_FORMAT),
         )
         if family == "mixer_completion"
-        else make_ar_metrics_fn(tokenizer=tokenizer, rule_bank=rule_bank)
+        else make_ar_metrics_fn(
+            tokenizer=tokenizer,
+            rule_bank=rule_bank,
+            completion_format=str(COMPLETION_FORMAT),
+        )
     )
 
     model_fn = make_model_callable(optimizer, to_numpy=False)
@@ -477,11 +523,16 @@ print("RULE BANK", {"path": str(SHARED_RULE_BANK_PATH), "sha256": SHARED_RULE_BA
 
 all_cases = []
 
-ar_metrics_fn = make_ar_metrics_fn(tokenizer=SHARED_TOKENIZER, rule_bank=SHARED_RULE_BANK)
+ar_metrics_fn = make_ar_metrics_fn(
+    tokenizer=SHARED_TOKENIZER,
+    rule_bank=SHARED_RULE_BANK,
+    completion_format=str(COMPLETION_FORMAT),
+)
 mixer_metrics_fn = make_mixer_metrics_fn(
     tokenizer=SHARED_TOKENIZER,
     rule_bank=SHARED_RULE_BANK,
     eot_token_id=int(SHARED_TOKENIZER.eot_token_id),
+    completion_format=str(COMPLETION_FORMAT),
 )
 
 for train_max_distance in TRAIN_MAX_DISTANCES:

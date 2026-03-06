@@ -11,14 +11,18 @@ from task.layer_fol import (
     FAILURE_WRONG_RULE_ERROR,
     FOLLayerRolloutExample,
     _find_instantiation_for_rule,
+    evaluate_completion_paths_fol,
     evaluate_layer_rollouts_fol,
     evaluate_rule_matches_fol,
     match_rule_completion_fol,
     run_layer_rollout_fol,
+    validate_completion_path_fol,
 )
+from task.layer_fol_demos import _find_lhs_substitutions_for_facts, _subst_binds_rhs_variables
 from task.layer_gen.util.fol_rule_bank import (
     FOLAtom,
     FOLLayerRule,
+    FOLSequent,
     build_fresh_layer0_bank,
     build_random_fol_rule_bank,
     generate_fresh_predicate_names,
@@ -88,6 +92,45 @@ def _find_alternative_valid_completion(bank, tokenizer, src_layer: int, expected
         if statement != expected:
             return statement
     return None
+
+
+def _find_alternative_valid_path(bank, sampled):
+    goal = sampled.goal_atom
+    oracle_texts = tuple(rule.statement_text for rule in sampled.step_rules)
+
+    def _search(layer: int, facts: tuple[FOLAtom, ...], steps_remaining: int):
+        if steps_remaining == 0:
+            return [] if goal in set(facts) else None
+
+        for rule in bank.transition_rules(layer):
+            substitutions = _find_lhs_substitutions_for_facts(
+                lhs=rule.lhs,
+                facts=facts,
+                max_solutions=64,
+            )
+            for subst in substitutions:
+                if not _subst_binds_rhs_variables(rule=rule, subst=subst):
+                    continue
+                instantiated = rule.instantiate(subst)
+                suffix = _search(
+                    int(instantiated.dst_layer),
+                    tuple(instantiated.rhs),
+                    int(steps_remaining) - 1,
+                )
+                if suffix is not None:
+                    return [instantiated, *suffix]
+        return None
+
+    path = _search(
+        int(sampled.step_layers[0]),
+        tuple(sampled.step_ants[0]),
+        int(sampled.distance),
+    )
+    if path is None:
+        return None
+    if tuple(rule.statement_text for rule in path) == oracle_texts:
+        return None
+    return path
 
 
 def test_match_rule_completion_categorizes_errors_fol() -> None:
@@ -223,6 +266,75 @@ def test_evaluate_rule_matches_rejects_demo_rules_by_example_len_mismatch() -> N
             tokenizer=tokenizer,
             demo_rules_by_example=[[]],
         )
+
+
+def test_validate_completion_path_accepts_gold_full_sequence() -> None:
+    bank, tokenizer, rng = _sampled_bank(seed=81)
+    sampled = sample_fol_problem(bank=bank, distance=2, initial_ant_max=3, rng=rng)
+    prompt = tokenizer.tokenize_prompt(
+        FOLSequent(ants=sampled.step_ants[0], cons=sampled.goal_atom)
+    )
+    completion = tokenizer.encode_completion_sequence(
+        [rule.statement_text for rule in sampled.step_rules]
+    )
+
+    result = validate_completion_path_fol(
+        rule_bank=bank,
+        prompt_tokens=prompt,
+        completion_tokens=completion,
+        tokenizer=tokenizer,
+    )
+
+    assert result.success
+    assert result.goal_reached
+    assert result.n_steps == 2
+
+
+def test_validate_completion_path_accepts_alternative_goal_reaching_sequence() -> None:
+    bank, tokenizer, rng = _sampled_bank(seed=82)
+    sampled = sample_fol_problem(bank=bank, distance=2, initial_ant_max=3, rng=rng)
+    alternative = _find_alternative_valid_path(bank, sampled)
+    if alternative is None:
+        pytest.skip("Could not find alternative valid first step for full-path test.")
+
+    prompt = tokenizer.tokenize_prompt(
+        FOLSequent(ants=sampled.step_ants[0], cons=sampled.goal_atom)
+    )
+    completion = tokenizer.encode_completion_sequence(
+        [rule.statement_text for rule in alternative]
+    )
+
+    result = validate_completion_path_fol(
+        rule_bank=bank,
+        prompt_tokens=prompt,
+        completion_tokens=completion,
+        tokenizer=tokenizer,
+    )
+
+    assert result.success
+    assert result.goal_reached
+    assert result.n_steps == len(alternative)
+
+
+def test_evaluate_completion_paths_aggregates_failures() -> None:
+    bank, tokenizer, rng = _sampled_bank(seed=83)
+    sampled = sample_fol_problem(bank=bank, distance=2, initial_ant_max=3, rng=rng)
+    prompt = tokenizer.tokenize_prompt(
+        FOLSequent(ants=sampled.step_ants[0], cons=sampled.goal_atom)
+    )
+    gold = tokenizer.encode_completion_sequence([rule.statement_text for rule in sampled.step_rules])
+    bad = gold[:-1]
+
+    metrics = evaluate_completion_paths_fol(
+        rule_bank=bank,
+        prompt_tokens=[prompt, prompt],
+        completion_tokens=[gold, bad],
+        tokenizer=tokenizer,
+    )
+
+    assert metrics.n_examples == 2
+    assert metrics.n_success == 1
+    assert metrics.n_failure_decode_error == 1
 
 
 def test_run_layer_rollout_success_with_scripted_rules_fol() -> None:

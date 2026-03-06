@@ -186,7 +186,12 @@ def preview_record(task: FOLLayerTask, record: dict, *, role: str) -> None:
     main_segment = segments[-1] + [int(tokenizer.sep_token_id)]
 
     sequent = tokenizer.decode_prompt(main_segment)
-    completion_text = tokenizer.decode_completion_text(completion.tolist())
+    if str(task.completion_format) == "full":
+        completion_text = " <SEP> ".join(
+            tokenizer.decode_completion_sequence_texts(completion.tolist())
+        )
+    else:
+        completion_text = tokenizer.decode_completion_text(completion.tolist())
 
     print(
         f"\n[{role}] distance={int(record['distance'])} src_layer={int(record['src_layer'])} "

@@ -280,6 +280,19 @@ class FOLLayerTokenizer:
             tokens = self._encode_conjunction(atoms)
         return tokens + [self.eot_token_id]
 
+    def encode_completion_sequence(self, statement_texts: Iterable[str]) -> list[int]:
+        statement_texts = [str(text) for text in statement_texts]
+        if not statement_texts:
+            raise ValueError("Completion sequence must contain at least one statement.")
+
+        tokens: list[int] = []
+        for idx, statement_text in enumerate(statement_texts):
+            if idx > 0:
+                tokens.append(self.sep_token_id)
+            tokens.extend(self.encode_completion(statement_text)[:-1])
+        tokens.append(self.eot_token_id)
+        return tokens
+
     def tokenize_example(self, sequent: FOLSequent, statement_text: str) -> tuple[list[int], list[int]]:
         return self.tokenize_prompt(sequent), self.encode_completion(statement_text)
 
@@ -326,6 +339,32 @@ class FOLLayerTokenizer:
             atoms = _decode_completion_symbols_to_conjunction(symbols)
             atoms = parse_conjunction_text(_format_conjunction(atoms))
             return _format_conjunction(atoms)
+
+    def decode_completion_sequence_texts(self, completion_tokens: list[int]) -> list[str]:
+        if len(completion_tokens) < 2:
+            raise ValueError("Completion sequence must include content and EOT.")
+        if int(completion_tokens[-1]) != int(self.eot_token_id):
+            raise ValueError("Completion sequence must terminate with EOT token.")
+
+        body = [int(tok) for tok in completion_tokens[:-1]]
+        if not body:
+            raise ValueError("Completion sequence must contain at least one statement.")
+
+        out: list[str] = []
+        current: list[int] = []
+        for tok in body:
+            if tok == int(self.sep_token_id):
+                if not current:
+                    raise ValueError("Completion sequence contains an empty segment.")
+                out.append(self.decode_completion_text(current + [self.eot_token_id]))
+                current = []
+                continue
+            current.append(int(tok))
+
+        if not current:
+            raise ValueError("Completion sequence cannot end with SEP before EOT.")
+        out.append(self.decode_completion_text(current + [self.eot_token_id]))
+        return out
 
     def decode_batch_ids(
         self,

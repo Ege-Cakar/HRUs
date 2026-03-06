@@ -11,7 +11,13 @@ from array_record.python import array_record_module
 from task.layer_gen.util import tokenize_layer_fol as tok
 
 
-def _run_generate(tmp_path: Path, *, examples: int = 4, workers: int = 1) -> Path:
+def _run_generate(
+    tmp_path: Path,
+    *,
+    examples: int = 4,
+    workers: int = 1,
+    completion_format: str = "single",
+) -> Path:
     script = Path(__file__).parents[1] / "task" / "layer_gen" / "generate_layer_fol.py"
     out_dir = tmp_path / "layer_fol_out"
 
@@ -52,6 +58,8 @@ def _run_generate(tmp_path: Path, *, examples: int = 4, workers: int = 1) -> Pat
         "13",
         "--log-every",
         "0",
+        "--completion-format",
+        str(completion_format),
     ]
     subprocess.run(cmd, check=True, cwd=script.parent)
     return out_dir
@@ -109,3 +117,16 @@ def test_generate_layer_fol_single_worker_metadata(tmp_path: Path) -> None:
     root_meta = json.loads((out_dir / "metadata.json").read_text())
     assert root_meta["workers"] == 1
     assert root_meta["parallel_backend"] == "thread"
+
+
+def test_generate_layer_fol_full_completion_outputs_sequence(tmp_path: Path) -> None:
+    out_dir = _run_generate(tmp_path, examples=2, workers=1, completion_format="full")
+    root_meta = json.loads((out_dir / "metadata.json").read_text())
+    tokenizer = tok.FOLLayerTokenizer.from_dict(root_meta["tokenizer"])
+    rec = _read_one(out_dir / "distance_002")
+
+    statements = tokenizer.decode_completion_sequence_texts(rec["completions"][0].tolist())
+    assert root_meta["config"]["completion_format"] == "full"
+    assert rec["completion_format"] == "full"
+    assert rec["statement_texts"] == statements
+    assert len(statements) >= 1

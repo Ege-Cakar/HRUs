@@ -26,6 +26,23 @@ def test_layer_fol_tokenize_roundtrip_prompt_and_completion() -> None:
     assert completion[-1] == tokenizer.eot_token_id
 
 
+def test_layer_fol_tokenize_roundtrip_completion_sequence() -> None:
+    tokenizer = tok.build_tokenizer_from_identifiers(
+        ["r0_1", "r1_1", "r2_1", "a", "b", "x1", "x2"]
+    )
+    statements = [
+        "r0_1(a,b) → r1_1(a,b)",
+        "r1_1(a,b) → r2_1(a,b)",
+    ]
+
+    completion = tokenizer.encode_completion_sequence(statements)
+    decoded = tokenizer.decode_completion_sequence_texts(completion)
+
+    assert decoded == statements
+    assert completion.count(tokenizer.sep_token_id) == 1
+    assert completion[-1] == tokenizer.eot_token_id
+
+
 def test_layered_predicates_are_char_tokenized_and_arg_commas_are_omitted() -> None:
     tokenizer = tok.build_tokenizer_from_identifiers(
         ["r3_20", "r4_1", "alice", "bob", "x1"]

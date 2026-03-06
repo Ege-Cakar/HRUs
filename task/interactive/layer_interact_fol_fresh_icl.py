@@ -62,6 +62,14 @@ def _collect_fresh_predicates(text: str) -> list[str]:
     return re.findall(r"r_[a-z0-9]{4}", text)
 
 
+def _decode_target_completion(task: FOLLayerTask, completion: np.ndarray) -> str:
+    tokenizer = task.tokenizer
+    if str(task.completion_format) == "full":
+        statements = tokenizer.decode_completion_sequence_texts(completion.tolist())
+        return " <SEP> ".join(statements)
+    return tokenizer.decode_completion_text(completion.tolist())
+
+
 def preview_record(task: FOLLayerTask, record: dict, *, role: str) -> None:
     tokenizer = task.tokenizer
     prompt = np.asarray(record["prompt"], dtype=np.int32)
@@ -71,7 +79,7 @@ def preview_record(task: FOLLayerTask, record: dict, *, role: str) -> None:
     main_segment = segments[-1] + [int(tokenizer.sep_token_id)]
 
     sequent = tokenizer.decode_prompt(main_segment)
-    completion_text = tokenizer.decode_completion_text(completion.tolist())
+    completion_text = _decode_target_completion(task, completion)
 
     fresh_preds = set(_collect_fresh_predicates(sequent.text))
     fresh_preds.update(_collect_fresh_predicates(completion_text))
@@ -100,6 +108,7 @@ def preview_record(task: FOLLayerTask, record: dict, *, role: str) -> None:
 train_task = FOLLayerTask(
     mode="online",
     task_split="depth3_fresh_icl",
+    completion_format='full',
     split_role="train",
     distance_range=(2, 2),
     batch_size=1,
