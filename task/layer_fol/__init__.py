@@ -69,6 +69,10 @@ from .eval_inputs import (
     summarize_first_transition_counts,
     summarize_rule_match_metrics,
 )
+from .preview import (
+    format_preview_record,
+    print_task_preview,
+)
 from .task import (
     FOLLayerTask,
     _init_fol_online_fresh_worker,
@@ -133,7 +137,9 @@ __all__ = [
     "extract_completion_rule_match_inputs",
     "extract_completion_path_inputs",
     "extract_prompt_info_from_row_tokens",
+    "format_preview_record",
     "infer_src_layer_from_prompt_tokens",
+    "print_task_preview",
     "summarize_rule_match_metrics",
     "summarize_completion_path_metrics",
     "first_transition_mask",

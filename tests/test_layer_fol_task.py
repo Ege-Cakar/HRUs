@@ -12,7 +12,9 @@ from task.layer_fol import (
     FOLLayerTask,
     _collect_applicable_demo_schemas,
     _find_instantiation_for_rule,
+    format_preview_record,
     match_rule_completion_fol,
+    print_task_preview,
 )
 from task.layer_gen.util import tokenize_layer_fol as tok
 from task.layer_gen.util.fol_rule_bank import (
@@ -240,6 +242,124 @@ def test_layer_fol_task_online_sampling_full_completion() -> None:
     assert len(statements) >= 1
     assert record["completion_format"] == "full"
     assert record["statement_texts"] == statements
+
+
+def test_layer_fol_preview_formats_single_completion() -> None:
+    task = FOLLayerTask(
+        distance_range=(2, 2),
+        batch_size=2,
+        mode="online",
+        seed=11,
+        task_split="depth3_fresh_icl",
+        split_role="train",
+        predicates_per_layer=4,
+        rules_per_transition=8,
+        fresh_icl_n_predicates=4,
+        arity_max=1,
+        vars_per_rule_max=4,
+        constants=("a", "b"),
+        k_in_max=1,
+        k_out_max=1,
+        initial_ant_max=2,
+        min_n_demos=2,
+        max_n_demos=2,
+        online_prefetch_backend="sync",
+    )
+
+    text = format_preview_record(task, task._sample_online_record(), role="train")
+
+    assert "[train]" in text
+    assert "sequent:" in text
+    assert "completion:" in text
+    assert "n_demos=2" in text
+    assert "demo[0]:" in text
+
+
+def test_layer_fol_preview_formats_full_completion() -> None:
+    task = FOLLayerTask(
+        distance_range=(2, 2),
+        batch_size=2,
+        mode="online",
+        seed=17,
+        task_split="depth3_fresh_icl",
+        split_role="train",
+        predicates_per_layer=4,
+        rules_per_transition=8,
+        fresh_icl_n_predicates=4,
+        arity_max=1,
+        vars_per_rule_max=4,
+        constants=("a", "b"),
+        k_in_max=1,
+        k_out_max=1,
+        initial_ant_max=2,
+        min_n_demos=2,
+        max_n_demos=2,
+        completion_format="full",
+        online_prefetch_backend="sync",
+    )
+
+    text = format_preview_record(task, task._sample_online_record(), role="eval")
+
+    assert "[eval]" in text
+    assert "prompt:" in text
+    assert "n_steps=" in text
+    assert "completion[0]:" in text
+
+
+def test_layer_fol_print_task_preview_prints_requested_example_count(capsys) -> None:
+    task = FOLLayerTask(
+        distance_range=(2, 2),
+        batch_size=2,
+        mode="online",
+        seed=23,
+        task_split="depth3_fresh_icl",
+        split_role="train",
+        predicates_per_layer=4,
+        rules_per_transition=8,
+        fresh_icl_n_predicates=4,
+        arity_max=1,
+        vars_per_rule_max=4,
+        constants=("a", "b"),
+        k_in_max=1,
+        k_out_max=1,
+        initial_ant_max=2,
+        min_n_demos=1,
+        max_n_demos=2,
+        online_prefetch_backend="sync",
+    )
+
+    print_task_preview(task, role="train", n_examples=3)
+    out = capsys.readouterr().out
+
+    assert "TRAIN DATA PREVIEW (3 examples)" in out
+    assert out.count("example[") == 3
+
+
+def test_layer_fol_preview_rejects_offline_task(tmp_path: Path) -> None:
+    distance_dir = tmp_path / "distance_001"
+    distance_dir.mkdir(parents=True)
+    shard_path = distance_dir / "shard_00000.array_record"
+
+    tokenizer = tok.build_tokenizer_from_identifiers(["r0_1", "r1_1", "a", "b", "x1"])
+    prompt, completion = _simple_prompt_and_completion(tokenizer)
+    rec = {
+        "prompt": np.array(prompt, dtype=np.int32),
+        "completions": [np.array(completion, dtype=np.int32)],
+    }
+    _write_array_record(shard_path, [rec])
+    _write_metadata_for_records(tmp_path, tokenizer, [rec])
+
+    task = FOLLayerTask(
+        ds_path=tmp_path,
+        distance_range=(1, 1),
+        batch_size=1,
+        mode="offline",
+        shuffle=False,
+        worker_count=0,
+    )
+
+    with pytest.raises(ValueError, match="online FOLLayerTask"):
+        format_preview_record(task, rec, role="train")
 
 
 def test_layer_fol_task_online_sampling_respects_k_in_out_min() -> None:

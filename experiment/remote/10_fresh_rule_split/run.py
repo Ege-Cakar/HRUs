@@ -30,6 +30,7 @@ from task.layer_fol import (
     _build_tokenizer_for_fresh_icl,
     _fresh_predicate_sentinels,
     compute_fol_dims,
+    print_task_preview,
     run_layer_rollout_fol,
     sample_rollout_examples,
 )
@@ -67,6 +68,7 @@ TEST_EVERY = 1000
 TEST_ITERS = 2
 EVAL_ITERS_PER_ROLE = 2
 ROLLOUT_EXAMPLES_PER_ROLE = 64
+PREVIEW_EXAMPLES_PER_SPLIT = 3
 
 # RUN_SPLIT = 8
 RUN_SPLIT = 6
@@ -525,6 +527,43 @@ print(
         "n_layers": N_LAYERS,
     },
 )
+
+preview_train_task = _make_layer_task(
+    split_role="train",
+    seed=101,
+    drop_remainder=True,
+    shuffle=True,
+    min_n_demos=int(TRAIN_MIN_N_DEMOS),
+    max_n_demos=int(TRAIN_MAX_N_DEMOS),
+    fixed_length_mode=TRAIN_FIXED_LENGTH_MODE,
+    fixed_length_n_seq=TRAIN_N_SEQ_AR,
+)
+preview_eval_task = _make_layer_task(
+    split_role="eval",
+    seed=202,
+    drop_remainder=False,
+    shuffle=True,
+    min_n_demos=int(TRAIN_MIN_N_DEMOS),
+    max_n_demos=int(TRAIN_MAX_N_DEMOS),
+    fixed_length_mode=EVAL_FIXED_LENGTH_MODE,
+    fixed_length_n_seq=N_SEQ_AR,
+)
+try:
+    print_task_preview(
+        preview_train_task,
+        role="train",
+        n_examples=PREVIEW_EXAMPLES_PER_SPLIT,
+    )
+    print_task_preview(
+        preview_eval_task,
+        role="eval",
+        n_examples=PREVIEW_EXAMPLES_PER_SPLIT,
+    )
+finally:
+    for task in (preview_train_task, preview_eval_task):
+        close = getattr(task, "close", None)
+        if callable(close):
+            close()
 
 # <codecell>
 all_cases = []

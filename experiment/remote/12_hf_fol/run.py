@@ -37,6 +37,7 @@ from task.layer_fol import (
     FOLLayerTask,
     _build_tokenizer_for_fresh_icl,
     compute_fol_dims,
+    print_task_preview,
 )
 from task.layer_gen.util.fol_rule_bank import build_random_fol_rule_bank
 from train_hf import HFTrainConfig, train_hf
@@ -107,6 +108,7 @@ TRAIN_MIN_N_DEMOS = 4
 TRAIN_MAX_N_DEMOS = 8
 EVAL_MAX_N_DEMOS = 8
 FIXED_LENGTH_MODE = "next_pow2"
+PREVIEW_EXAMPLES_PER_SPLIT = 3
 
 BASE_SEED = 1000
 
@@ -156,6 +158,43 @@ def _ceil_pow2_int(n: int) -> int:
     return 1 << (n - 1).bit_length()
 
 
+def _make_layer_task(
+    *,
+    split_role: str,
+    seed: int,
+    drop_remainder: bool,
+    min_n_demos: int,
+    max_n_demos: int,
+):
+    return FOLLayerTask(
+        distance_range=(2, 2),
+        batch_size=int(BATCH_SIZE),
+        mode="online",
+        task_split="depth3_fresh_icl",
+        split_role=str(split_role),
+        shuffle=True,
+        seed=seed,
+        worker_count=0,
+        drop_remainder=drop_remainder,
+        prediction_objective="autoregressive",
+        predicates_per_layer=int(PREDICATES_PER_LAYER),
+        rules_per_transition=int(RULES_PER_TRANSITION),
+        fresh_icl_n_predicates=int(FRESH_ICL_N_PREDICATES),
+        arity_max=int(ARITY_MAX),
+        vars_per_rule_max=int(VARS_PER_RULE_MAX),
+        constants=tuple(str(tok) for tok in CONSTANTS),
+        k_in_max=int(K_IN_MAX),
+        k_out_max=int(K_OUT_MAX),
+        initial_ant_max=int(INITIAL_ANT_MAX),
+        min_n_demos=int(min_n_demos),
+        max_n_demos=int(max_n_demos),
+        sample_max_attempts=int(SAMPLE_MAX_ATTEMPTS),
+        max_unify_solutions=int(MAX_UNIFY_SOLUTIONS),
+        fixed_length_mode=str(FIXED_LENGTH_MODE),
+        fixed_length_n_seq=int(N_SEQ_AR),
+    )
+
+
 # <codecell>
 base_bank, fol_tokenizer = _build_base_bank_and_tokenizer()
 
@@ -193,60 +232,52 @@ accelerator = Accelerator(
 rank_seed = BASE_SEED + accelerator.process_index
 print(f"[Rank {accelerator.process_index}] data seed = {rank_seed}")
 
-train_task = FOLLayerTask(
-    distance_range=(2, 2),
-    batch_size=int(BATCH_SIZE),
-    mode="online",
-    task_split="depth3_fresh_icl",
+if accelerator.is_main_process:
+    preview_train_task = _make_layer_task(
+        split_role="train",
+        seed=rank_seed,
+        drop_remainder=True,
+        min_n_demos=int(TRAIN_MIN_N_DEMOS),
+        max_n_demos=int(TRAIN_MAX_N_DEMOS),
+    )
+    preview_eval_task = _make_layer_task(
+        split_role="eval",
+        seed=rank_seed + 500_000,
+        drop_remainder=False,
+        min_n_demos=int(EVAL_MAX_N_DEMOS),
+        max_n_demos=int(EVAL_MAX_N_DEMOS),
+    )
+    try:
+        print_task_preview(
+            preview_train_task,
+            role="train",
+            n_examples=PREVIEW_EXAMPLES_PER_SPLIT,
+        )
+        print_task_preview(
+            preview_eval_task,
+            role="eval",
+            n_examples=PREVIEW_EXAMPLES_PER_SPLIT,
+        )
+    finally:
+        for task in (preview_train_task, preview_eval_task):
+            close = getattr(task, "close", None)
+            if callable(close):
+                close()
+
+train_task = _make_layer_task(
     split_role="train",
-    shuffle=True,
     seed=rank_seed,
-    worker_count=0,
     drop_remainder=True,
-    prediction_objective="autoregressive",
-    predicates_per_layer=int(PREDICATES_PER_LAYER),
-    rules_per_transition=int(RULES_PER_TRANSITION),
-    fresh_icl_n_predicates=int(FRESH_ICL_N_PREDICATES),
-    arity_max=int(ARITY_MAX),
-    vars_per_rule_max=int(VARS_PER_RULE_MAX),
-    constants=tuple(str(tok) for tok in CONSTANTS),
-    k_in_max=int(K_IN_MAX),
-    k_out_max=int(K_OUT_MAX),
-    initial_ant_max=int(INITIAL_ANT_MAX),
     min_n_demos=int(TRAIN_MIN_N_DEMOS),
     max_n_demos=int(TRAIN_MAX_N_DEMOS),
-    sample_max_attempts=int(SAMPLE_MAX_ATTEMPTS),
-    max_unify_solutions=int(MAX_UNIFY_SOLUTIONS),
-    fixed_length_mode=str(FIXED_LENGTH_MODE),
-    fixed_length_n_seq=int(N_SEQ_AR),
 )
 
-eval_task = FOLLayerTask(
-    distance_range=(2, 2),
-    batch_size=int(BATCH_SIZE),
-    mode="online",
-    task_split="depth3_fresh_icl",
+eval_task = _make_layer_task(
     split_role="eval",
-    shuffle=True,
     seed=rank_seed + 500_000,
-    worker_count=0,
     drop_remainder=False,
-    prediction_objective="autoregressive",
-    predicates_per_layer=int(PREDICATES_PER_LAYER),
-    rules_per_transition=int(RULES_PER_TRANSITION),
-    fresh_icl_n_predicates=int(FRESH_ICL_N_PREDICATES),
-    arity_max=int(ARITY_MAX),
-    vars_per_rule_max=int(VARS_PER_RULE_MAX),
-    constants=tuple(str(tok) for tok in CONSTANTS),
-    k_in_max=int(K_IN_MAX),
-    k_out_max=int(K_OUT_MAX),
-    initial_ant_max=int(INITIAL_ANT_MAX),
     min_n_demos=int(EVAL_MAX_N_DEMOS),
     max_n_demos=int(EVAL_MAX_N_DEMOS),
-    sample_max_attempts=int(SAMPLE_MAX_ATTEMPTS),
-    max_unify_solutions=int(MAX_UNIFY_SOLUTIONS),
-    fixed_length_mode=str(FIXED_LENGTH_MODE),
-    fixed_length_n_seq=int(N_SEQ_AR),
 )
 
 
