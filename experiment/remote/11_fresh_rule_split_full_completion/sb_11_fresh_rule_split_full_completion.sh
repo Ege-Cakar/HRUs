@@ -11,5 +11,6 @@
 #SBATCH --mail-user=wtong@g.harvard.edu
 #SBATCH --account=kempner_pehlevan_lab
 
+module load cuda
 source ../../../.venv/bin/activate
 python run.py ${SLURM_ARRAY_TASK_ID}
