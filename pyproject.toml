@@ -41,3 +41,8 @@ dev = [
 ssm-kernels = [
     "jax-triton>=0.3.0",
 ]
+hf = [
+    "torch>=2.2",
+    "transformers>=4.40",
+    "accelerate>=0.30",
+]

@@ -44,14 +44,14 @@ SET_DIR = ROOT / "experiment" / "interactive" / "10_fresh_rule_split" / "set"
 SET_DIR.mkdir(parents=True, exist_ok=True)
 
 FRESH_ICL_CFG = {
-    "seed": 2040,
-    "predicates_per_layer": 16,
-    "rules_per_transition": 32,
-    "fresh_icl_n_predicates": 16,
+    "seed": 2043,
+    "predicates_per_layer": 8,
+    "rules_per_transition": 16,
+    "fresh_icl_n_predicates": 8,
     "arity_max": 0,
     "vars_per_rule_max": 6,
     "k_in_max": 1,
-    "k_out_max": 2,
+    "k_out_max": 1,
     "constants": tuple(f"p{i}" for i in range(32)),
 }
 TASK_CFG = {
@@ -237,12 +237,12 @@ print("dims_eval:", dims_eval)
 print(f"N_VOCAB={N_VOCAB}  N_SEQ={N_SEQ}  MAX_COMPLETION_LEN={MAX_COMPLETION_LEN}")
 
 TRAIN_CFG = {
-    "n_layers": 12,
-    "n_hidden": 768,
-    "n_heads": 12,
+    "n_layers": 2,
+    "n_hidden": 4096,
+    "n_heads": 64,
     # "lr": 5e-4,
-    "lr": warmup_cosine_schedule(5e-4, 10_000),
-    "train_iters": 10_000,
+    "lr": warmup_cosine_schedule(1e-4, 100_000, warmup_frac=0.05),
+    "train_iters": 100_000,
     "test_every": 1000,
     "test_iters": 1,
     "batch_size": 32,
@@ -566,9 +566,9 @@ class DemoAugmentedAdapter:
         )
 
 
-N_ROLLOUT_PREVIEW = 5
+N_ROLLOUT_PREVIEW = 10
 MAX_UNIFY_SOLUTIONS = 128
-rollout_rng = np.random.default_rng(42)
+rollout_rng = np.random.default_rng(45)
 
 
 def preview_rollout(

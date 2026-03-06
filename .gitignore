@@ -15,6 +15,7 @@ repl/
 data/
 **/*.csv
 set/
+*.old
 
 # ignore slurm logging outputs
 *.err
