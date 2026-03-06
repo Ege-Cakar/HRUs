@@ -50,7 +50,7 @@ MODEL_CONFIGS = [
     {
         "name": "pythia-1b",
         "model_name_or_path": "EleutherAI/pythia-1b",
-        "lr": 1e-5,
+        "lr": 5e-5,
         "torch_dtype": "bfloat16",
         "attn_implementation": "flash_attention_2",
     },
@@ -58,7 +58,7 @@ MODEL_CONFIGS = [
         "name": "mamba2-1.3b",
         # "model_name_or_path": "state-spaces/mamba2-1.3b",
         "model_name_or_path": "AntonV/mamba2-1.3b-hf",
-        "lr": 1e-5,
+        "lr": 5e-5,
         "torch_dtype": "bfloat16",
     },
 ]
@@ -81,7 +81,7 @@ USE_WANDB = True
 
 BATCH_SIZE = 4  # per device; effective = BATCH_SIZE × GRAD_ACCUM × num_gpus = 32
 TRAIN_ITERS = 10_000
-TEST_EVERY = 1_000
+TEST_EVERY = 100
 TEST_ITERS = 2
 GRAD_ACCUM_STEPS = 1
 
@@ -92,7 +92,7 @@ LR = model_cfg["lr"]
 WEIGHT_DECAY = 0.01
 WARMUP_FRAC = 0.1
 MAX_GRAD_NORM = 1.0
-MIXED_PRECISION = "bf16"
+MIXED_PRECISION = "no"   # models loaded in bf16 via torch_dtype; Accelerate autocast is redundant
 
 PREDICATES_PER_LAYER = 8
 RULES_PER_TRANSITION = 16

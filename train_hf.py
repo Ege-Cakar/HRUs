@@ -235,6 +235,15 @@ def train_hf(
     if print_fn is None:
         print_fn = _default_print_fn
 
+    if config.torch_dtype is not None and config.mixed_precision != "no":
+        import warnings
+        warnings.warn(
+            f"torch_dtype={config.torch_dtype!r} with mixed_precision={config.mixed_precision!r}: "
+            "Accelerate's fp32 output conversion may crash on models with non-tensor "
+            "cache objects (e.g. Mamba2). Consider mixed_precision='no' when torch_dtype is set.",
+            stacklevel=2,
+        )
+
     # --- Accelerator ---
     own_accelerator = accelerator is None
     if own_accelerator:
