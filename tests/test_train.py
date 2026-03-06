@@ -1,5 +1,6 @@
 """Tests for training utilities."""
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
@@ -240,6 +241,22 @@ class SimpleIterator:
         return self
 
 
+class CountingIterator:
+    """Iterator that returns a constant batch and counts fetches."""
+
+    def __init__(self, batch):
+        self.batch = batch
+        self.count = 0
+        self.batch_size = int(np.asarray(batch[0]).shape[0])
+
+    def __next__(self):
+        self.count += 1
+        return self.batch
+
+    def __iter__(self):
+        return self
+
+
 class TestTrain:
     """Tests for the main train function."""
 
@@ -304,6 +321,115 @@ class TestTrain:
 
         assert isinstance(optimizer, nnx.Optimizer)
         assert len(hist['train']) == 2
+
+    def test_gradient_accumulation_matches_large_batch_update(self):
+        config = MixerConfig(n_vocab=64, n_hidden=16, n_seq=6, n_layers=1, n_out=1)
+
+        x1 = jnp.array([[1, 2, 3, 4, 5, 6], [2, 3, 4, 5, 6, 7]], dtype=jnp.int32)
+        y1 = jnp.array([0.0, 1.0], dtype=jnp.float32)
+        x2 = jnp.array([[3, 4, 5, 6, 7, 8], [4, 5, 6, 7, 8, 9]], dtype=jnp.int32)
+        y2 = jnp.array([1.0, 0.0], dtype=jnp.float32)
+
+        full_batch = (jnp.concatenate([x1, x2], axis=0), jnp.concatenate([y1, y2], axis=0))
+
+        eval_iter_single = SimpleIterator(*full_batch)
+        eval_iter_accum = SimpleIterator(*full_batch)
+
+        optimizer_single, _ = train(
+            config,
+            train_iter=SimpleIterator(*full_batch),
+            test_iter=eval_iter_single,
+            loss='bce',
+            train_iters=1,
+            test_iters=1,
+            test_every=1,
+            grad_accum_steps=1,
+            optim=optax.sgd,
+            lr=1e-2,
+            seed=7,
+        )
+
+        class _AccumIterator:
+            def __init__(self, batches):
+                self.batches = list(batches)
+                self.idx = 0
+                self.batch_size = int(np.asarray(self.batches[0][0]).shape[0])
+
+            def __next__(self):
+                batch = self.batches[self.idx % len(self.batches)]
+                self.idx += 1
+                return batch
+
+            def __iter__(self):
+                return self
+
+        optimizer_accum, _ = train(
+            config,
+            train_iter=_AccumIterator([(x1, y1), (x2, y2)]),
+            test_iter=eval_iter_accum,
+            loss='bce',
+            train_iters=1,
+            test_iters=1,
+            test_every=1,
+            grad_accum_steps=2,
+            optim=optax.sgd,
+            lr=1e-2,
+            seed=7,
+        )
+
+        state_single = nnx.state(optimizer_single.model)
+        state_accum = nnx.state(optimizer_accum.model)
+        leaves_single = jax.tree_util.tree_leaves(state_single)
+        leaves_accum = jax.tree_util.tree_leaves(state_accum)
+
+        assert len(leaves_single) == len(leaves_accum)
+        for lhs, rhs in zip(leaves_single, leaves_accum):
+            np.testing.assert_allclose(lhs, rhs, rtol=1e-5, atol=1e-5)
+
+    def test_gradient_accumulation_counts_optimizer_steps(self):
+        config = MixerConfig(n_vocab=100, n_hidden=32, n_seq=10, n_layers=1, n_out=1)
+        batch = (
+            jnp.ones((8, 10), dtype=jnp.int32),
+            jnp.array([0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0], dtype=jnp.float32),
+        )
+        train_iter = CountingIterator(batch)
+        test_iter = CountingIterator(batch)
+        print_steps = []
+
+        optimizer, hist = train(
+            config,
+            train_iter=train_iter,
+            test_iter=test_iter,
+            loss='bce',
+            train_iters=4,
+            test_iters=1,
+            test_every=2,
+            grad_accum_steps=3,
+            seed=42,
+            print_fn=lambda step, hist: print_steps.append(step),
+        )
+
+        assert isinstance(optimizer, nnx.Optimizer)
+        assert len(hist['train']) == 2
+        assert len(hist['test']) == 2
+        assert print_steps == [2, 4]
+        assert train_iter.count == 14
+        assert test_iter.count == 2
+
+    def test_gradient_accumulation_rejects_invalid_steps(self):
+        config = MixerConfig(n_vocab=100, n_hidden=32, n_seq=10, n_layers=1, n_out=1)
+        x = jnp.ones((8, 10), dtype=jnp.int32)
+        y = jnp.array([0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0])
+
+        with pytest.raises(ValueError, match='grad_accum_steps'):
+            train(
+                config,
+                train_iter=SimpleIterator(x, y),
+                loss='bce',
+                train_iters=1,
+                grad_accum_steps=0,
+                seed=42,
+            )
 
 
 class TestCase:
