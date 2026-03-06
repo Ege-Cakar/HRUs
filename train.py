@@ -97,42 +97,61 @@ def parse_loss_name(loss):
     return _LOSS_MAP[loss]
 
 
-def _make_train_step_fn(loss_func):
-    """Create a JIT-compiled train step function for a specific loss function."""
+def _compute_batch_loss(model, x, labels, loss_func):
+    logits = model(x)
+    train_loss = loss_func(logits, labels)
+
+    if len(labels.shape) > 1 and logits.shape == train_loss.shape:
+        train_loss = train_loss.mean(axis=-1)
+
+    return train_loss.mean()
+
+
+def _make_grad_step_fn(loss_func):
+    """Create a JIT-compiled loss/grad function for a specific loss function."""
     @nnx.jit
-    def _train_step_jit(optimizer: nnx.Optimizer, x, labels):
+    def _grad_step_jit(optimizer: nnx.Optimizer, x, labels):
         def loss_fn(model):
-            logits = model(x)
-            train_loss = loss_func(logits, labels)
+            return _compute_batch_loss(model, x, labels, loss_func)
 
-            if len(labels.shape) > 1 and logits.shape == train_loss.shape:
-                train_loss = train_loss.mean(axis=-1)
-
-            return train_loss.mean()
-
-        loss_val, grads = nnx.value_and_grad(
+        return nnx.value_and_grad(
             loss_fn, argnums=nnx.DiffState(0, optimizer.wrt)
         )(optimizer.model)
-        optimizer.update(grads)
-        return loss_val
-    
-    return _train_step_jit
+
+    return _grad_step_jit
 
 
-# Cache of JIT-compiled train step functions per loss function
-_train_step_cache: dict[Callable, Callable] = {}
+@nnx.jit
+def _apply_grads_jit(optimizer: nnx.Optimizer, grads):
+    optimizer.update(grads)
 
 
-def _get_train_step(loss_func):
-    if loss_func not in _train_step_cache:
-        _train_step_cache[loss_func] = _make_train_step_fn(loss_func)
-    return _train_step_cache[loss_func]
+# Cache of JIT-compiled train-step helpers per loss function
+_grad_step_cache: dict[Callable, Callable] = {}
+
+
+def _get_grad_step(loss_func):
+    if loss_func not in _grad_step_cache:
+        _grad_step_cache[loss_func] = _make_grad_step_fn(loss_func)
+    return _grad_step_cache[loss_func]
 
 
 def train_step(optimizer: nnx.Optimizer, batch, loss_func):
     """Perform a single training step (JIT-compiled, cached per loss function)."""
     x, labels = batch
-    return _get_train_step(loss_func)(optimizer, x, labels)
+    loss_val, grads = _get_grad_step(loss_func)(optimizer, x, labels)
+    _apply_grads_jit(optimizer, grads)
+    return loss_val
+
+
+def _accumulate_grads(accum_grads, grads):
+    if accum_grads is None:
+        return grads
+    return jax.tree.map(lambda a, b: a + b, accum_grads, grads)
+
+
+def _scale_grads(grads, scale: float):
+    return jax.tree.map(lambda x: x * scale, grads)
 
 
 def _preds_from_logits(logits):
@@ -199,7 +218,7 @@ def _init_history(optimizer, save_params):
 
 
 def _iter_steps(train_iter, train_iters, use_tqdm):
-    it = zip(range(train_iters), train_iter)
+    it = range(train_iters)
     return tqdm(it, total=train_iters) if use_tqdm else it
 
 
@@ -226,12 +245,36 @@ def _should_eval(step, train_iters, test_every):
     return ((step + 1) % test_every == 0) or ((step + 1) == train_iters)
 
 
+def _resolve_grad_accum_steps(grad_accum_steps):
+    grad_accum_steps = int(grad_accum_steps)
+    if grad_accum_steps < 1:
+        raise ValueError(f'grad_accum_steps must be >= 1, got {grad_accum_steps}')
+    return grad_accum_steps
+
+
+def _train_with_accumulation(optimizer, train_iter, loss_func, grad_accum_steps):
+    accum_grads = None
+    total_loss = 0.0
+
+    for _ in range(grad_accum_steps):
+        batch = next(train_iter)
+        x, labels = batch
+        loss_val, grads = _get_grad_step(loss_func)(optimizer, x, labels)
+        accum_grads = _accumulate_grads(accum_grads, grads)
+        total_loss += float(loss_val)
+
+    mean_grads = _scale_grads(accum_grads, 1.0 / float(grad_accum_steps))
+    _apply_grads_jit(optimizer, mean_grads)
+    return total_loss / float(grad_accum_steps)
+
+
 def train(config, train_iter,
           test_iter=None,
           loss='ce',
           eval_fns: Iterable = None, print_fn=None,
           summary_fn=None,
           train_iters=10_000, test_iters=1, test_every=1_000, save_params=False,
+          grad_accum_steps=1,
           optim=optax.adamw,
           seed=None, use_tqdm=False,
           **opt_kwargs):
@@ -241,12 +284,22 @@ def train(config, train_iter,
     eval_fns = _resolve_eval_fns(eval_fns)
     print_fn = _resolve_print_fn(print_fn)
     loss_func = parse_loss_name(loss)
+    grad_accum_steps = _resolve_grad_accum_steps(grad_accum_steps)
 
     optimizer = _build_optimizer(config, seed, optim, opt_kwargs)
     hist = _init_history(optimizer, save_params)
 
-    for step, batch in _iter_steps(train_iter, train_iters, use_tqdm):
-        train_step(optimizer, batch, loss_func)
+    for step in _iter_steps(train_iter, train_iters, use_tqdm):
+        if grad_accum_steps == 1:
+            batch = next(train_iter)
+            train_step(optimizer, batch, loss_func)
+        else:
+            _train_with_accumulation(
+                optimizer,
+                train_iter,
+                loss_func,
+                grad_accum_steps,
+            )
 
         if _should_eval(step, train_iters, test_every):
             all_train, all_test = _collect_eval(

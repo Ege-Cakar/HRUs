@@ -1,4 +1,4 @@
-"""Architecture sweep for the depth3_fresh_icl fresh-rule split."""
+"""Fresh-rule split with full-completion autoregressive training."""
 
 # <codecell>
 from __future__ import annotations
@@ -20,6 +20,7 @@ sys.path.append(str(ROOT))
 sys.path.append(str(LOCAL_DIR))
 
 from common import new_seed, split_cases
+from experiment.utils.metrics_utils import final_token_accuracy
 from model.eval_adapters import make_model_callable
 from model.ssm_bonsai import Mamba2BonsaiConfig
 from model.transformer import TransformerConfig
@@ -30,17 +31,21 @@ from task.layer_fol import (
     _build_tokenizer_for_fresh_icl,
     _fresh_predicate_sentinels,
     compute_fol_dims,
-    run_layer_rollout_fol,
+    evaluate_completion_paths_fol,
+    extract_ar_completion_path_inputs,
+    resolve_rule_sets_from_context,
     sample_rollout_examples,
+    summarize_completion_path_metrics,
+    validate_completion_path_fol,
 )
 from task.layer_gen.util.fol_rule_bank import (
+    FOLSequent,
     build_fresh_layer0_bank,
     build_random_fol_rule_bank,
     generate_fresh_predicate_names,
+    parse_atom_text,
 )
 from train import Case, ce_mask, warmup_cosine_schedule
-
-from experiment.utils.metrics_utils import final_token_accuracy
 
 
 RUN_ID = new_seed()
@@ -53,51 +58,51 @@ TRAIN_MAX_N_DEMOS = 8
 EVAL_MAX_N_DEMOS_SWEEP = [1, 2, 4, 8, 12, 16, 24, 32]
 SELECTION_EVAL_MAX_N_DEMOS = 8
 
-BATCH_SIZE = 32
-TRAIN_ITERS_SWEEP = [6400, 25600]
-# TRAIN_ITERS_SWEEP = [1600, 6400, 25600, 102400]
+BATCH_SIZE = 4
+GRAD_ACCUM_STEPS = 8
+EFFECTIVE_BATCH_SIZE = int(BATCH_SIZE) * int(GRAD_ACCUM_STEPS)
+TRAIN_ITERS_SWEEP = [1600, 6400, 25600]
 TEST_EVERY = 1000
 TEST_ITERS = 2
 EVAL_ITERS_PER_ROLE = 2
 ROLLOUT_EXAMPLES_PER_ROLE = 64
 
-# RUN_SPLIT = 8
-RUN_SPLIT = 4
+RUN_SPLIT = 6
 
 PREDICATES_PER_LAYER = 8
 RULES_PER_TRANSITION = 16
 FRESH_ICL_N_PREDICATES = 8
 N_LAYERS = 3
-# ARITY_MAX = 3
 ARITY_MAX = 1
 VARS_PER_RULE_MAX = 6
 K_IN_MAX = 1
 K_OUT_MAX = 1
 INITIAL_ANT_MAX = 1
-# CONSTANTS = [f"p{i}" for i in range(16)]
 CONSTANTS = [f"p{i}" for i in range(1)]
 SAMPLE_MAX_ATTEMPTS = 4096
 MAX_UNIFY_SOLUTIONS = 128
 BASE_BANK_SEED = 2042
+COMPLETION_STEPS_MAX = 2
 
 TRAIN_FIXED_LENGTH_MODE = "next_pow2"
 EVAL_FIXED_LENGTH_MODE = "next_pow2"
 
-TRANSFORMER_LAYERS = [12]
-TRANSFORMER_WIDTH_HEADS = [(4096, 64)]
-TRANSFORMER_LRS = [7e-5]
+TRANSFORMER_LAYERS = [48]
+TRANSFORMER_WIDTH_HEADS = [(1600, 25)]
+TRANSFORMER_LRS = [5e-5]
 TRANSFORMER_POS = ["rope"]
-TRANSFORMER_SWIGLU = [True]
+TRANSFORMER_SWIGLU = [False]
 
-MAMBA2_BONSAI_LAYERS = [12]
-MAMBA2_BONSAI_WIDTH_HEADS = [(6144, 8)]
-MAMBA2_BONSAI_D_STATE = [32]
+MAMBA2_BONSAI_LAYERS = [48]
+MAMBA2_BONSAI_WIDTH_HEADS = [(2304, 18)]
+MAMBA2_BONSAI_D_STATE = [64]
 MAMBA2_BONSAI_D_CONV = [4]
 MAMBA2_BONSAI_SCAN_CHUNK_LEN = [64]
-MAMBA2_BONSAI_LRS = [7e-5]
+MAMBA2_BONSAI_LRS = [5e-5]
 
 ### START TEST CONFIGS
-# BATCH_SIZE = 8
+# BATCH_SIZE = 2
+# GRAD_ACCUM_STEPS = 2
 # TRAIN_ITERS_SWEEP = [20]
 # TEST_EVERY = 10
 # TEST_ITERS = 1
@@ -110,11 +115,11 @@ MAMBA2_BONSAI_LRS = [7e-5]
 # PREDICATES_PER_LAYER = 10
 # RULES_PER_TRANSITION = 18
 # FRESH_ICL_N_PREDICATES = 10
-# TRANSFORMER_LAYERS = [1]
-# TRANSFORMER_WIDTH_HEADS = [(64, 4)]
+# TRANSFORMER_LAYERS = [2]
+# TRANSFORMER_WIDTH_HEADS = [(128, 4)]
 # TRANSFORMER_LRS = [3e-4]
-# MAMBA2_BONSAI_LAYERS = [1]
-# MAMBA2_BONSAI_WIDTH_HEADS = [(64, 4)]
+# MAMBA2_BONSAI_LAYERS = [2]
+# MAMBA2_BONSAI_WIDTH_HEADS = [(128, 4)]
 # MAMBA2_BONSAI_D_STATE = [8]
 # MAMBA2_BONSAI_D_CONV = [4]
 # MAMBA2_BONSAI_SCAN_CHUNK_LEN = [16]
@@ -153,7 +158,6 @@ def _mean_metrics(metrics_list):
 
 
 def _build_base_bank_and_tokenizer():
-    """Build a 3-layer base bank and the fresh-ICL tokenizer."""
     base_bank = build_random_fol_rule_bank(
         n_layers=int(N_LAYERS),
         predicates_per_layer=int(PREDICATES_PER_LAYER),
@@ -175,7 +179,6 @@ def _compute_dims(
     *,
     max_n_demos_for_shapes: int,
 ):
-    """Compute tensor dims from the base bank + fresh predicate estimates."""
     sentinels = _fresh_predicate_sentinels()
     extra_arities = {s: int(base_bank.arity_max) for s in sentinels}
     return compute_fol_dims(
@@ -183,6 +186,8 @@ def _compute_dims(
         tokenizer=tokenizer,
         initial_ant_max=int(INITIAL_ANT_MAX),
         max_n_demos=int(max_n_demos_for_shapes),
+        completion_format="full",
+        completion_steps_max=int(COMPLETION_STEPS_MAX),
         extra_predicate_arities=extra_arities,
         fresh_k_in_max=int(K_IN_MAX),
         fresh_k_out_max=int(K_OUT_MAX),
@@ -211,6 +216,7 @@ def _make_layer_task(
         worker_count=0,
         drop_remainder=drop_remainder,
         prediction_objective="autoregressive",
+        completion_format="full",
         predicates_per_layer=int(PREDICATES_PER_LAYER),
         rules_per_transition=int(RULES_PER_TRANSITION),
         fresh_icl_n_predicates=int(FRESH_ICL_N_PREDICATES),
@@ -273,6 +279,78 @@ def make_print_fn(metric_key: str):
     return _print
 
 
+def _sample_batched_records(task: FOLLayerTask):
+    records = [task._sample_online_record() for _ in range(task.batch_size)]
+    batch = task._apply_autoreg_fixed_length(task._batch_fn(records))
+    return records, batch
+
+
+def _completion_metrics_from_batch(
+    optimizer,
+    *,
+    batch,
+    tokenizer,
+    rule_bank,
+    records,
+):
+    xs, labels = batch
+    logits = optimizer.model(xs)
+
+    loss_val = ce_mask(logits, labels)
+    preds = jnp.argmax(logits, axis=-1)
+    mask = labels != 0
+    total = jnp.maximum(jnp.sum(mask), 1)
+    token_acc = jnp.sum((preds == labels) & mask) / total
+    final_acc = final_token_accuracy(preds, labels)
+    seq_correct = (preds == labels) | (~mask)
+    seq_exact_acc = jnp.mean(jnp.all(seq_correct, axis=1))
+
+    prompt_tokens, pred_completions, _ = extract_ar_completion_path_inputs(
+        preds=np.asarray(preds),
+        labels=np.asarray(labels),
+        xs=np.asarray(xs),
+        tokenizer=tokenizer,
+    )
+    active_rules_by_example = []
+    fixed_rules_by_example = []
+    demo_rules_by_example = []
+    for record in records:
+        active, fixed, demo = resolve_rule_sets_from_context(
+            src_layer=int(record["src_layer"]),
+            rule_context=record.get("rule_context"),
+        )
+        active_rules_by_example.append(active)
+        fixed_rules_by_example.append(fixed)
+        demo_rules_by_example.append(demo)
+
+    completion_metrics = evaluate_completion_paths_fol(
+        rule_bank=rule_bank,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=pred_completions,
+        tokenizer=tokenizer,
+        active_rules_by_example=active_rules_by_example,
+        fixed_rules_by_example=fixed_rules_by_example,
+        demo_rules_by_example=demo_rules_by_example,
+    )
+
+    return {
+        "loss": loss_val,
+        "token_acc": token_acc,
+        "final_token_acc": final_acc,
+        "seq_exact_acc": seq_exact_acc,
+        **summarize_completion_path_metrics(completion_metrics),
+    }
+
+
+def _prompt_from_rollout_example(example, tokenizer):
+    return tokenizer.tokenize_prompt(
+        FOLSequent(
+            ants=tuple(parse_atom_text(atom_text) for atom_text in example.initial_ants),
+            cons=parse_atom_text(example.goal_atom),
+        )
+    )
+
+
 def _evaluate_role_for_demo(
     optimizer,
     *,
@@ -296,8 +374,6 @@ def _evaluate_role_for_demo(
             jit_step=True,
         )
 
-    metrics_fn = make_ar_light_metrics_fn()
-
     seq_len_counts: Counter[int] = Counter()
     n_eval_batches = 0
 
@@ -314,19 +390,26 @@ def _evaluate_role_for_demo(
     try:
         all_batch_metrics = []
         for _ in range(int(n_iters)):
-            batch = next(eval_task)
+            records, batch = _sample_batched_records(eval_task)
             xs = np.asarray(batch[0])
             if xs.ndim == 2:
                 seq_len_counts[int(xs.shape[1])] += 1
             n_eval_batches += 1
-            all_batch_metrics.append(metrics_fn(optimizer, batch))
+            all_batch_metrics.append(
+                _completion_metrics_from_batch(
+                    optimizer,
+                    batch=batch,
+                    tokenizer=tokenizer,
+                    rule_bank=rule_bank,
+                    records=records,
+                )
+            )
         agg = _mean_metrics(all_batch_metrics)
     finally:
         close = getattr(eval_task, "close", None)
         if callable(close):
             close()
 
-    # --- Per-example rollouts with fresh temp banks ---
     rollout_rng = np.random.default_rng(
         int(RUN_ID)
         + 1_000 * int(eval_max_n_demos)
@@ -336,15 +419,16 @@ def _evaluate_role_for_demo(
     n_rollout_success = 0
     n_rollout_decode_error = 0
     n_rollout_unknown_rule_error = 0
-    n_rollout_wrong_rule_error = 0
     n_rollout_inapplicable_rule_error = 0
     n_rollout_goal_not_reached = 0
     rollout_steps: list[int] = []
 
     rollout_demo_adapter = None
     for _ in range(int(ROLLOUT_EXAMPLES_PER_ROLE)):
-        # Build a per-example fresh bank
-        fresh_preds = generate_fresh_predicate_names(int(FRESH_ICL_N_PREDICATES), rollout_rng)
+        fresh_preds = generate_fresh_predicate_names(
+            int(FRESH_ICL_N_PREDICATES),
+            rollout_rng,
+        )
         temp_bank = build_fresh_layer0_bank(
             base_bank=rule_bank,
             fresh_predicates=fresh_preds,
@@ -356,7 +440,6 @@ def _evaluate_role_for_demo(
             rng=rollout_rng,
         )
 
-        # Build/reuse a rollout adapter that uses the temp bank for demos
         if rollout_demo_adapter is None:
             rollout_demo_adapter = FOLDemoAugmentedAdapter(
                 base_adapter=shared_adapter,
@@ -369,7 +452,6 @@ def _evaluate_role_for_demo(
         else:
             rollout_demo_adapter.rule_bank = temp_bank
 
-        # Sample one rollout example from this bank
         examples = sample_rollout_examples(
             rule_bank=temp_bank,
             distance=2,
@@ -379,30 +461,32 @@ def _evaluate_role_for_demo(
             max_unify_solutions=int(MAX_UNIFY_SOLUTIONS),
             rng=rollout_rng,
         )
-
-        # Run rollout with the temp bank
-        result = run_layer_rollout_fol(
-            rule_bank=temp_bank,
-            example=examples[0],
+        prompt_tokens = _prompt_from_rollout_example(examples[0], tokenizer)
+        completion = rollout_demo_adapter.predict_completion(
             model=model_fn,
-            adapter=rollout_demo_adapter,
+            prompt_tokens=prompt_tokens,
             tokenizer=tokenizer,
             temperature=0.0,
             rng=rollout_rng,
         )
+        path_result = validate_completion_path_fol(
+            rule_bank=temp_bank,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion,
+            tokenizer=tokenizer,
+            demo_rules=rollout_demo_adapter.get_last_demo_rules(),
+        )
 
-        rollout_steps.append(int(result.n_steps))
-        if result.success:
+        rollout_steps.append(int(path_result.n_steps))
+        if path_result.success:
             n_rollout_success += 1
-        elif result.failure_reason == "decode_error":
+        elif path_result.failure_reason == "decode_error":
             n_rollout_decode_error += 1
-        elif result.failure_reason == "unknown_rule_error":
+        elif path_result.failure_reason == "unknown_rule_error":
             n_rollout_unknown_rule_error += 1
-        elif result.failure_reason == "wrong_rule_error":
-            n_rollout_wrong_rule_error += 1
-        elif result.failure_reason == "inapplicable_rule_error":
+        elif path_result.failure_reason == "inapplicable_rule_error":
             n_rollout_inapplicable_rule_error += 1
-        elif result.failure_reason == "goal_not_reached":
+        elif path_result.failure_reason == "goal_not_reached":
             n_rollout_goal_not_reached += 1
 
     n_rollout_total = int(ROLLOUT_EXAMPLES_PER_ROLE)
@@ -424,7 +508,6 @@ def _evaluate_role_for_demo(
             "rollout_success_rate": _rollout_rate(n_rollout_success),
             "rollout_decode_error_rate": _rollout_rate(n_rollout_decode_error),
             "rollout_unknown_rule_error_rate": _rollout_rate(n_rollout_unknown_rule_error),
-            "rollout_wrong_rule_error_rate": _rollout_rate(n_rollout_wrong_rule_error),
             "rollout_inapplicable_rule_error_rate": _rollout_rate(
                 n_rollout_inapplicable_rule_error
             ),
@@ -501,8 +584,10 @@ print(
         "rules_per_transition": RULES_PER_TRANSITION,
         "fresh_icl_n_predicates": FRESH_ICL_N_PREDICATES,
         "n_layers": N_LAYERS,
+        "completion_steps_max": COMPLETION_STEPS_MAX,
     },
 )
+
 
 # <codecell>
 all_cases = []
@@ -562,13 +647,15 @@ for n_layers, (n_hidden, n_heads), lr, pos_encoding, use_swiglu, train_iters in 
         "train_iters": int(train_iters),
         "test_iters": TEST_ITERS,
         "test_every": TEST_EVERY,
+        "grad_accum_steps": int(GRAD_ACCUM_STEPS),
         "lr": warmup_cosine_schedule(lr, int(train_iters)),
     }
 
     info = {
         "model_family": "transformer",
-        "target_format": "next_token_full_sequence",
+        "target_format": "next_token_full_completion_path",
         "task_split": "depth3_fresh_icl",
+        "completion_format": "full",
         "eval_roles": list(EVAL_ROLES),
         "distance_range": [2],
         "train_max_n_demos": int(TRAIN_MAX_N_DEMOS),
@@ -587,13 +674,16 @@ for n_layers, (n_hidden, n_heads), lr, pos_encoding, use_swiglu, train_iters in 
         "eval_fixed_length_n_seq": N_SEQ_AR,
         "train_eval_profile": "light",
         "train_iters": int(train_iters),
+        "grad_accum_steps": int(GRAD_ACCUM_STEPS),
+        "microbatch_size": int(BATCH_SIZE),
+        "effective_batch_size": int(EFFECTIVE_BATCH_SIZE),
     }
 
     case = Case(
         (
-            f"10_fresh_rule_split_transformer_"
+            "11_fresh_rule_split_full_completion_transformer_"
             f"l{int(n_layers)}_h{int(n_hidden)}_heads{int(n_heads)}_"
-            f"lr{_lr_tag(lr)}_ti{int(train_iters)}"
+            f"lr{_lr_tag(lr)}_ga{int(GRAD_ACCUM_STEPS)}_ti{int(train_iters)}"
         ),
         config,
         train_task=train_task,
@@ -659,13 +749,15 @@ for n_layers, (n_hidden, n_heads), d_state, d_conv, scan_chunk_len, lr, train_it
         "train_iters": int(train_iters),
         "test_iters": TEST_ITERS,
         "test_every": TEST_EVERY,
+        "grad_accum_steps": int(GRAD_ACCUM_STEPS),
         "lr": warmup_cosine_schedule(lr, int(train_iters)),
     }
 
     info = {
         "model_family": "mamba2_bonsai",
-        "target_format": "next_token_full_sequence",
+        "target_format": "next_token_full_completion_path",
         "task_split": "depth3_fresh_icl",
+        "completion_format": "full",
         "eval_roles": list(EVAL_ROLES),
         "distance_range": [2],
         "train_max_n_demos": int(TRAIN_MAX_N_DEMOS),
@@ -685,13 +777,16 @@ for n_layers, (n_hidden, n_heads), d_state, d_conv, scan_chunk_len, lr, train_it
         "eval_fixed_length_n_seq": N_SEQ_AR,
         "train_eval_profile": "light",
         "train_iters": int(train_iters),
+        "grad_accum_steps": int(GRAD_ACCUM_STEPS),
+        "microbatch_size": int(BATCH_SIZE),
+        "effective_batch_size": int(EFFECTIVE_BATCH_SIZE),
     }
 
     case = Case(
         (
-            "10_fresh_rule_split_mamba2_bonsai_"
+            "11_fresh_rule_split_full_completion_mamba2_bonsai_"
             f"l{int(n_layers)}_h{int(n_hidden)}_heads{int(n_heads)}_"
-            f"ds{int(d_state)}_lr{_lr_tag(lr)}_ti{int(train_iters)}"
+            f"ds{int(d_state)}_lr{_lr_tag(lr)}_ga{int(GRAD_ACCUM_STEPS)}_ti{int(train_iters)}"
         ),
         config,
         train_task=train_task,
@@ -774,6 +869,7 @@ for case in tqdm(all_cases, desc="cases", leave=True):
             "train_iters": case.train_args["train_iters"],
             "test_iters": case.train_args["test_iters"],
             "test_every": case.train_args["test_every"],
+            "grad_accum_steps": case.train_args["grad_accum_steps"],
             "lr": case.info["lr"],
             "eval_profile": case.info.get("train_eval_profile", "light"),
         },
@@ -809,6 +905,7 @@ for case in tqdm(all_cases, desc="cases", leave=True):
             "constants": list(CONSTANTS),
             "train_max_n_demos": int(TRAIN_MAX_N_DEMOS),
             "eval_max_n_demos_sweep": [int(v) for v in EVAL_MAX_N_DEMOS_SWEEP],
+            "completion_steps_max": int(COMPLETION_STEPS_MAX),
             "sample_max_attempts": SAMPLE_MAX_ATTEMPTS,
             "max_unify_solutions": MAX_UNIFY_SOLUTIONS,
         },
