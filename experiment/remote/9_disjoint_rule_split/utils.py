@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from task.layer_fol_eval import infer_fol_predicate_layer, predicted_rule_reaches_goal, reachable_goal_exact_steps
-from task.layer_fol_eval_inputs import (
+from task.layer_fol.eval import infer_fol_predicate_layer, predicted_rule_reaches_goal, reachable_goal_exact_steps
+from task.layer_fol.eval_inputs import (
     _find_sequent_prompt_in_tokens,
     extract_ar_free_run_eval_inputs,
     extract_ar_rule_match_inputs,

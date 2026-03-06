@@ -9,7 +9,7 @@ import numpy as np
 
 from task.layer_gen.util import tokenize_layer_fol
 from task.layer_gen.util.fol_rule_bank import FOLAtom, FOLLayerRule, FOLRuleBank
-from task.layer_fol_eval_inputs import extract_prompt_info_from_row_tokens
+from .eval_inputs import extract_prompt_info_from_row_tokens
 
 
 def _is_variable(token: str) -> bool:

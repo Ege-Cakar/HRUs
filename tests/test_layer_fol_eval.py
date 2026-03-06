@@ -18,7 +18,7 @@ from task.layer_fol import (
     run_layer_rollout_fol,
     validate_completion_path_fol,
 )
-from task.layer_fol_demos import _find_lhs_substitutions_for_facts, _subst_binds_rhs_variables
+from task.layer_fol.demos import _find_lhs_substitutions_for_facts, _subst_binds_rhs_variables
 from task.layer_gen.util.fol_rule_bank import (
     FOLAtom,
     FOLLayerRule,

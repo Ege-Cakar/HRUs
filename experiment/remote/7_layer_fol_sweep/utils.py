@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from task.layer_fol_eval_inputs import (
+from task.layer_fol.eval_inputs import (
     extract_ar_completion_path_inputs,
     extract_ar_rule_match_inputs,
     extract_completion_path_inputs,

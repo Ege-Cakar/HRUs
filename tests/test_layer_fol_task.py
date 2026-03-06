@@ -821,7 +821,7 @@ def test_layer_fol_task_online_prefetch_process_fallback(monkeypatch) -> None:
     def _raise_process(*args, **kwargs):
         raise OSError("process pool unavailable")
 
-    monkeypatch.setattr("task.layer_fol_task.ProcessPoolExecutor", _raise_process)
+    monkeypatch.setattr("task.layer_fol.task_prefetch.ProcessPoolExecutor", _raise_process)
     task = FOLLayerTask(
         distance_range=(1, 2),
         batch_size=2,
@@ -855,7 +855,10 @@ def test_layer_fol_task_online_prefetch_server_fallback(monkeypatch) -> None:
         def __init__(self, **kwargs):
             raise RuntimeError("server unavailable")
 
-    monkeypatch.setattr("task.layer_fol_task._FOLOnlineSamplerServerClient", _FailServerClient)
+    monkeypatch.setattr(
+        "task.layer_fol.task_prefetch._FOLOnlineSamplerServerClient",
+        _FailServerClient,
+    )
     task = FOLLayerTask(
         distance_range=(1, 2),
         batch_size=2,

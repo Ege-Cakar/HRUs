@@ -1342,7 +1342,7 @@ def reachable_goal_exact_steps(
     max_unify_solutions: int,
     memo: dict[tuple[int, int, tuple[str, ...]], bool],
 ) -> bool:
-    from task.layer_fol_demos import (
+    from task.layer_fol.demos import (
         _find_lhs_substitutions_for_facts,
         _subst_binds_rhs_variables,
     )

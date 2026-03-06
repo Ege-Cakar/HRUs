@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from task.layer_fol_eval import (
+from .eval import (
     FOLCompletionPathMetrics,
     FOLRuleMatchMetrics,
     infer_fol_predicate_layer,
