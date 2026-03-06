@@ -37,10 +37,15 @@ from model.normative import (
 from model.transformer import TransformerConfig
 from task.prop import ImplySizeTask
 from train import Case
+from wandb_utils import make_experiment_wandb_config
 
 
 RUN_ID = new_seed()
 print("RUN ID", RUN_ID)
+
+WANDB_PROJECT = Path(__file__).resolve().parent.name
+WANDB_API_KEY_PATH = ROOT / "key" / "wandb.txt"
+USE_WANDB = True
 
 DS_PATH = Path("/n/netscratch/pehlevan_lab/Lab/wlt/data/math/toy_imply")
 
@@ -104,7 +109,21 @@ NORM_TEST_BATCHES = 64
 # RUN_SPLIT = 1
 # NORM_TRAIN_BATCHES = 8
 # NORM_TEST_BATCHES = 4
+# USE_WANDB = False
 ### END TEST CONFIGS
+
+
+def _make_case_wandb_cfg(*, case_name, model_config, train_args, info):
+    return make_experiment_wandb_config(
+        enabled=USE_WANDB,
+        project=WANDB_PROJECT,
+        run_id=RUN_ID,
+        run_name=f"{case_name}-{RUN_ID}",
+        api_key_path=WANDB_API_KEY_PATH,
+        model_config=model_config,
+        train_args=train_args,
+        info=info,
+    )
 
 
 def make_transformer_metrics_fn():
@@ -279,6 +298,12 @@ for regime in SIZE_REGIMES:
             "lr": lr,
             "nonlinearity": nonlin_name,
         }
+        train_args["wandb_cfg"] = _make_case_wandb_cfg(
+            case_name="ImplySizeNormative",
+            model_config=config,
+            train_args=train_args,
+            info=info,
+        )
         all_cases.append(
             Case(
                 "ImplySizeNormative",

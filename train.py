@@ -10,6 +10,7 @@ import optax
 from tqdm import tqdm
 
 from common import new_seed, merge_dicts
+from wandb_utils import WandbConfig, log_wandb_metrics, wandb_run_context
 
 
 def warmup_cosine_schedule(peak_lr, train_iters, warmup_frac=0.1, end_lr=0.0):
@@ -273,6 +274,7 @@ def train(config, train_iter,
           loss='ce',
           eval_fns: Iterable = None, print_fn=None,
           summary_fn=None,
+          wandb_cfg: WandbConfig | None = None,
           train_iters=10_000, test_iters=1, test_every=1_000, save_params=False,
           grad_accum_steps=1,
           optim=optax.adamw,
@@ -289,33 +291,44 @@ def train(config, train_iter,
     optimizer = _build_optimizer(config, seed, optim, opt_kwargs)
     hist = _init_history(optimizer, save_params)
 
-    for step in _iter_steps(train_iter, train_iters, use_tqdm):
-        if grad_accum_steps == 1:
-            batch = next(train_iter)
-            train_step(optimizer, batch, loss_func)
-        else:
-            _train_with_accumulation(
-                optimizer,
-                train_iter,
-                loss_func,
-                grad_accum_steps,
-            )
+    with wandb_run_context(wandb_cfg) as wandb:
+        for step in _iter_steps(train_iter, train_iters, use_tqdm):
+            if grad_accum_steps == 1:
+                batch = next(train_iter)
+                train_step(optimizer, batch, loss_func)
+            else:
+                _train_with_accumulation(
+                    optimizer,
+                    train_iter,
+                    loss_func,
+                    grad_accum_steps,
+                )
 
-        if _should_eval(step, train_iters, test_every):
-            all_train, all_test = _collect_eval(
-                optimizer, train_iter, test_iter, eval_fns, loss, test_iters
-            )
+            if _should_eval(step, train_iters, test_every):
+                all_train, all_test = _collect_eval(
+                    optimizer, train_iter, test_iter, eval_fns, loss, test_iters
+                )
 
-            hist['train'].append(all_train)
-            hist['test'].append(all_test)
+                hist['train'].append(all_train)
+                hist['test'].append(all_test)
 
-            if summary_fn is not None:
-                hist['summary'].append(summary_fn(optimizer))
+                summary_metrics = None
+                if summary_fn is not None:
+                    summary_metrics = summary_fn(optimizer)
+                    hist['summary'].append(summary_metrics)
 
-            print_fn((step + 1), hist)
+                log_wandb_metrics(
+                    wandb,
+                    step=step + 1,
+                    train=all_train,
+                    test=all_test,
+                    summary=summary_metrics,
+                )
 
-            if save_params:
-                hist['params'].append(nnx.state(optimizer.model))
+                print_fn((step + 1), hist)
+
+                if save_params:
+                    hist['params'].append(nnx.state(optimizer.model))
 
     return optimizer, hist
 

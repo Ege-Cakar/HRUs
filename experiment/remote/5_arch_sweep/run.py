@@ -22,6 +22,7 @@ from model.transformer import TransformerConfig
 from task.prop_ar import ImplyAutoregSizeTask
 from task.prop_gen.util.tokenize_ar import eot_token_id, sep_token_id
 from train import Case, ce_mask
+from wandb_utils import make_experiment_wandb_config
 
 from experiment.utils.batch_adapters import MixerBatchAdapter
 from experiment.utils.data_utils import build_completion_targets, build_prompt_only_inputs
@@ -30,6 +31,10 @@ from experiment.utils.metrics_utils import final_token_accuracy
 
 RUN_ID = new_seed()
 print("RUN ID", RUN_ID)
+
+WANDB_PROJECT = Path(__file__).resolve().parent.name
+WANDB_API_KEY_PATH = ROOT / "key" / "wandb.txt"
+USE_WANDB = True
 
 DS_PATH = Path("/n/netscratch/pehlevan_lab/Lab/wlt/data/math/toy_imply_ar")
 
@@ -92,7 +97,21 @@ MIXER_LRS = [3e-4, 1e-3, 3e-3]
 # MIXER_HIDDEN = [128]
 # MIXER_CHANNELS = [64]
 # MIXER_LRS = [1e-3]
+# USE_WANDB = False
 ### END TEST CONFIGS
+
+
+def _make_case_wandb_cfg(*, case_name, model_config, train_args, info):
+    return make_experiment_wandb_config(
+        enabled=USE_WANDB,
+        project=WANDB_PROJECT,
+        run_id=RUN_ID,
+        run_name=f"{case_name}-{RUN_ID}",
+        api_key_path=WANDB_API_KEY_PATH,
+        model_config=model_config,
+        train_args=train_args,
+        info=info,
+    )
 
 
 def _stats_for_sizes(size_range):
@@ -341,10 +360,17 @@ for train_max_size in TRAIN_MAX_SIZES:
             "n_vocab": n_vocab,
             "n_seq": n_seq,
         }
+        case_name = f"5_arch_sweep_transformer_tmax{int(train_max_size):02d}"
+        train_args["wandb_cfg"] = _make_case_wandb_cfg(
+            case_name=case_name,
+            model_config=config,
+            train_args=train_args,
+            info=info,
+        )
 
         all_cases.append(
             Case(
-                f"5_arch_sweep_transformer_tmax{int(train_max_size):02d}",
+                case_name,
                 config,
                 train_task=train_task,
                 test_task=test_task,
@@ -411,10 +437,17 @@ for train_max_size in TRAIN_MAX_SIZES:
             "n_vocab": n_vocab,
             "n_seq": n_seq,
         }
+        case_name = f"5_arch_sweep_mamba2_tmax{int(train_max_size):02d}"
+        train_args["wandb_cfg"] = _make_case_wandb_cfg(
+            case_name=case_name,
+            model_config=config,
+            train_args=train_args,
+            info=info,
+        )
 
         all_cases.append(
             Case(
-                f"5_arch_sweep_mamba2_tmax{int(train_max_size):02d}",
+                case_name,
                 config,
                 train_task=train_task,
                 test_task=test_task,
@@ -500,10 +533,17 @@ for train_max_size in TRAIN_MAX_SIZES:
             "n_seq": n_seq,
             "max_out_len": max_out_len,
         }
+        case_name = f"5_arch_sweep_mixer_completion_tmax{int(train_max_size):02d}"
+        train_args["wandb_cfg"] = _make_case_wandb_cfg(
+            case_name=case_name,
+            model_config=config,
+            train_args=train_args,
+            info=info,
+        )
 
         all_cases.append(
             Case(
-                f"5_arch_sweep_mixer_completion_tmax{int(train_max_size):02d}",
+                case_name,
                 config,
                 train_task=train_task,
                 test_task=test_task,

@@ -41,10 +41,15 @@ from task.layer_gen.util.fol_rule_bank import (
 from train import Case, ce_mask, warmup_cosine_schedule
 
 from experiment.utils.metrics_utils import final_token_accuracy
+from wandb_utils import make_experiment_wandb_config
 
 
 RUN_ID = new_seed()
 print("RUN ID", RUN_ID)
+
+WANDB_PROJECT = Path(__file__).resolve().parent.name
+WANDB_API_KEY_PATH = ROOT / "key" / "wandb.txt"
+USE_WANDB = True
 
 EVAL_ROLES = ["train", "eval"]
 
@@ -53,8 +58,10 @@ TRAIN_MAX_N_DEMOS = 8
 EVAL_MAX_N_DEMOS_SWEEP = [1, 2, 4, 8, 12, 16, 24, 32]
 SELECTION_EVAL_MAX_N_DEMOS = 8
 
-BATCH_SIZE = 32
-TRAIN_ITERS_SWEEP = [6400, 25600]
+BATCH_SIZE = 4
+GRAD_ACCUM_STEPS = 8
+EFFECTIVE_BATCH_SIZE = int(BATCH_SIZE) * int(GRAD_ACCUM_STEPS)
+TRAIN_ITERS_SWEEP = [400, 6400, 25600]
 # TRAIN_ITERS_SWEEP = [1600, 6400, 25600, 102400]
 TEST_EVERY = 1000
 TEST_ITERS = 2
@@ -62,7 +69,7 @@ EVAL_ITERS_PER_ROLE = 2
 ROLLOUT_EXAMPLES_PER_ROLE = 64
 
 # RUN_SPLIT = 8
-RUN_SPLIT = 4
+RUN_SPLIT = 6
 
 PREDICATES_PER_LAYER = 8
 RULES_PER_TRANSITION = 16
@@ -83,21 +90,22 @@ BASE_BANK_SEED = 2042
 TRAIN_FIXED_LENGTH_MODE = "next_pow2"
 EVAL_FIXED_LENGTH_MODE = "next_pow2"
 
-TRANSFORMER_LAYERS = [12]
-TRANSFORMER_WIDTH_HEADS = [(4096, 64)]
+TRANSFORMER_LAYERS = [48]
+TRANSFORMER_WIDTH_HEADS = [(1600, 25)]
 TRANSFORMER_LRS = [7e-5]
 TRANSFORMER_POS = ["rope"]
 TRANSFORMER_SWIGLU = [True]
 
-MAMBA2_BONSAI_LAYERS = [12]
-MAMBA2_BONSAI_WIDTH_HEADS = [(6144, 8)]
-MAMBA2_BONSAI_D_STATE = [32]
+MAMBA2_BONSAI_LAYERS = [48]
+MAMBA2_BONSAI_WIDTH_HEADS = [(2304, 18)]
+MAMBA2_BONSAI_D_STATE = [64]
 MAMBA2_BONSAI_D_CONV = [4]
 MAMBA2_BONSAI_SCAN_CHUNK_LEN = [64]
 MAMBA2_BONSAI_LRS = [7e-5]
 
 ### START TEST CONFIGS
-# BATCH_SIZE = 8
+# BATCH_SIZE = 2
+# GRAD_ACCUM_STEPS = 2
 # TRAIN_ITERS_SWEEP = [20]
 # TEST_EVERY = 10
 # TEST_ITERS = 1
@@ -110,16 +118,30 @@ MAMBA2_BONSAI_LRS = [7e-5]
 # PREDICATES_PER_LAYER = 10
 # RULES_PER_TRANSITION = 18
 # FRESH_ICL_N_PREDICATES = 10
-# TRANSFORMER_LAYERS = [1]
-# TRANSFORMER_WIDTH_HEADS = [(64, 4)]
+# TRANSFORMER_LAYERS = [2]
+# TRANSFORMER_WIDTH_HEADS = [(128, 4)]
 # TRANSFORMER_LRS = [3e-4]
-# MAMBA2_BONSAI_LAYERS = [1]
-# MAMBA2_BONSAI_WIDTH_HEADS = [(64, 4)]
+# MAMBA2_BONSAI_LAYERS = [2]
+# MAMBA2_BONSAI_WIDTH_HEADS = [(128, 4)]
 # MAMBA2_BONSAI_D_STATE = [8]
 # MAMBA2_BONSAI_D_CONV = [4]
 # MAMBA2_BONSAI_SCAN_CHUNK_LEN = [16]
 # MAMBA2_BONSAI_LRS = [3e-4]
+# USE_WANDB = False
 ### END TEST CONFIGS
+
+
+def _make_case_wandb_cfg(*, case_name, model_config, train_args, info):
+    return make_experiment_wandb_config(
+        enabled=USE_WANDB,
+        project=WANDB_PROJECT,
+        run_id=RUN_ID,
+        run_name=f"{case_name}-{RUN_ID}",
+        api_key_path=WANDB_API_KEY_PATH,
+        model_config=model_config,
+        train_args=train_args,
+        info=info,
+    )
 
 
 def _safe_mean(values: list[float]) -> float:
@@ -562,6 +584,7 @@ for n_layers, (n_hidden, n_heads), lr, pos_encoding, use_swiglu, train_iters in 
         "train_iters": int(train_iters),
         "test_iters": TEST_ITERS,
         "test_every": TEST_EVERY,
+        "grad_accum_steps": int(GRAD_ACCUM_STEPS),
         "lr": warmup_cosine_schedule(lr, int(train_iters)),
     }
 
@@ -587,14 +610,24 @@ for n_layers, (n_hidden, n_heads), lr, pos_encoding, use_swiglu, train_iters in 
         "eval_fixed_length_n_seq": N_SEQ_AR,
         "train_eval_profile": "light",
         "train_iters": int(train_iters),
+        "grad_accum_steps": int(GRAD_ACCUM_STEPS),
+        "microbatch_size": int(BATCH_SIZE),
+        "effective_batch_size": int(EFFECTIVE_BATCH_SIZE),
     }
+    case_name = (
+        f"10_fresh_rule_split_transformer_"
+        f"l{int(n_layers)}_h{int(n_hidden)}_heads{int(n_heads)}_"
+        f"lr{_lr_tag(lr)}_ga{int(GRAD_ACCUM_STEPS)}_ti{int(train_iters)}"
+    )
+    train_args["wandb_cfg"] = _make_case_wandb_cfg(
+        case_name=case_name,
+        model_config=config,
+        train_args=train_args,
+        info=info,
+    )
 
     case = Case(
-        (
-            f"10_fresh_rule_split_transformer_"
-            f"l{int(n_layers)}_h{int(n_hidden)}_heads{int(n_heads)}_"
-            f"lr{_lr_tag(lr)}_ti{int(train_iters)}"
-        ),
+        case_name,
         config,
         train_task=train_task,
         test_task=test_task,
@@ -659,6 +692,7 @@ for n_layers, (n_hidden, n_heads), d_state, d_conv, scan_chunk_len, lr, train_it
         "train_iters": int(train_iters),
         "test_iters": TEST_ITERS,
         "test_every": TEST_EVERY,
+        "grad_accum_steps": int(GRAD_ACCUM_STEPS),
         "lr": warmup_cosine_schedule(lr, int(train_iters)),
     }
 
@@ -685,14 +719,24 @@ for n_layers, (n_hidden, n_heads), d_state, d_conv, scan_chunk_len, lr, train_it
         "eval_fixed_length_n_seq": N_SEQ_AR,
         "train_eval_profile": "light",
         "train_iters": int(train_iters),
+        "grad_accum_steps": int(GRAD_ACCUM_STEPS),
+        "microbatch_size": int(BATCH_SIZE),
+        "effective_batch_size": int(EFFECTIVE_BATCH_SIZE),
     }
+    case_name = (
+        "10_fresh_rule_split_mamba2_bonsai_"
+        f"l{int(n_layers)}_h{int(n_hidden)}_heads{int(n_heads)}_"
+        f"ds{int(d_state)}_lr{_lr_tag(lr)}_ga{int(GRAD_ACCUM_STEPS)}_ti{int(train_iters)}"
+    )
+    train_args["wandb_cfg"] = _make_case_wandb_cfg(
+        case_name=case_name,
+        model_config=config,
+        train_args=train_args,
+        info=info,
+    )
 
     case = Case(
-        (
-            "10_fresh_rule_split_mamba2_bonsai_"
-            f"l{int(n_layers)}_h{int(n_hidden)}_heads{int(n_heads)}_"
-            f"ds{int(d_state)}_lr{_lr_tag(lr)}_ti{int(train_iters)}"
-        ),
+        case_name,
         config,
         train_task=train_task,
         test_task=test_task,
@@ -774,6 +818,7 @@ for case in tqdm(all_cases, desc="cases", leave=True):
             "train_iters": case.train_args["train_iters"],
             "test_iters": case.train_args["test_iters"],
             "test_every": case.train_args["test_every"],
+            "grad_accum_steps": case.train_args["grad_accum_steps"],
             "lr": case.info["lr"],
             "eval_profile": case.info.get("train_eval_profile", "light"),
         },

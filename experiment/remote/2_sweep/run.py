@@ -21,9 +21,14 @@ from common import new_seed, split_cases, rule_membership_accuracy
 from model.transformer import TransformerConfig
 from task.prop import ImplySizeTask
 from train import Case
+from wandb_utils import make_experiment_wandb_config
 
 RUN_ID = new_seed()
 print("RUN ID", RUN_ID)
+
+WANDB_PROJECT = Path(__file__).resolve().parent.name
+WANDB_API_KEY_PATH = ROOT / "key" / "wandb.txt"
+USE_WANDB = True
 
 # Placeholder: update when dataset is available.
 DS_PATH = Path("/n/netscratch/pehlevan_lab/Lab/wlt/data/math/toy_imply")
@@ -87,7 +92,21 @@ RUN_SPLIT = 216
 
 # RULE_CLASSES = 12
 # RUN_SPLIT = 1
+# USE_WANDB = False
 ### END TEST CONFIGS
+
+
+def _make_case_wandb_cfg(*, case_name, model_config, train_args, info):
+    return make_experiment_wandb_config(
+        enabled=USE_WANDB,
+        project=WANDB_PROJECT,
+        run_id=RUN_ID,
+        run_name=f"{case_name}-{RUN_ID}",
+        api_key_path=WANDB_API_KEY_PATH,
+        model_config=model_config,
+        train_args=train_args,
+        info=info,
+    )
 
 
 def make_metrics_fn():
@@ -241,7 +260,6 @@ for regime in SIZE_REGIMES:
             "test_every": TEST_EVERY,
             "lr": lr,
         }
-
         info = {
             "train_sizes": train_sizes,
             "test_sizes": test_sizes,
@@ -255,6 +273,12 @@ for regime in SIZE_REGIMES:
             "lr": lr,
             "nonlinearity": nonlin_name,
         }
+        train_args["wandb_cfg"] = _make_case_wandb_cfg(
+            case_name="ImplySize",
+            model_config=config,
+            train_args=train_args,
+            info=info,
+        )
 
         all_cases.append(
             Case(

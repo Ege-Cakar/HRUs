@@ -20,6 +20,7 @@ from transformers import (
     AutoTokenizer,
     get_cosine_schedule_with_warmup,
 )
+from wandb_utils import WandbConfig, log_wandb_metrics, wandb_run_context
 
 
 _SSM_MODEL_TYPES = {"mamba", "mamba2"}
@@ -201,6 +202,7 @@ def train_hf(
     vocab_size: int | None = None,
     accelerator: Accelerator | None = None,
     print_fn=None,
+    wandb_cfg: WandbConfig | None = None,
     seed: int = 42,
 ) -> tuple:
     """Train a HuggingFace causal LM on iterator-style data.
@@ -267,55 +269,63 @@ def train_hf(
 
     # --- Training ---
     hist = {"train": [], "test": []}
+    active_wandb_cfg = wandb_cfg if accelerator.is_main_process else None
 
-    steps = range(config.train_iters)
-    if config.use_tqdm and accelerator.is_main_process:
-        steps = tqdm(steps, total=config.train_iters)
+    with wandb_run_context(active_wandb_cfg) as wandb:
+        steps = range(config.train_iters)
+        if config.use_tqdm and accelerator.is_main_process:
+            steps = tqdm(steps, total=config.train_iters)
 
-    for step in steps:
-        # --- Forward / backward with gradient accumulation ---
-        with accelerator.accumulate(model):
-            xs, ys = next(train_iter)
-            batch = adapter(xs, ys)
-            batch = {k: v.to(accelerator.device) for k, v in batch.items()}
+        for step in steps:
+            # --- Forward / backward with gradient accumulation ---
+            with accelerator.accumulate(model):
+                xs, ys = next(train_iter)
+                batch = adapter(xs, ys)
+                batch = {k: v.to(accelerator.device) for k, v in batch.items()}
 
-            attn_mask = batch.get("attention_mask") if uses_attn else None
-            logits = model(
-                input_ids=batch["input_ids"],
-                attention_mask=attn_mask,
-            ).logits
+                attn_mask = batch.get("attention_mask") if uses_attn else None
+                logits = model(
+                    input_ids=batch["input_ids"],
+                    attention_mask=attn_mask,
+                ).logits
 
-            loss = F.cross_entropy(
-                logits.reshape(-1, logits.size(-1)),
-                batch["labels"].reshape(-1),
-                ignore_index=-100,
-            )
+                loss = F.cross_entropy(
+                    logits.reshape(-1, logits.size(-1)),
+                    batch["labels"].reshape(-1),
+                    ignore_index=-100,
+                )
 
-            accelerator.backward(loss)
+                accelerator.backward(loss)
 
-            if config.max_grad_norm is not None and accelerator.sync_gradients:
-                accelerator.clip_grad_norm_(model.parameters(), config.max_grad_norm)
+                if config.max_grad_norm is not None and accelerator.sync_gradients:
+                    accelerator.clip_grad_norm_(model.parameters(), config.max_grad_norm)
 
-            optimizer.step()
-            scheduler.step()
-            optimizer.zero_grad()
+                optimizer.step()
+                scheduler.step()
+                optimizer.zero_grad()
 
-        # --- Eval ---
-        if _should_eval(step, config.train_iters, config.test_every):
-            train_metrics = _eval_batches(
-                model, adapter, train_iter, config.test_iters, accelerator,
-                uses_attn=uses_attn,
-            )
-            test_metrics = _eval_batches(
-                model, adapter, test_iter, config.test_iters, accelerator,
-                uses_attn=uses_attn,
-            )
+            # --- Eval ---
+            if _should_eval(step, config.train_iters, config.test_every):
+                train_metrics = _eval_batches(
+                    model, adapter, train_iter, config.test_iters, accelerator,
+                    uses_attn=uses_attn,
+                )
+                test_metrics = _eval_batches(
+                    model, adapter, test_iter, config.test_iters, accelerator,
+                    uses_attn=uses_attn,
+                )
 
-            hist["train"].append(train_metrics)
-            hist["test"].append(test_metrics)
+                hist["train"].append(train_metrics)
+                hist["test"].append(test_metrics)
 
-            if accelerator.is_main_process:
-                print_fn(step + 1, hist)
+                if accelerator.is_main_process:
+                    log_wandb_metrics(
+                        wandb,
+                        step=step + 1,
+                        train=train_metrics,
+                        test=test_metrics,
+                    )
+                    print_fn(step + 1, hist)
 
     # --- Unwrap and return ---
     unwrapped_model = accelerator.unwrap_model(model)

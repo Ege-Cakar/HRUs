@@ -40,6 +40,7 @@ from task.layer_fol import (
 )
 from task.layer_gen.util.fol_rule_bank import build_random_fol_rule_bank
 from train_hf import HFTrainConfig, train_hf
+from wandb_utils import make_experiment_wandb_config
 
 
 # ── Model configs ────────────────────────────────────────────────────────
@@ -68,6 +69,10 @@ model_cfg = MODEL_CONFIGS[run_idx % len(MODEL_CONFIGS)]
 RUN_ID = new_seed()
 print("RUN ID", RUN_ID)
 print(f"Model config [{run_idx}]: {model_cfg}")
+
+WANDB_PROJECT = Path(__file__).resolve().parent.name
+WANDB_API_KEY_PATH = ROOT / "key" / "wandb.txt"
+USE_WANDB = True
 
 BATCH_SIZE = 4  # per device; effective = BATCH_SIZE × GRAD_ACCUM × num_gpus = 32
 TRAIN_ITERS = 10_000
@@ -121,6 +126,7 @@ BASE_SEED = 1000
 # FROM_SCRATCH = True
 # TOKENIZE_MODE = "direct"
 # LR = 3e-4
+# USE_WANDB = False
 ### END TEST CONFIGS
 
 
@@ -262,6 +268,37 @@ hf_config = HFTrainConfig(
     mixed_precision=MIXED_PRECISION,
     use_tqdm=True,
 )
+wandb_cfg = make_experiment_wandb_config(
+    enabled=USE_WANDB,
+    project=WANDB_PROJECT,
+    run_id=RUN_ID,
+    run_name=f"{WANDB_PROJECT}-{model_cfg['name']}-{RUN_ID}",
+    api_key_path=WANDB_API_KEY_PATH,
+    model_config=hf_config,
+    extra_config={
+        "model_variant": model_cfg["name"],
+        "dims": dims,
+        "batch_size": int(BATCH_SIZE),
+        "n_vocab": int(N_VOCAB),
+        "n_seq_ar": int(N_SEQ_AR),
+        "n_gpus": int(accelerator.num_processes),
+        "fresh_icl_config": {
+            "base_bank_seed": BASE_BANK_SEED,
+            "predicates_per_layer": PREDICATES_PER_LAYER,
+            "rules_per_transition": RULES_PER_TRANSITION,
+            "fresh_icl_n_predicates": FRESH_ICL_N_PREDICATES,
+            "n_layers": N_LAYERS,
+            "arity_max": ARITY_MAX,
+            "vars_per_rule_max": VARS_PER_RULE_MAX,
+            "k_in_max": K_IN_MAX,
+            "k_out_max": K_OUT_MAX,
+            "initial_ant_max": INITIAL_ANT_MAX,
+            "constants": list(CONSTANTS),
+            "train_max_n_demos": TRAIN_MAX_N_DEMOS,
+            "eval_max_n_demos": EVAL_MAX_N_DEMOS,
+        },
+    },
+)
 
 train_start = time.perf_counter()
 
@@ -272,6 +309,7 @@ model, hist = train_hf(
     fol_tokenizer=fol_tokenizer,
     vocab_size=N_VOCAB,
     accelerator=accelerator,
+    wandb_cfg=wandb_cfg,
     seed=int(RUN_ID),
 )
 

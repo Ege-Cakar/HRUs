@@ -56,10 +56,15 @@ from utils import (
     summarize_rule_match_metrics,
 )
 from experiment.utils.metrics_utils import final_token_accuracy
+from wandb_utils import make_experiment_wandb_config
 
 
 RUN_ID = new_seed()
 print("RUN ID", RUN_ID)
+
+WANDB_PROJECT = Path(__file__).resolve().parent.name
+WANDB_API_KEY_PATH = ROOT / "key" / "wandb.txt"
+USE_WANDB = True
 
 TRAIN_MAX_DISTANCES = [3, 5, 10]
 EVAL_DISTANCES = list(range(1, 21))
@@ -128,7 +133,21 @@ MIXER_LRS = [1e-3, 3e-3]
 # MIXER_HIDDEN = [64]
 # MIXER_CHANNELS = [64]
 # MIXER_LRS = [1e-3]
+# USE_WANDB = False
 ### END TEST CONFIGS
+
+
+def _make_case_wandb_cfg(*, case_name, model_config, train_args, info):
+    return make_experiment_wandb_config(
+        enabled=USE_WANDB,
+        project=WANDB_PROJECT,
+        run_id=RUN_ID,
+        run_name=f"{case_name}-{RUN_ID}",
+        api_key_path=WANDB_API_KEY_PATH,
+        model_config=model_config,
+        train_args=train_args,
+        info=info,
+    )
 
 
 def _build_shared_rule_bank(save_dir: Path):
@@ -612,10 +631,17 @@ for train_max_distance in TRAIN_MAX_DISTANCES:
             "n_vocab": N_VOCAB,
             "n_seq": N_SEQ_AR,
         }
+        case_name = f"7_layer_fol_sweep_transformer_k{int(train_max_distance):02d}"
+        train_args["wandb_cfg"] = _make_case_wandb_cfg(
+            case_name=case_name,
+            model_config=config,
+            train_args=train_args,
+            info=info,
+        )
 
         all_cases.append(
             Case(
-                f"7_layer_fol_sweep_transformer_k{int(train_max_distance):02d}",
+                case_name,
                 config,
                 train_task=train_task,
                 test_task=test_task,
@@ -695,10 +721,17 @@ for train_max_distance in TRAIN_MAX_DISTANCES:
             "n_vocab": N_VOCAB,
             "n_seq": N_SEQ_AR,
         }
+        case_name = f"7_layer_fol_sweep_mamba2_k{int(train_max_distance):02d}"
+        train_args["wandb_cfg"] = _make_case_wandb_cfg(
+            case_name=case_name,
+            model_config=config,
+            train_args=train_args,
+            info=info,
+        )
 
         all_cases.append(
             Case(
-                f"7_layer_fol_sweep_mamba2_k{int(train_max_distance):02d}",
+                case_name,
                 config,
                 train_task=train_task,
                 test_task=test_task,
@@ -797,10 +830,17 @@ for train_max_distance in TRAIN_MAX_DISTANCES:
             "n_seq": N_SEQ_COMPLETION,
             "max_out_len": MAX_COMPLETION_LEN,
         }
+        case_name = f"7_layer_fol_sweep_mixer_completion_k{int(train_max_distance):02d}"
+        train_args["wandb_cfg"] = _make_case_wandb_cfg(
+            case_name=case_name,
+            model_config=config,
+            train_args=train_args,
+            info=info,
+        )
 
         all_cases.append(
             Case(
-                f"7_layer_fol_sweep_mixer_completion_k{int(train_max_distance):02d}",
+                case_name,
                 config,
                 train_task=train_task,
                 test_task=test_task,

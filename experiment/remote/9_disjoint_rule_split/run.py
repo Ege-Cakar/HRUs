@@ -51,10 +51,15 @@ from utils import (
     summarize_rule_match_metrics,
 )
 from experiment.utils.metrics_utils import final_token_accuracy
+from wandb_utils import make_experiment_wandb_config
 
 
 RUN_ID = new_seed()
 print("RUN ID", RUN_ID)
+
+WANDB_PROJECT = Path(__file__).resolve().parent.name
+WANDB_API_KEY_PATH = ROOT / "key" / "wandb.txt"
+USE_WANDB = True
 
 EVAL_ROLES = ["train", "eval"]
 
@@ -136,7 +141,21 @@ MAMBA2_BONSAI_LRS = [5e-4]
 # MAMBA2_BONSAI_D_CONV = [4]
 # MAMBA2_BONSAI_SCAN_CHUNK_LEN = [16]
 # MAMBA2_BONSAI_LRS = [3e-4]
+# USE_WANDB = False
 ### END TEST CONFIGS
+
+
+def _make_case_wandb_cfg(*, case_name, model_config, train_args, info):
+    return make_experiment_wandb_config(
+        enabled=USE_WANDB,
+        project=WANDB_PROJECT,
+        run_id=RUN_ID,
+        run_name=f"{case_name}-{RUN_ID}",
+        api_key_path=WANDB_API_KEY_PATH,
+        model_config=model_config,
+        train_args=train_args,
+        info=info,
+    )
 
 
 def _safe_mean(values: list[float]) -> float:
@@ -707,13 +726,20 @@ for n_layers, (n_hidden, n_heads), lr, pos_encoding, use_swiglu, train_iters in 
         "train_eval_profile": "light",
         "train_iters": int(train_iters),
     }
+    case_name = (
+        f"9_disjoint_rule_split_transformer_"
+        f"l{int(n_layers)}_h{int(n_hidden)}_heads{int(n_heads)}_"
+        f"lr{_lr_tag(lr)}_ti{int(train_iters)}"
+    )
+    train_args["wandb_cfg"] = _make_case_wandb_cfg(
+        case_name=case_name,
+        model_config=config,
+        train_args=train_args,
+        info=info,
+    )
 
     case = Case(
-        (
-            f"9_disjoint_rule_split_transformer_"
-            f"l{int(n_layers)}_h{int(n_hidden)}_heads{int(n_heads)}_"
-            f"lr{_lr_tag(lr)}_ti{int(train_iters)}"
-        ),
+        case_name,
         config,
         train_task=train_task,
         test_task=test_task,
@@ -807,13 +833,20 @@ for n_layers, (n_hidden, n_heads), d_state, d_conv, scan_chunk_len, lr, train_it
         "train_eval_profile": "light",
         "train_iters": int(train_iters),
     }
+    case_name = (
+        "9_disjoint_rule_split_mamba2_bonsai_"
+        f"l{int(n_layers)}_h{int(n_hidden)}_heads{int(n_heads)}_"
+        f"ds{int(d_state)}_lr{_lr_tag(lr)}_ti{int(train_iters)}"
+    )
+    train_args["wandb_cfg"] = _make_case_wandb_cfg(
+        case_name=case_name,
+        model_config=config,
+        train_args=train_args,
+        info=info,
+    )
 
     case = Case(
-        (
-            "9_disjoint_rule_split_mamba2_bonsai_"
-            f"l{int(n_layers)}_h{int(n_hidden)}_heads{int(n_heads)}_"
-            f"ds{int(d_state)}_lr{_lr_tag(lr)}_ti{int(train_iters)}"
-        ),
+        case_name,
         config,
         train_task=train_task,
         test_task=test_task,

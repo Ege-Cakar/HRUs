@@ -46,10 +46,15 @@ from task.layer_gen.util.fol_rule_bank import (
     parse_atom_text,
 )
 from train import Case, ce_mask, warmup_cosine_schedule
+from wandb_utils import make_experiment_wandb_config
 
 
 RUN_ID = new_seed()
 print("RUN ID", RUN_ID)
+
+WANDB_PROJECT = Path(__file__).resolve().parent.name
+WANDB_API_KEY_PATH = ROOT / "key" / "wandb.txt"
+USE_WANDB = True
 
 EVAL_ROLES = ["train", "eval"]
 
@@ -61,7 +66,7 @@ SELECTION_EVAL_MAX_N_DEMOS = 8
 BATCH_SIZE = 4
 GRAD_ACCUM_STEPS = 8
 EFFECTIVE_BATCH_SIZE = int(BATCH_SIZE) * int(GRAD_ACCUM_STEPS)
-TRAIN_ITERS_SWEEP = [1600, 6400, 25600]
+TRAIN_ITERS_SWEEP = [400, 1600, 6400]
 TEST_EVERY = 1000
 TEST_ITERS = 2
 EVAL_ITERS_PER_ROLE = 2
@@ -124,7 +129,21 @@ MAMBA2_BONSAI_LRS = [5e-5]
 # MAMBA2_BONSAI_D_CONV = [4]
 # MAMBA2_BONSAI_SCAN_CHUNK_LEN = [16]
 # MAMBA2_BONSAI_LRS = [3e-4]
+# USE_WANDB = False
 ### END TEST CONFIGS
+
+
+def _make_case_wandb_cfg(*, case_name, model_config, train_args, info):
+    return make_experiment_wandb_config(
+        enabled=USE_WANDB,
+        project=WANDB_PROJECT,
+        run_id=RUN_ID,
+        run_name=f"{case_name}-{RUN_ID}",
+        api_key_path=WANDB_API_KEY_PATH,
+        model_config=model_config,
+        train_args=train_args,
+        info=info,
+    )
 
 
 def _safe_mean(values: list[float]) -> float:
@@ -678,13 +697,20 @@ for n_layers, (n_hidden, n_heads), lr, pos_encoding, use_swiglu, train_iters in 
         "microbatch_size": int(BATCH_SIZE),
         "effective_batch_size": int(EFFECTIVE_BATCH_SIZE),
     }
+    case_name = (
+        "11_fresh_rule_split_full_completion_transformer_"
+        f"l{int(n_layers)}_h{int(n_hidden)}_heads{int(n_heads)}_"
+        f"lr{_lr_tag(lr)}_ga{int(GRAD_ACCUM_STEPS)}_ti{int(train_iters)}"
+    )
+    train_args["wandb_cfg"] = _make_case_wandb_cfg(
+        case_name=case_name,
+        model_config=config,
+        train_args=train_args,
+        info=info,
+    )
 
     case = Case(
-        (
-            "11_fresh_rule_split_full_completion_transformer_"
-            f"l{int(n_layers)}_h{int(n_hidden)}_heads{int(n_heads)}_"
-            f"lr{_lr_tag(lr)}_ga{int(GRAD_ACCUM_STEPS)}_ti{int(train_iters)}"
-        ),
+        case_name,
         config,
         train_task=train_task,
         test_task=test_task,
@@ -781,13 +807,20 @@ for n_layers, (n_hidden, n_heads), d_state, d_conv, scan_chunk_len, lr, train_it
         "microbatch_size": int(BATCH_SIZE),
         "effective_batch_size": int(EFFECTIVE_BATCH_SIZE),
     }
+    case_name = (
+        "11_fresh_rule_split_full_completion_mamba2_bonsai_"
+        f"l{int(n_layers)}_h{int(n_hidden)}_heads{int(n_heads)}_"
+        f"ds{int(d_state)}_lr{_lr_tag(lr)}_ga{int(GRAD_ACCUM_STEPS)}_ti{int(train_iters)}"
+    )
+    train_args["wandb_cfg"] = _make_case_wandb_cfg(
+        case_name=case_name,
+        model_config=config,
+        train_args=train_args,
+        info=info,
+    )
 
     case = Case(
-        (
-            "11_fresh_rule_split_full_completion_mamba2_bonsai_"
-            f"l{int(n_layers)}_h{int(n_hidden)}_heads{int(n_heads)}_"
-            f"ds{int(d_state)}_lr{_lr_tag(lr)}_ga{int(GRAD_ACCUM_STEPS)}_ti{int(train_iters)}"
-        ),
+        case_name,
         config,
         train_task=train_task,
         test_task=test_task,

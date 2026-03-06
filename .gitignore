@@ -16,6 +16,7 @@ data/
 **/*.csv
 set/
 *.old
+key
 
 # ignore slurm logging outputs
 *.err

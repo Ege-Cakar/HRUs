@@ -20,6 +20,8 @@ from train import (
     warmup_constant_schedule,
     warmup_cosine_schedule,
 )
+from wandb_utils import WandbConfig
+import wandb_utils
 
 
 class TestParseLossName:
@@ -257,6 +259,29 @@ class CountingIterator:
         return self
 
 
+class FakeWandbModule:
+    """Minimal wandb stub for metric logging tests."""
+
+    def __init__(self):
+        self.login_calls = []
+        self.init_calls = []
+        self.log_calls = []
+        self.finish_calls = 0
+
+    def login(self, **kwargs):
+        self.login_calls.append(kwargs)
+
+    def init(self, **kwargs):
+        self.init_calls.append(kwargs)
+        return object()
+
+    def log(self, payload, step=None):
+        self.log_calls.append({"payload": payload, "step": step})
+
+    def finish(self):
+        self.finish_calls += 1
+
+
 class TestTrain:
     """Tests for the main train function."""
 
@@ -430,6 +455,80 @@ class TestTrain:
                 grad_accum_steps=0,
                 seed=42,
             )
+
+    def test_wandb_disabled_does_not_import_module(self, monkeypatch, tmp_path):
+        config = MixerConfig(n_vocab=100, n_hidden=32, n_seq=10, n_layers=1, n_out=1)
+        x = jnp.ones((8, 10), dtype=jnp.int32)
+        y = jnp.array([0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0])
+
+        monkeypatch.setattr(
+            wandb_utils.importlib,
+            "import_module",
+            lambda name: (_ for _ in ()).throw(AssertionError(f"unexpected import: {name}")),
+        )
+
+        optimizer, hist = train(
+            config,
+            train_iter=SimpleIterator(x, y),
+            loss='bce',
+            train_iters=2,
+            test_iters=1,
+            test_every=1,
+            seed=42,
+            wandb_cfg=WandbConfig(
+                enabled=False,
+                project="disabled",
+                api_key_path=tmp_path / "wandb.txt",
+            ),
+        )
+
+        assert isinstance(optimizer, nnx.Optimizer)
+        assert len(hist['train']) == 2
+
+    def test_wandb_logs_train_test_and_summary_metrics(self, monkeypatch, tmp_path):
+        config = MixerConfig(n_vocab=100, n_hidden=32, n_seq=10, n_layers=1, n_out=1)
+        x = jnp.ones((8, 10), dtype=jnp.int32)
+        y = jnp.array([0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0])
+        key_path = tmp_path / "wandb.txt"
+        key_path.write_text("test-key\n", encoding="utf-8")
+        fake_wandb = FakeWandbModule()
+
+        monkeypatch.setattr(
+            wandb_utils.importlib,
+            "import_module",
+            lambda name: fake_wandb,
+        )
+
+        _, hist = train(
+            config,
+            train_iter=SimpleIterator(x, y),
+            test_iter=SimpleIterator(x, y),
+            loss='bce',
+            train_iters=4,
+            test_iters=1,
+            test_every=2,
+            seed=42,
+            print_fn=lambda step, hist: None,
+            summary_fn=lambda optimizer: {"param_count": 1},
+            wandb_cfg=WandbConfig(
+                enabled=True,
+                project="unit-test",
+                name="train-test",
+                config={"alpha": 1},
+                api_key_path=key_path,
+            ),
+        )
+
+        assert len(hist['summary']) == 2
+        assert fake_wandb.login_calls == [{"key": "test-key", "relogin": True}]
+        assert fake_wandb.init_calls[0]["project"] == "unit-test"
+        assert fake_wandb.init_calls[0]["name"] == "train-test"
+        assert fake_wandb.log_calls[0]["step"] == 2
+        assert fake_wandb.log_calls[1]["step"] == 4
+        assert "train/loss" in fake_wandb.log_calls[0]["payload"]
+        assert "test/loss" in fake_wandb.log_calls[0]["payload"]
+        assert fake_wandb.log_calls[0]["payload"]["summary/param_count"] == 1
+        assert fake_wandb.finish_calls == 1
 
 
 class TestCase:

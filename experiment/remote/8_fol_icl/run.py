@@ -53,9 +53,14 @@ from utils import (
     summarize_rule_match_metrics,
 )
 from experiment.utils.metrics_utils import final_token_accuracy
+from wandb_utils import make_experiment_wandb_config
 
 RUN_ID = new_seed()
 print("RUN ID", RUN_ID)
+
+WANDB_PROJECT = Path(__file__).resolve().parent.name
+WANDB_API_KEY_PATH = ROOT / "key" / "wandb.txt"
+USE_WANDB = True
 
 TRAIN_MAX_DISTANCES = [4]
 EVAL_DISTANCES = list(range(1, 9))
@@ -133,7 +138,21 @@ MAMBA2_BONSAI_LRS = [5e-4]
 # MAMBA2_BONSAI_D_CONV = [4]
 # MAMBA2_BONSAI_SCAN_CHUNK_LEN = [16]
 # MAMBA2_BONSAI_LRS = [3e-4]
+# USE_WANDB = False
 ### END TEST CONFIGS
+
+
+def _make_case_wandb_cfg(*, case_name, model_config, train_args, info):
+    return make_experiment_wandb_config(
+        enabled=USE_WANDB,
+        project=WANDB_PROJECT,
+        run_id=RUN_ID,
+        run_name=f"{case_name}-{RUN_ID}",
+        api_key_path=WANDB_API_KEY_PATH,
+        model_config=model_config,
+        train_args=train_args,
+        info=info,
+    )
 
 
 def _safe_mean(values: list[float]) -> float:
@@ -811,9 +830,16 @@ for train_max_distance in TRAIN_MAX_DISTANCES:
             "train_eval_profile": "light",
             "train_iters": int(train_iters),
         }
+        case_name = f"8_fol_icl_transformer_k{int(train_max_distance):02d}_ti{int(train_iters)}"
+        train_args["wandb_cfg"] = _make_case_wandb_cfg(
+            case_name=case_name,
+            model_config=config,
+            train_args=train_args,
+            info=info,
+        )
 
         case = Case(
-            f"8_fol_icl_transformer_k{int(train_max_distance):02d}_ti{int(train_iters)}",
+            case_name,
             config,
             train_task=train_task,
             test_task=test_task,
@@ -920,9 +946,16 @@ for train_max_distance in TRAIN_MAX_DISTANCES:
             "train_eval_profile": "light",
             "train_iters": int(train_iters),
         }
+        case_name = f"8_fol_icl_mamba2_k{int(train_max_distance):02d}_ti{int(train_iters)}"
+        train_args["wandb_cfg"] = _make_case_wandb_cfg(
+            case_name=case_name,
+            model_config=config,
+            train_args=train_args,
+            info=info,
+        )
 
         case = Case(
-            f"8_fol_icl_mamba2_k{int(train_max_distance):02d}_ti{int(train_iters)}",
+            case_name,
             config,
             train_task=train_task,
             test_task=test_task,
