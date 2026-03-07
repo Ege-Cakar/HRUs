@@ -38,12 +38,15 @@ def split_batch(batch_size, max_size):
 
 
 def split_cases(all_cases, run_split, shuffle_seed=None):
-    run_idx = sys.argv[1]
-    try:
-        run_idx = int(run_idx) % run_split
-    except ValueError:
-        print(f'warn: unable to parse index {run_idx}, setting run_idx=0')
+    if run_split == 1 and len(sys.argv) < 2:
         run_idx = 0
+    else:
+        run_idx = sys.argv[1]
+        try:
+            run_idx = int(run_idx) % run_split
+        except ValueError:
+            print(f'warn: unable to parse index {run_idx}, setting run_idx=0')
+            run_idx = 0
 
     print('RUN IDX', run_idx)
 

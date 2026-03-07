@@ -10,6 +10,7 @@ from flax import nnx
 from model.mlp import Mixer, MixerConfig
 from train import (
     Case,
+    _train_with_accumulation,
     ce_mask,
     create_optimizer,
     linear_decay_schedule,
@@ -440,6 +441,26 @@ class TestTrain:
         assert print_steps == [2, 4]
         assert train_iter.count == 14
         assert test_iter.count == 2
+
+    def test_gradient_accumulation_returns_device_scalar_loss(self):
+        config = MixerConfig(n_vocab=100, n_hidden=32, n_seq=10, n_layers=1, n_out=1)
+        rngs = nnx.Rngs(42)
+        model = config.to_model(rngs=rngs)
+        optimizer = create_optimizer(model, lr=1e-3)
+        batch = (
+            jnp.ones((8, 10), dtype=jnp.int32),
+            jnp.array([0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0], dtype=jnp.float32),
+        )
+
+        loss_val = _train_with_accumulation(
+            optimizer,
+            CountingIterator(batch),
+            parse_loss_name('bce'),
+            grad_accum_steps=2,
+        )
+
+        assert isinstance(loss_val, jax.Array)
+        assert loss_val.shape == ()
 
     def test_gradient_accumulation_rejects_invalid_steps(self):
         config = MixerConfig(n_vocab=100, n_hidden=32, n_seq=10, n_layers=1, n_out=1)

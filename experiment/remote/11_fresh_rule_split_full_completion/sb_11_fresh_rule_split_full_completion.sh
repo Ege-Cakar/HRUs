@@ -13,4 +13,5 @@
 
 module load cuda
 source ../../../.venv/bin/activate
+export XLA_FLAGS=--xla_gpu_enable_command_buffer=''
 python run.py ${SLURM_ARRAY_TASK_ID}
