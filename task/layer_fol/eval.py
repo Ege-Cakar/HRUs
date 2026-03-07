@@ -79,6 +79,19 @@ def infer_fol_predicate_layer(predicate: str) -> int:
     raise ValueError(f"Unsupported layered predicate name: {predicate}")
 
 
+def _decode_single_completion_statement(
+    *,
+    tokenizer: tokenize_layer_fol.FOLLayerTokenizer,
+    completion_tokens: list[int] | np.ndarray,
+) -> str:
+    statements = tokenizer.decode_completion_texts(
+        [int(tok) for tok in np.asarray(completion_tokens, dtype=np.int32).tolist()]
+    )
+    if len(statements) != 1:
+        raise ValueError("Expected a single completion statement.")
+    return statements[0]
+
+
 class FOLLayerPredictionAdapter(Protocol):
     def predict_completion(
         self,
@@ -493,7 +506,10 @@ def match_rule_completion_fol(
         completion = []
 
     try:
-        decoded_statement = tokenizer.decode_completion_text(completion)
+        decoded_statement = _decode_single_completion_statement(
+            tokenizer=tokenizer,
+            completion_tokens=completion,
+        )
         lhs_ground, rhs_ground = parse_clause_text(decoded_statement)
     except (ValueError, TypeError):
         return FOLRuleMatchResult(
@@ -760,7 +776,7 @@ def validate_completion_path_fol(
         completion = []
 
     try:
-        decoded_statements = tokenizer.decode_completion_sequence_texts(completion)
+        decoded_statements = tokenizer.decode_completion_texts(completion)
     except (ValueError, TypeError):
         return FOLCompletionPathResult(
             success=False,
@@ -781,7 +797,7 @@ def validate_completion_path_fol(
         matched = match_rule_completion_fol(
             rule_bank=rule_bank,
             src_layer=current_layer,
-            completion_tokens=tokenizer.encode_completion(statement_text),
+            completion_tokens=tokenizer.encode_completion_texts([statement_text]),
             tokenizer=tokenizer,
             active_rules=active_rules_list,
             fixed_rules=fixed_rules_list,

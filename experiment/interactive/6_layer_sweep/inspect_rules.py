@@ -150,11 +150,11 @@ def infer_src_layer_from_prompt_tokens(
         raise ValueError(f"Expected 1D row tokens, got {row.shape}")
 
     nonpad = row[row != int(pad_token_id)]
-    sep_hits = np.where(nonpad == int(tokenizer.sep_token_id))[0]
-    if sep_hits.size == 0:
-        raise ValueError("Missing SEP token in prompt row.")
+    start_hits = np.where(nonpad == int(tokenizer.start_token_id))[0]
+    if start_hits.size != 1:
+        raise ValueError("Expected exactly one START token in prompt row.")
 
-    prompt = nonpad[: int(sep_hits[0]) + 1].tolist()
+    prompt = nonpad[: int(start_hits[0]) + 1].tolist()
     sequent = tokenizer.decode_prompt([int(tok) for tok in prompt])
     if len(sequent.ants) == 0:
         raise ValueError("Prompt antecedents are empty; cannot infer src layer.")
@@ -173,10 +173,10 @@ def infer_src_layer_from_prompt_tokens(
 def _extract_prompt_tokens(row_tokens, *, tokenizer, pad_token_id: int = 0) -> np.ndarray:
     row = np.asarray(row_tokens, dtype=np.int32)
     nonpad = row[row != int(pad_token_id)]
-    sep_hits = np.where(nonpad == int(tokenizer.sep_token_id))[0]
-    if sep_hits.size == 0:
-        raise ValueError("Missing SEP token while extracting prompt.")
-    return nonpad[: int(sep_hits[0]) + 1].astype(np.int32)
+    start_hits = np.where(nonpad == int(tokenizer.start_token_id))[0]
+    if start_hits.size != 1:
+        raise ValueError("Expected exactly one START token while extracting prompt.")
+    return nonpad[: int(start_hits[0]) + 1].astype(np.int32)
 
 
 def _safe_decode_prompt_text(prompt_tokens: np.ndarray, *, tokenizer) -> str | None:

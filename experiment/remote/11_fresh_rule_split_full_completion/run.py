@@ -478,7 +478,7 @@ def _evaluate_role_for_demo(
             distance=2,
             n_examples=1,
             initial_ant_max=int(INITIAL_ANT_MAX),
-            max_steps=2,
+            max_steps=int(COMPLETION_STEPS_MAX),
             max_unify_solutions=int(MAX_UNIFY_SOLUTIONS),
             rng=rollout_rng,
         )

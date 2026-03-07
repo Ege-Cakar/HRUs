@@ -21,34 +21,21 @@ def _layer_from_predicate(predicate: str) -> int:
     return int(match.group(1))
 
 
-def _find_sequent_prompt_in_tokens(
+def _extract_prompt_prefix(
     row_tokens,
     *,
     tokenizer: FOLLayerTokenizer,
     pad_token_id: int = 0,
-) -> tuple[np.ndarray, FOLSequent]:
+) -> np.ndarray:
     row = np.asarray(row_tokens, dtype=np.int32)
     if row.ndim != 1:
         raise ValueError(f"Expected 1D row tokens, got {row.shape}")
 
     nonpad = row[row != int(pad_token_id)]
-    sep_idx = np.where(nonpad == int(tokenizer.sep_token_id))[0]
-    if sep_idx.size == 0:
-        raise ValueError("Missing SEP token in row.")
-
-    for pick in reversed(sep_idx.tolist()):
-        prev = sep_idx[sep_idx < pick]
-        start = int(prev[-1]) + 1 if prev.size > 0 else 0
-        segment = nonpad[start : int(pick) + 1]
-        if segment.size < 2:
-            continue
-        try:
-            sequent = tokenizer.decode_prompt(segment.astype(int).tolist())
-        except ValueError:
-            continue
-        return nonpad[: int(pick) + 1].astype(np.int32), sequent
-
-    raise ValueError("Could not locate a valid sequent prompt segment in row tokens.")
+    start_idx = np.where(nonpad == int(tokenizer.start_token_id))[0]
+    if start_idx.size != 1:
+        raise ValueError("Prompt rows must contain exactly one START token.")
+    return nonpad[: int(start_idx[0]) + 1].astype(np.int32)
 
 
 def infer_src_layer_from_prompt_tokens(
@@ -57,10 +44,12 @@ def infer_src_layer_from_prompt_tokens(
     tokenizer: FOLLayerTokenizer,
     pad_token_id: int = 0,
 ) -> int:
-    _, sequent = _find_sequent_prompt_in_tokens(
-        row_tokens,
-        tokenizer=tokenizer,
-        pad_token_id=pad_token_id,
+    sequent = tokenizer.decode_prompt(
+        _extract_prompt_prefix(
+            row_tokens,
+            tokenizer=tokenizer,
+            pad_token_id=pad_token_id,
+        ).tolist()
     )
     if len(sequent.ants) == 0:
         raise ValueError("Prompt antecedents are empty; cannot infer src layer.")
@@ -73,11 +62,12 @@ def extract_prompt_info_from_row_tokens(
     tokenizer: FOLLayerTokenizer,
     pad_token_id: int = 0,
 ) -> tuple[np.ndarray, FOLSequent, int, int]:
-    prompt_prefix, sequent = _find_sequent_prompt_in_tokens(
+    prompt_prefix = _extract_prompt_prefix(
         row_tokens,
         tokenizer=tokenizer,
         pad_token_id=pad_token_id,
     )
+    sequent = tokenizer.decode_prompt(prompt_prefix.tolist())
     if len(sequent.ants) == 0:
         raise ValueError("Prompt antecedents are empty; cannot infer src layer.")
     src_layer = int(min(_layer_from_predicate(atom.predicate) for atom in sequent.ants))
@@ -115,7 +105,8 @@ def extract_ar_rule_match_inputs(
         gold_completion = labels[idx][mask].astype(np.int32)
 
         try:
-            expected_statement = tokenizer.decode_completion_text(gold_completion.tolist())
+            statements = tokenizer.decode_completion_texts(gold_completion.tolist())
+            expected_statement = statements[0] if len(statements) == 1 else None
         except (ValueError, TypeError):
             expected_statement = None
 

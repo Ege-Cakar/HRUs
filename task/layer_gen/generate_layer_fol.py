@@ -19,6 +19,7 @@ from tqdm import tqdm
 from array_record.python import array_record_module
 
 if __package__ in (None, ""):
+    from util.fol_completion import sampled_completion_texts  # type: ignore
     from util.fol_rule_bank import (  # type: ignore
         FOLRuleBank,
         FOLSequent,
@@ -31,6 +32,7 @@ if __package__ in (None, ""):
     from util import tokenize_layer_fol  # type: ignore
 else:
     from .util import online_prefetch as online_prefetch_util
+    from .util.fol_completion import sampled_completion_texts
     from .util.fol_rule_bank import (
         FOLRuleBank,
         FOLSequent,
@@ -177,18 +179,6 @@ def _update_autoreg_stats(stats: _AutoregStats, prompt: list[int], completion: l
     stats.max_seq = max(stats.max_seq, len(prompt) + len(completion) - 1)
 
 
-def _sampled_completion_texts(*, sampled, step_idx: int, completion_format: str) -> list[str]:
-    step_idx = int(step_idx)
-    completion_format = str(completion_format)
-    if completion_format == "single":
-        return [str(sampled.step_rules[step_idx].statement_text)]
-    if completion_format == "full":
-        return [str(rule.statement_text) for rule in sampled.step_rules[step_idx:]]
-    raise ValueError(
-        f"completion_format must be 'single' or 'full', got {completion_format!r}"
-    )
-
-
 def _tokenize_sampled_completion(
     *,
     tokenizer: tokenize_layer_fol.FOLLayerTokenizer,
@@ -198,15 +188,12 @@ def _tokenize_sampled_completion(
     completion_format: str,
 ) -> tuple[list[int], list[int], list[str]]:
     prompt = tokenizer.tokenize_prompt(sequent)
-    statement_texts = _sampled_completion_texts(
+    statement_texts = sampled_completion_texts(
         sampled=sampled,
         step_idx=int(step_idx),
         completion_format=completion_format,
     )
-    if str(completion_format) == "single":
-        completion = tokenizer.encode_completion(statement_texts[0])
-    else:
-        completion = tokenizer.encode_completion_sequence(statement_texts)
+    completion = tokenizer.encode_completion_texts(statement_texts)
     return prompt, completion, statement_texts
 
 

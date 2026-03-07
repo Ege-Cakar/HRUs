@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
-from task.layer_fol import FOLLayerTask
+from task.layer_fol import FOLLayerTask, split_prompt_row_segments
 
 
 # <codecell>
@@ -41,18 +41,6 @@ ENABLE_PLOT = True
 
 
 # <codecell>
-def _split_prompt_segments(prompt_tokens: np.ndarray, sep_token_id: int) -> list[list[int]]:
-    out: list[list[int]] = []
-    current: list[int] = []
-    for tok in prompt_tokens.tolist():
-        if int(tok) == int(sep_token_id):
-            out.append(current)
-            current = []
-            continue
-        current.append(int(tok))
-    return out
-
-
 def _symbol_text(tokenizer, token_ids: list[int] | np.ndarray) -> str:
     return " ".join(tokenizer.id_to_char(int(tok)) for tok in list(token_ids))
 
@@ -64,21 +52,21 @@ def _collect_fresh_predicates(text: str) -> list[str]:
 
 def _decode_target_completion(task: FOLLayerTask, completion: np.ndarray) -> str:
     tokenizer = task.tokenizer
+    statements = tokenizer.decode_completion_texts(completion.tolist())
     if str(task.completion_format) == "full":
-        statements = tokenizer.decode_completion_sequence_texts(completion.tolist())
         return " <SEP> ".join(statements)
-    return tokenizer.decode_completion_text(completion.tolist())
+    if len(statements) != 1:
+        raise ValueError("Expected a single completion statement.")
+    return statements[0]
 
 
 def preview_record(task: FOLLayerTask, record: dict, *, role: str) -> None:
     tokenizer = task.tokenizer
     prompt = np.asarray(record["prompt"], dtype=np.int32)
     completion = np.asarray(record["completions"][0], dtype=np.int32)
-    segments = _split_prompt_segments(prompt, tokenizer.sep_token_id)
-    demo_segments = segments[:-1]
-    main_segment = segments[-1] + [int(tokenizer.sep_token_id)]
+    demo_segments, main_segment = split_prompt_row_segments(prompt, tokenizer=tokenizer)
 
-    sequent = tokenizer.decode_prompt(main_segment)
+    sequent = tokenizer.decode_prompt(main_segment.tolist())
     completion_text = _decode_target_completion(task, completion)
 
     fresh_preds = set(_collect_fresh_predicates(sequent.text))
@@ -93,9 +81,9 @@ def preview_record(task: FOLLayerTask, record: dict, *, role: str) -> None:
     print("target completion:", completion_text)
     if demo_segments:
         for idx, demo in enumerate(demo_segments):
-            demo_text = tokenizer.decode_completion_text(
+            demo_text = tokenizer.decode_completion_texts(
                 list(demo) + [int(tokenizer.eot_token_id)]
-            )
+            )[0]
             print(f"demo[{idx}]: {demo_text}")
 
     print("prompt tokens:")

@@ -158,7 +158,7 @@ def test_fresh_atom_tokenization_bounded():
         for name in names:
             for const in CONSTANTS:
                 atom_text = f"{name}({const})"
-                encoded_len = len(tokenizer.encode_completion(atom_text)) - 1
+                encoded_len = len(tokenizer.encode_completion_texts([atom_text])) - 1
                 assert encoded_len <= max_atom_len, (
                     f"Atom {atom_text!r} encodes to {encoded_len} tokens, "
                     f"exceeds estimate {max_atom_len}"
@@ -187,7 +187,7 @@ def test_fresh_clause_tokenization_bounded():
         )
         for rules in temp_bank.transitions.values():
             for rule in rules:
-                encoded_len = len(tokenizer.encode_completion(rule.statement_text))
+                encoded_len = len(tokenizer.encode_completion_texts([rule.statement_text]))
                 assert encoded_len <= max_completion_len, (
                     f"Rule {rule.statement_text!r} encodes to {encoded_len} "
                     f"tokens (incl EOT), exceeds estimate {max_completion_len}"

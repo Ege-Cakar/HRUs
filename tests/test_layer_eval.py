@@ -327,7 +327,7 @@ def test_autoregressive_logits_adapter_decodes_greedy() -> None:
         logits[0, last_idx, int(tok)] = 8.0
         return logits
 
-    prompt = np.asarray([tokenizer.char_to_id("p0_1"), tokenizer.sep_token_id], dtype=np.int32)
+    prompt = np.asarray([tokenizer.char_to_id("p0_1"), tokenizer.start_token_id], dtype=np.int32)
     adapter = AutoregressiveLogitsAdapter(n_seq=16, max_completion_len=4)
     decoded = adapter.predict_completion(
         model=model,
@@ -352,7 +352,7 @@ def test_autoregressive_logits_adapter_uses_cache_when_supported() -> None:
         logits[0, -1, int(tok)] = 9.0
         return logits, step + 1
 
-    prompt = np.asarray([tokenizer.char_to_id("p0_1"), tokenizer.sep_token_id], dtype=np.int32)
+    prompt = np.asarray([tokenizer.char_to_id("p0_1"), tokenizer.start_token_id], dtype=np.int32)
     adapter = AutoregressiveLogitsAdapter(n_seq=16, max_completion_len=4)
     decoded = adapter.predict_completion(
         model=model,
@@ -386,7 +386,7 @@ def test_autoregressive_logits_adapter_jit_step_uses_cache_when_supported() -> N
             logits = logits.at[0, -1, tok].set(8.0)
             return logits, step + 1
 
-    prompt = np.asarray([tokenizer.char_to_id("p0_1"), tokenizer.sep_token_id], dtype=np.int32)
+    prompt = np.asarray([tokenizer.char_to_id("p0_1"), tokenizer.start_token_id], dtype=np.int32)
     adapter = AutoregressiveLogitsAdapter(
         n_seq=16,
         max_completion_len=4,
@@ -418,7 +418,7 @@ def test_autoregressive_logits_adapter_jit_step_sampling_deterministic_with_seed
             logits = logits.at[0, -1, 5].set(0.4 + 0.1 * step.astype(jnp.float32))
             return logits, step + 1
 
-    prompt = np.asarray([tokenizer.char_to_id("p0_1"), tokenizer.sep_token_id], dtype=np.int32)
+    prompt = np.asarray([tokenizer.char_to_id("p0_1"), tokenizer.start_token_id], dtype=np.int32)
     adapter = AutoregressiveLogitsAdapter(
         n_seq=16,
         max_completion_len=3,
@@ -466,7 +466,7 @@ def test_autoregressive_logits_adapter_jit_step_supports_wrapped_model_callable(
             self.model = model
 
     model_fn = make_model_callable(_Opt(_Model(vocab_size=vocab)), to_numpy=False)
-    prompt = np.asarray([tokenizer.char_to_id("p0_1"), tokenizer.sep_token_id], dtype=np.int32)
+    prompt = np.asarray([tokenizer.char_to_id("p0_1"), tokenizer.start_token_id], dtype=np.int32)
     adapter = AutoregressiveLogitsAdapter(
         n_seq=16,
         max_completion_len=4,
@@ -542,7 +542,7 @@ def test_autoregressive_logits_adapter_jit_step_reuses_noncache_decode_fn_across
     fn_2 = make_model_callable(opt, to_numpy=False)
     assert fn_1 is not fn_2
 
-    prompt = np.asarray([tokenizer.char_to_id("p0_1"), tokenizer.sep_token_id], dtype=np.int32)
+    prompt = np.asarray([tokenizer.char_to_id("p0_1"), tokenizer.start_token_id], dtype=np.int32)
     adapter = AutoregressiveLogitsAdapter(
         n_seq=16,
         max_completion_len=4,
@@ -593,7 +593,7 @@ def test_autoregressive_logits_adapter_jit_step_reuses_cached_decode_fn_across_w
     fn_2 = make_model_callable(opt, to_numpy=False)
     assert fn_1 is not fn_2
 
-    prompt = np.asarray([tokenizer.char_to_id("p0_1"), tokenizer.sep_token_id], dtype=np.int32)
+    prompt = np.asarray([tokenizer.char_to_id("p0_1"), tokenizer.start_token_id], dtype=np.int32)
     adapter = AutoregressiveLogitsAdapter(
         n_seq=16,
         max_completion_len=4,

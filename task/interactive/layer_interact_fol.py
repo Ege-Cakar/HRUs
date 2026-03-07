@@ -84,7 +84,7 @@ prompt, completion = tokenizer.tokenize_example(sequent, statement_text)
 print("prompt text:", sequent.text)
 print("completion text:", statement_text)
 print("decoded prompt:", tokenizer.decode_prompt(prompt).text)
-print("decoded completion:", tokenizer.decode_completion_text(completion))
+print("decoded completion:", tokenizer.decode_completion_texts(completion)[0])
 
 # <codecell>
 for i in prompt:

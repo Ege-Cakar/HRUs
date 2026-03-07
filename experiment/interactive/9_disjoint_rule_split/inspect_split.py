@@ -22,6 +22,7 @@ from task.layer_fol import (
     AutoregressiveLogitsAdapter,
     FOLLayerTask,
     match_rule_completion_fol,
+    split_prompt_row_segments,
 )
 from task.layer_gen.util.fol_rule_bank import (
     build_depth3_icl_split_bundle,
@@ -79,28 +80,14 @@ def ensure_split_bundle(path: Path, *, rebuild: bool) -> Path:
     return path
 
 
-def _split_prompt_segments(prompt_tokens: np.ndarray, sep_token_id: int) -> list[list[int]]:
-    out: list[list[int]] = []
-    current: list[int] = []
-    for tok in prompt_tokens.tolist():
-        if int(tok) == int(sep_token_id):
-            out.append(current)
-            current = []
-            continue
-        current.append(int(tok))
-    return out
-
-
 def preview_record(task: FOLLayerTask, record: dict, *, role: str) -> None:
     tokenizer = task.tokenizer
     prompt = np.asarray(record["prompt"], dtype=np.int32)
     completion = np.asarray(record["completions"][0], dtype=np.int32)
-    segments = _split_prompt_segments(prompt, tokenizer.sep_token_id)
-    demo_segments = segments[:-1]
-    main_segment = segments[-1] + [int(tokenizer.sep_token_id)]
+    demo_segments, main_segment = split_prompt_row_segments(prompt, tokenizer=tokenizer)
 
-    sequent = tokenizer.decode_prompt(main_segment)
-    completion_text = tokenizer.decode_completion_text(completion.tolist())
+    sequent = tokenizer.decode_prompt(main_segment.tolist())
+    completion_text = tokenizer.decode_completion_texts(completion.tolist())[0]
 
     print(
         f"[{role}] distance={int(record['distance'])} src_layer={int(record['src_layer'])} "
@@ -109,8 +96,17 @@ def preview_record(task: FOLLayerTask, record: dict, *, role: str) -> None:
     print("  sequent:", sequent.text)
     print("  completion:", completion_text)
     for idx, demo in enumerate(demo_segments):
-        demo_text = tokenizer.decode_completion_text(list(demo) + [int(tokenizer.eot_token_id)])
+        demo_text = tokenizer.decode_completion_texts(
+            list(demo) + [int(tokenizer.eot_token_id)]
+        )[0]
         print(f"  demo[{idx}]: {demo_text}")
+
+
+def _decode_single_completion_text(tokenizer, completion_tokens) -> str:
+    statements = tokenizer.decode_completion_texts([int(tok) for tok in completion_tokens])
+    if len(statements) != 1:
+        raise ValueError("Expected a single completion statement.")
+    return statements[0]
 
 
 SPLIT_PATH = ensure_split_bundle(SPLIT_PATH, rebuild=REBUILD_SPLIT)
@@ -198,7 +194,10 @@ def compute_dims(bundle, tokenizer, *, max_n_demos_for_shapes: int, initial_ant_
     max_atom_len = 1
     for predicate, arity in merged_predicate_arities.items():
         atom_text = f"{predicate}({','.join(first_const for _ in range(int(arity)))})"
-        max_atom_len = max(max_atom_len, len(tokenizer.encode_completion(atom_text)) - 1)
+        max_atom_len = max(
+            max_atom_len,
+            len(tokenizer.encode_completion_texts([atom_text])) - 1,
+        )
 
     max_prompt_len = (
         max_prompt_facts * max_atom_len
@@ -209,13 +208,13 @@ def compute_dims(bundle, tokenizer, *, max_n_demos_for_shapes: int, initial_ant_
     )
     if int(max_n_demos_for_shapes) > 0:
         max_demo_clause_len = max(
-            len(tokenizer.encode_completion(rule.statement_text)) - 1
+            len(tokenizer.encode_completion_texts([rule.statement_text])) - 1
             for rule in all_rules
         )
         max_prompt_len += int(max_n_demos_for_shapes) * (int(max_demo_clause_len) + 1)
 
     max_completion_len = max(
-        len(tokenizer.encode_completion(rule.statement_text))
+        len(tokenizer.encode_completion_texts([rule.statement_text]))
         for rule in all_rules
     )
     n_seq_ar = int(max_prompt_len + max_completion_len - 1)
@@ -360,12 +359,11 @@ def inspect_samples(task, *, role: str, n_samples: int):
         src_layer = int(record["src_layer"])
 
         # Decode the ground-truth completion
-        gt_text = tokenizer.decode_completion_text(completion_gt.tolist())
+        gt_text = _decode_single_completion_text(tokenizer, completion_gt.tolist())
 
         # Decode the sequent from the prompt
-        segments = _split_prompt_segments(prompt, tokenizer.sep_token_id)
-        main_segment = segments[-1] + [int(tokenizer.sep_token_id)]
-        sequent = tokenizer.decode_prompt(main_segment)
+        _, main_segment = split_prompt_row_segments(prompt, tokenizer=tokenizer)
+        sequent = tokenizer.decode_prompt(main_segment.tolist())
 
         # Run autoregressive prediction
         pred_completion = adapter.predict_completion(
@@ -375,7 +373,7 @@ def inspect_samples(task, *, role: str, n_samples: int):
             temperature=0.0,
             rng=None,
         )
-        pred_text = tokenizer.decode_completion_text(pred_completion.tolist())
+        pred_text = _decode_single_completion_text(tokenizer, pred_completion.tolist())
 
         # Match predicted completion against rule bank
         matched = match_rule_completion_fol(

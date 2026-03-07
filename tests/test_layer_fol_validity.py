@@ -28,7 +28,7 @@ def test_completion_lookup_validity_fol() -> None:
 
     sampled = sample_fol_problem(bank=bank, distance=1, initial_ant_max=3, rng=rng)
     src_layer = sampled.step_layers[0]
-    valid_completion = tokenizer.encode_completion(sampled.step_rules[0].statement_text)
+    valid_completion = tokenizer.encode_completion_texts([sampled.step_rules[0].statement_text])
 
     assert completion_is_valid_for_layer_fol(
         rule_bank=bank,
@@ -73,7 +73,7 @@ def test_full_completion_lookup_validity_fol() -> None:
     prompt = tokenizer.tokenize_prompt(
         FOLSequent(ants=sampled.step_ants[0], cons=sampled.goal_atom)
     )
-    completion = tokenizer.encode_completion_sequence(
+    completion = tokenizer.encode_completion_texts(
         [rule.statement_text for rule in sampled.step_rules]
     )
 

@@ -6,9 +6,10 @@ from typing import Iterable
 
 pad_idx = 0
 sep_token_id = 1
-eot_token_id = 2
+start_token_id = 2
+eot_token_id = 3
 
-_BYTE_BASE = 3
+_BYTE_BASE = 4
 _BYTE_MAX = _BYTE_BASE + 255
 
 
@@ -30,8 +31,8 @@ def _decode_text(tokens: Iterable[int]) -> str:
 
 
 def tokenize_prompt(proof_state: str) -> list[int]:
-    """Encode a proof state into prompt tokens, ending with SEP."""
-    return _encode_text(proof_state) + [sep_token_id]
+    """Encode a proof state into prompt tokens, ending with START."""
+    return _encode_text(proof_state) + [start_token_id]
 
 
 def encode_completion(next_tactic: str) -> list[int]:
@@ -59,9 +60,20 @@ def tokenize_example(
 
 
 def decode_prompt(prompt_tokens: list[int]) -> str:
-    if not prompt_tokens or prompt_tokens[-1] != sep_token_id:
-        raise TokenizationError("Prompt must terminate with SEP token.")
-    return _decode_text(prompt_tokens[:-1])
+    if not prompt_tokens:
+        raise TokenizationError("Prompt cannot be empty.")
+    nonpad = [int(tok) for tok in prompt_tokens if int(tok) != pad_idx]
+    start_positions = [idx for idx, tok in enumerate(nonpad) if tok == start_token_id]
+    if len(start_positions) != 1:
+        raise TokenizationError("Prompt must contain exactly one START token.")
+    start_idx = int(start_positions[0])
+    body = nonpad[:start_idx]
+    sep_positions = [idx for idx, tok in enumerate(body) if tok == sep_token_id]
+    body_start = int(sep_positions[-1]) + 1 if sep_positions else 0
+    body = body[body_start:]
+    if not body:
+        raise TokenizationError("Prompt body cannot be empty.")
+    return _decode_text(body)
 
 
 def decode_completion(completion_tokens: list[int]) -> str:
@@ -77,5 +89,5 @@ def decode(tokens: tuple[list[int], list[int]]) -> tuple[str, str]:
 
 
 def vocab_size() -> int:
-    """Small fixed vocabulary: PAD, SEP, EOT, plus 256 byte values."""
+    """Small fixed vocabulary: PAD, SEP, START, EOT, plus 256 byte values."""
     return _BYTE_MAX + 1

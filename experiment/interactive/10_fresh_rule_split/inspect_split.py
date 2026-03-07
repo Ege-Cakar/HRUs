@@ -28,6 +28,7 @@ from task.layer_fol import (
     match_rule_completion_fol,
     run_layer_rollout_fol,
     sample_rollout_examples,
+    split_prompt_row_segments,
 )
 from task.layer_gen.util.fol_rule_bank import (
     FOLLayerRule,
@@ -64,18 +65,6 @@ TASK_CFG = {
 
 
 # <codecell>
-def _split_prompt_segments(prompt_tokens: np.ndarray, sep_token_id: int) -> list[list[int]]:
-    out: list[list[int]] = []
-    current: list[int] = []
-    for tok in prompt_tokens.tolist():
-        if int(tok) == int(sep_token_id):
-            out.append(current)
-            current = []
-            continue
-        current.append(int(tok))
-    return out
-
-
 def _demo_segments_to_rules(
     *,
     demo_segments: list[list[int]],
@@ -85,7 +74,9 @@ def _demo_segments_to_rules(
     out: list[FOLLayerRule] = []
     for demo in demo_segments:
         try:
-            demo_text = tokenizer.decode_completion_text(list(demo) + [int(tokenizer.eot_token_id)])
+            demo_text = tokenizer.decode_completion_texts(
+                list(demo) + [int(tokenizer.eot_token_id)]
+            )[0]
             lhs, rhs = parse_clause_text(demo_text)
             out.append(FOLLayerRule(src_layer=int(src_layer), dst_layer=int(src_layer) + 1, lhs=lhs, rhs=rhs))
         except ValueError:
@@ -115,12 +106,10 @@ def preview_record(task: FOLLayerTask, record: dict, *, role: str) -> None:
     tokenizer = task.tokenizer
     prompt = np.asarray(record["prompt"], dtype=np.int32)
     completion = np.asarray(record["completions"][0], dtype=np.int32)
-    segments = _split_prompt_segments(prompt, tokenizer.sep_token_id)
-    demo_segments = segments[:-1]
-    main_segment = segments[-1] + [int(tokenizer.sep_token_id)]
+    demo_segments, main_segment = split_prompt_row_segments(prompt, tokenizer=tokenizer)
 
-    sequent = tokenizer.decode_prompt(main_segment)
-    completion_text = tokenizer.decode_completion_text(completion.tolist())
+    sequent = tokenizer.decode_prompt(main_segment.tolist())
+    completion_text = tokenizer.decode_completion_texts(completion.tolist())[0]
 
     print(
         f"[{role}] distance={int(record['distance'])} src_layer={int(record['src_layer'])} "
@@ -129,8 +118,17 @@ def preview_record(task: FOLLayerTask, record: dict, *, role: str) -> None:
     print("  sequent:", sequent.text)
     print("  completion:", completion_text)
     for idx, demo in enumerate(demo_segments):
-        demo_text = tokenizer.decode_completion_text(list(demo) + [int(tokenizer.eot_token_id)])
+        demo_text = tokenizer.decode_completion_texts(
+            list(demo) + [int(tokenizer.eot_token_id)]
+        )[0]
         print(f"  demo[{idx}]: {demo_text}")
+
+
+def _decode_single_completion_text(tokenizer, completion_tokens) -> str:
+    statements = tokenizer.decode_completion_texts([int(tok) for tok in completion_tokens])
+    if len(statements) != 1:
+        raise ValueError("Expected a single completion statement.")
+    return statements[0]
 
 
 # <codecell>
@@ -184,7 +182,10 @@ def compute_dims_fresh_icl(base_bank, tokenizer, *, max_n_demos_for_shapes: int,
     max_atom_len = 1
     for predicate, arity in merged_predicate_arities.items():
         atom_text = f"{predicate}({','.join(first_const for _ in range(int(arity)))})"
-        max_atom_len = max(max_atom_len, len(tokenizer.encode_completion(atom_text)) - 1)
+        max_atom_len = max(
+            max_atom_len,
+            len(tokenizer.encode_completion_texts([atom_text])) - 1,
+        )
 
     max_prompt_len = (
         max_prompt_facts * max_atom_len
@@ -198,7 +199,7 @@ def compute_dims_fresh_icl(base_bank, tokenizer, *, max_n_demos_for_shapes: int,
         max_prompt_len += int(max_n_demos_for_shapes) * (int(max_demo_clause_len) + 1)
 
     max_completion_len = max(
-        len(tokenizer.encode_completion(rule.statement_text))
+        len(tokenizer.encode_completion_texts([rule.statement_text]))
         for rule in all_rules
     )
     # Account for fresh layer-0 rules which may be longer
@@ -372,13 +373,11 @@ def inspect_samples(task, *, role: str, n_samples: int):
         src_layer = int(record["src_layer"])
 
         # Decode the ground-truth completion
-        gt_text = tokenizer.decode_completion_text(completion_gt.tolist())
+        gt_text = _decode_single_completion_text(tokenizer, completion_gt.tolist())
 
         # Decode the sequent from the prompt
-        segments = _split_prompt_segments(prompt, tokenizer.sep_token_id)
-        demo_segments = segments[:-1]
-        main_segment = segments[-1] + [int(tokenizer.sep_token_id)]
-        sequent = tokenizer.decode_prompt(main_segment)
+        demo_segments, main_segment = split_prompt_row_segments(prompt, tokenizer=tokenizer)
+        sequent = tokenizer.decode_prompt(main_segment.tolist())
         full_prompt_text = tokenizer.decode_batch_ids(
             prompt.reshape(1, -1),
             skip_pad=True,
@@ -393,7 +392,7 @@ def inspect_samples(task, *, role: str, n_samples: int):
             temperature=0.0,
             rng=None,
         )
-        pred_text = tokenizer.decode_completion_text(pred_completion.tolist())
+        pred_text = _decode_single_completion_text(tokenizer, pred_completion.tolist())
 
         # Match predicted completion against rule bank
         matched = match_rule_completion_fol(
@@ -444,9 +443,9 @@ def inspect_samples(task, *, role: str, n_samples: int):
         print(f"  full_input_prompt: {full_prompt_text}")
         if demo_segments:
             for demo_idx, demo in enumerate(demo_segments):
-                demo_text = tokenizer.decode_completion_text(
+                demo_text = tokenizer.decode_completion_texts(
                     list(demo) + [int(tokenizer.eot_token_id)]
-                )
+                )[0]
                 print(f"  demo[{demo_idx}]: {demo_text}")
         print(f"  sequent:    {sequent.text}")
         print(f"  expected:   {gt_text}")
@@ -526,12 +525,11 @@ class DemoAugmentedAdapter:
 
         prompt = np.asarray(prompt_tokens, dtype=np.int32).tolist()
         try:
-            segments = _split_prompt_segments(
+            _, main_segment = split_prompt_row_segments(
                 np.asarray(prompt, dtype=np.int32),
-                self.tokenizer.sep_token_id,
+                tokenizer=self.tokenizer,
             )
-            main_segment = segments[-1] + [int(self.tokenizer.sep_token_id)]
-            sequent = self.tokenizer.decode_prompt(main_segment)
+            sequent = self.tokenizer.decode_prompt(main_segment.tolist())
             src_layer = int(min(_layer_from_predicate(atom.predicate) for atom in sequent.ants))
             prompt = _augment_prompt_with_demos(
                 prompt_tokens=prompt,
@@ -544,12 +542,12 @@ class DemoAugmentedAdapter:
                 max_n_demos=self.max_n_demos,
                 max_unify_solutions=self.max_unify_solutions,
             )
-            all_segments = _split_prompt_segments(
+            demo_segments, _ = split_prompt_row_segments(
                 np.asarray(prompt, dtype=np.int32),
-                self.tokenizer.sep_token_id,
+                tokenizer=self.tokenizer,
             )
             self._last_demo_rules = _demo_segments_to_rules(
-                demo_segments=all_segments[:-1],
+                demo_segments=[segment.tolist() for segment in demo_segments],
                 src_layer=src_layer,
                 tokenizer=self.tokenizer,
             )
@@ -641,23 +639,22 @@ def preview_rollout(
                 skip_pad=True,
                 include_special_tokens=True,
             )[0]
-            comp_text = tokenizer.decode_completion_text(list(step.completion_tokens))
+            comp_text = _decode_single_completion_text(tokenizer, list(step.completion_tokens))
             print(f"  step[{step.step_idx}] layer={step.src_layer}")
             print(f"    prompt:     {prompt_text}")
 
             # Show demos from the augmented prompt
             if step.step_idx < len(demo_adapter.augmented_prompts):
                 aug_prompt = demo_adapter.augmented_prompts[step.step_idx]
-                segments = _split_prompt_segments(
+                demo_segments, _ = split_prompt_row_segments(
                     np.asarray(aug_prompt, dtype=np.int32),
-                    tokenizer.sep_token_id,
+                    tokenizer=tokenizer,
                 )
-                demo_segments = segments[:-1]
                 if demo_segments:
                     for demo_idx, demo in enumerate(demo_segments):
-                        demo_text = tokenizer.decode_completion_text(
+                        demo_text = tokenizer.decode_completion_texts(
                             list(demo) + [int(tokenizer.eot_token_id)]
-                        )
+                        )[0]
                         print(f"    demo[{demo_idx}]: {demo_text}")
                 else:
                     print(f"    (no demos prepended)")

@@ -20,7 +20,7 @@ from model.mlp import CompletionMixerConfig
 from model.ssm_bonsai import Mamba2BonsaiConfig
 from model.transformer import TransformerConfig
 from task.prop_ar import ImplyAutoregSizeTask
-from task.prop_gen.util.tokenize_ar import eot_token_id, sep_token_id
+from task.prop_gen.util.tokenize_ar import eot_token_id, start_token_id
 from train import Case, ce_mask
 from wandb_utils import make_experiment_wandb_config
 
@@ -256,7 +256,7 @@ def _evaluate_by_size(optimizer, *, family: str, n_seq: int, max_out_len: int, n
                 prompt_builder=lambda xs: build_prompt_only_inputs(
                     xs,
                     n_seq=n_seq,
-                    sep_token_id=sep_token_id,
+                    start_token_id=start_token_id,
                     pad_token_id=0,
                 ),
                 target_builder=lambda ys: build_completion_targets(
@@ -484,7 +484,7 @@ for train_max_size in TRAIN_MAX_SIZES:
             prompt_builder=lambda xs: build_prompt_only_inputs(
                 xs,
                 n_seq=n_seq,
-                sep_token_id=sep_token_id,
+                start_token_id=start_token_id,
                 pad_token_id=0,
             ),
             target_builder=lambda ys: build_completion_targets(
@@ -498,7 +498,7 @@ for train_max_size in TRAIN_MAX_SIZES:
             prompt_builder=lambda xs: build_prompt_only_inputs(
                 xs,
                 n_seq=n_seq,
-                sep_token_id=sep_token_id,
+                start_token_id=start_token_id,
                 pad_token_id=0,
             ),
             target_builder=lambda ys: build_completion_targets(

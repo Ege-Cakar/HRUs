@@ -15,7 +15,7 @@ from experiment.utils.data_utils import (
 from experiment.utils.metrics_utils import final_token_accuracy, last_nonzero_indices
 
 
-def test_build_prompt_only_inputs_masks_post_sep_tokens() -> None:
+def test_build_prompt_only_inputs_masks_post_start_tokens() -> None:
     xs = np.array(
         [
             [11, 12, 44, 30, 31, 0, 0],
@@ -24,18 +24,18 @@ def test_build_prompt_only_inputs_masks_post_sep_tokens() -> None:
         dtype=np.int32,
     )
 
-    out = build_prompt_only_inputs(xs, n_seq=8, sep_token_id=44, pad_token_id=0)
+    out = build_prompt_only_inputs(xs, n_seq=8, start_token_id=44, pad_token_id=0)
 
     assert out.shape == (2, 8)
     assert np.array_equal(out[0], np.array([11, 12, 44, 0, 0, 0, 0, 0], dtype=np.int32))
     assert np.array_equal(out[1], np.array([21, 44, 0, 0, 0, 0, 0, 0], dtype=np.int32))
 
 
-def test_build_prompt_only_inputs_requires_sep() -> None:
+def test_build_prompt_only_inputs_requires_start() -> None:
     xs = np.array([[1, 2, 3]], dtype=np.int32)
 
-    with pytest.raises(ValueError, match="Missing SEP token"):
-        build_prompt_only_inputs(xs, n_seq=4, sep_token_id=44)
+    with pytest.raises(ValueError, match="exactly one START token"):
+        build_prompt_only_inputs(xs, n_seq=4, start_token_id=44)
 
 
 def test_build_completion_targets_left_aligned_and_eot_padded() -> None:
@@ -126,4 +126,3 @@ def test_last_nonzero_indices_all_zero_row_clamps_to_zero() -> None:
     labels = np.array([[0, 0, 0], [0, 5, 0]], dtype=np.int32)
     idx = np.asarray(last_nonzero_indices(labels))
     assert np.array_equal(idx, np.array([0, 1], dtype=np.int32))
-

@@ -7,6 +7,7 @@ import threading
 
 import numpy as np
 
+from task.layer_gen.util.fol_completion import sampled_completion_texts
 from task.layer_gen.util import tokenize_layer_fol
 from task.layer_gen.util.fol_rule_bank import (
     FOLRuleBank,
@@ -45,23 +46,6 @@ def _rule_texts(rules: tuple[FOLLayerRule, ...] | list[FOLLayerRule]) -> list[st
     return [str(rule.statement_text) for rule in rules]
 
 
-def sampled_completion_texts(
-    *,
-    sampled,
-    step_idx: int,
-    completion_format: str,
-) -> list[str]:
-    step_idx = int(step_idx)
-    completion_format = str(completion_format)
-    if completion_format == "single":
-        return [str(sampled.step_rules[step_idx].statement_text)]
-    if completion_format == "full":
-        return [str(rule.statement_text) for rule in sampled.step_rules[step_idx:]]
-    raise ValueError(
-        f"completion_format must be 'single' or 'full', got {completion_format!r}"
-    )
-
-
 def tokenize_sampled_completion(
     *,
     tokenizer: tokenize_layer_fol.FOLLayerTokenizer,
@@ -76,10 +60,7 @@ def tokenize_sampled_completion(
         step_idx=int(step_idx),
         completion_format=completion_format,
     )
-    if str(completion_format) == "single":
-        completion = tokenizer.encode_completion(statements[0])
-    else:
-        completion = tokenizer.encode_completion_sequence(statements)
+    completion = tokenizer.encode_completion_texts(statements)
     return prompt, completion, statements
 
 

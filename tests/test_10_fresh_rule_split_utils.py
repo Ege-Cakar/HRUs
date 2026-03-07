@@ -86,7 +86,7 @@ def test_extract_prompt_info_from_demo_prefixed_row_tokens() -> None:
     prompt = tokenizer.tokenize_prompt(
         FOLSequent(ants=sampled.step_ants[0], cons=sampled.goal_atom)
     )
-    demo_completion = tokenizer.encode_completion(sampled.step_rules[0].statement_text)
+    demo_completion = tokenizer.encode_completion_texts([sampled.step_rules[0].statement_text])
 
     row_tokens = np.array(
         demo_completion[:-1] + [int(tokenizer.sep_token_id)] + prompt + [0, 0],
@@ -98,7 +98,7 @@ def test_extract_prompt_info_from_demo_prefixed_row_tokens() -> None:
         tokenizer=tokenizer,
     )
 
-    assert prompt_prefix[-1] == int(tokenizer.sep_token_id)
+    assert prompt_prefix[-1] == int(tokenizer.start_token_id)
     assert sequent.text == FOLSequent(ants=sampled.step_ants[0], cons=sampled.goal_atom).text
     assert src_layer == 0
     assert goal_layer == 2

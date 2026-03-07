@@ -78,7 +78,7 @@ def _simple_prompt_and_completion(tokenizer):
         cons=FOLAtom("r1_1", ("a", "b")),
     )
     prompt = tokenizer.tokenize_prompt(sequent)
-    completion = tokenizer.encode_completion("r0_1(a,b) → r1_1(a,b)")
+    completion = tokenizer.encode_completion_texts(["r0_1(a,b) → r1_1(a,b)"])
     return prompt, completion
 
 
@@ -92,7 +92,8 @@ def _split_prompt_segments(prompt_tokens: np.ndarray, sep_token_id: int) -> list
             current = []
         else:
             current.append(tok)
-    assert not current
+    if current:
+        segments.append(current)
     return segments
 
 
@@ -160,7 +161,7 @@ def test_layer_fol_task_offline_autoreg_global_max_uses_metadata_max_seq(tmp_pat
 
     tokenizer = tok.build_tokenizer_from_identifiers(["r0_1", "r1_1", "a", "b", "x1"])
     prompt, completion_long = _simple_prompt_and_completion(tokenizer)
-    completion_short = tokenizer.encode_completion("r1_1(a,b)")
+    completion_short = tokenizer.encode_completion_texts(["r1_1(a,b)"])
 
     rec_short = {
         "prompt": np.array(prompt, dtype=np.int32),
@@ -238,7 +239,7 @@ def test_layer_fol_task_online_sampling_full_completion() -> None:
     assert task.tokenizer is not None
     record = task._sample_online_record()
     completion = np.asarray(record["completions"][0], dtype=np.int32)
-    statements = task.tokenizer.decode_completion_sequence_texts(completion.tolist())
+    statements = task.tokenizer.decode_completion_texts(completion.tolist())
     assert len(statements) >= 1
     assert record["completion_format"] == "full"
     assert record["statement_texts"] == statements
@@ -747,7 +748,7 @@ def test_layer_fol_task_online_sampling_demo_constants_not_tied_to_antecedent() 
         if not demo_segments:
             continue
 
-        main_prompt = list(segments[-1]) + [int(task.tokenizer.sep_token_id)]
+        main_prompt = list(segments[-1])
         sequent = task.tokenizer.decode_prompt(main_prompt)
         antecedent_constants = _constants_from_atoms(sequent.ants)
 
@@ -793,7 +794,7 @@ def test_layer_fol_task_online_sampling_demo_schemas_are_applicable() -> None:
             continue
 
         src_layer = int(rec["src_layer"])
-        main_prompt = list(segments[-1]) + [int(task.tokenizer.sep_token_id)]
+        main_prompt = list(segments[-1])
         sequent = task.tokenizer.decode_prompt(main_prompt)
         applicable = _collect_applicable_demo_schemas(
             rule_bank=task.rule_bank,
@@ -1170,7 +1171,7 @@ def test_layer_fol_task_split_eval_demo_schemas_are_applicable(tmp_path: Path) -
             continue
         saw_demo = True
 
-        main_prompt = list(segments[-1]) + [int(task.tokenizer.sep_token_id)]
+        main_prompt = list(segments[-1])
         sequent = task.tokenizer.decode_prompt(main_prompt)
         applicable = _collect_applicable_demo_schemas(
             rule_bank=task.rule_bank,

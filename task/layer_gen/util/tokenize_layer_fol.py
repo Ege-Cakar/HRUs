@@ -16,14 +16,15 @@ from .fol_rule_bank import (
 )
 
 pad_idx = 0
-TOKENIZER_VERSION = "layer_fol_v3_predicate_chars"
+TOKENIZER_VERSION = "layer_fol_v4_prompt_start"
 
 PAD_TOKEN = "<PAD>"
 SEP_TOKEN = "<SEP>"
+START_TOKEN = "<START>"
 EOT_TOKEN = "<EOT>"
 
 _LOGIC_TOKENS = ("⊢", "∧", "→", "(", ")", ",")
-_RESERVED_TOKENS = (PAD_TOKEN, SEP_TOKEN, EOT_TOKEN)
+_RESERVED_TOKENS = (PAD_TOKEN, SEP_TOKEN, START_TOKEN, EOT_TOKEN)
 _IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _PREDICATE_RE = re.compile(r"r\d+_\d+$|r_[a-z0-9]+$")
 _PREDICATE_CHAR_RE = re.compile(r"[A-Za-z0-9_]")
@@ -37,7 +38,7 @@ def _build_vocab(
     identifiers: Iterable[str],
     *,
     predicate_identifiers: Iterable[str] | None = None,
-) -> tuple[dict[str, int], dict[int, str], int, int]:
+) -> tuple[dict[str, int], dict[int, str], int, int, int]:
     all_identifiers = {str(tok) for tok in identifiers}
     if predicate_identifiers is None:
         predicate_tokens = {
@@ -68,6 +69,10 @@ def _build_vocab(
     token_to_id[SEP_TOKEN] = sep_token_id
     next_id += 1
 
+    start_token_id = next_id
+    token_to_id[START_TOKEN] = start_token_id
+    next_id += 1
+
     eot_token_id = next_id
     token_to_id[EOT_TOKEN] = eot_token_id
     next_id += 1
@@ -92,7 +97,7 @@ def _build_vocab(
         next_id += 1
 
     id_to_token = {idx: token for token, idx in token_to_id.items()}
-    return token_to_id, id_to_token, sep_token_id, eot_token_id
+    return token_to_id, id_to_token, sep_token_id, start_token_id, eot_token_id
 
 
 def _predicate_is_char_tokenized(predicate: str) -> bool:
@@ -108,6 +113,7 @@ class FOLLayerTokenizer:
     token_to_id: dict[str, int]
     id_to_token: dict[int, str]
     sep_token_id: int
+    start_token_id: int
     eot_token_id: int
     version: str = TOKENIZER_VERSION
 
@@ -118,7 +124,7 @@ class FOLLayerTokenizer:
         *,
         predicate_identifiers: Iterable[str] | None = None,
     ) -> "FOLLayerTokenizer":
-        token_to_id, id_to_token, sep_token_id, eot_token_id = _build_vocab(
+        token_to_id, id_to_token, sep_token_id, start_token_id, eot_token_id = _build_vocab(
             identifiers,
             predicate_identifiers=predicate_identifiers,
         )
@@ -126,6 +132,7 @@ class FOLLayerTokenizer:
             token_to_id=token_to_id,
             id_to_token=id_to_token,
             sep_token_id=sep_token_id,
+            start_token_id=start_token_id,
             eot_token_id=eot_token_id,
         )
 
@@ -172,10 +179,15 @@ class FOLLayerTokenizer:
                 )
 
         expected_sep = len(_LOGIC_TOKENS) + 1
-        expected_eot = expected_sep + 1
+        expected_start = expected_sep + 1
+        expected_eot = expected_start + 1
         if token_to_id.get(SEP_TOKEN) != expected_sep:
             raise ValueError(
                 f"Expected {SEP_TOKEN} token id {expected_sep}, got {token_to_id.get(SEP_TOKEN)}."
+            )
+        if token_to_id.get(START_TOKEN) != expected_start:
+            raise ValueError(
+                f"Expected {START_TOKEN} token id {expected_start}, got {token_to_id.get(START_TOKEN)}."
             )
         if token_to_id.get(EOT_TOKEN) != expected_eot:
             raise ValueError(
@@ -201,6 +213,7 @@ class FOLLayerTokenizer:
             token_to_id=token_to_id,
             id_to_token=id_to_token,
             sep_token_id=expected_sep,
+            start_token_id=expected_start,
             eot_token_id=expected_eot,
             version=version,
         )
@@ -218,8 +231,9 @@ class FOLLayerTokenizer:
             "version": self.version,
             "pad_idx": pad_idx,
             "logic_tokens": list(_LOGIC_TOKENS),
-            "special_tokens": [PAD_TOKEN, SEP_TOKEN, EOT_TOKEN],
+            "special_tokens": [PAD_TOKEN, SEP_TOKEN, START_TOKEN, EOT_TOKEN],
             "sep_token_id": int(self.sep_token_id),
+            "start_token_id": int(self.start_token_id),
             "eot_token_id": int(self.eot_token_id),
             "token_to_id": token_to_id,
             "vocab_size": int(self.vocab_size),
@@ -258,7 +272,7 @@ class FOLLayerTokenizer:
             tokens.extend(self._encode_atom(atom))
         tokens.append(self.char_to_id("⊢"))
         tokens.extend(self._encode_atom(sequent.cons))
-        tokens.append(self.sep_token_id)
+        tokens.append(self.start_token_id)
         return tokens
 
     def _encode_conjunction(self, atoms: tuple[FOLAtom, ...]) -> list[int]:
@@ -269,7 +283,7 @@ class FOLLayerTokenizer:
             tokens.extend(self._encode_atom(atom))
         return tokens
 
-    def encode_completion(self, statement_text: str) -> list[int]:
+    def _encode_completion_statement(self, statement_text: str) -> list[int]:
         try:
             lhs, rhs = parse_clause_text(statement_text)
             tokens = self._encode_conjunction(lhs)
@@ -278,56 +292,62 @@ class FOLLayerTokenizer:
         except ValueError:
             atoms = parse_conjunction_text(statement_text)
             tokens = self._encode_conjunction(atoms)
-        return tokens + [self.eot_token_id]
+        return tokens
 
-    def encode_completion_sequence(self, statement_texts: Iterable[str]) -> list[int]:
+    def encode_completion_texts(self, statement_texts: Iterable[str]) -> list[int]:
         statement_texts = [str(text) for text in statement_texts]
         if not statement_texts:
-            raise ValueError("Completion sequence must contain at least one statement.")
+            raise ValueError("Completion must contain at least one statement.")
 
         tokens: list[int] = []
         for idx, statement_text in enumerate(statement_texts):
             if idx > 0:
                 tokens.append(self.sep_token_id)
-            tokens.extend(self.encode_completion(statement_text)[:-1])
+            tokens.extend(self._encode_completion_statement(statement_text))
         tokens.append(self.eot_token_id)
         return tokens
 
     def tokenize_example(self, sequent: FOLSequent, statement_text: str) -> tuple[list[int], list[int]]:
-        return self.tokenize_prompt(sequent), self.encode_completion(statement_text)
+        return self.tokenize_prompt(sequent), self.encode_completion_texts([statement_text])
 
-    def decode_prompt(self, prompt_tokens: list[int]) -> FOLSequent:
-        if not prompt_tokens:
+    def decode_prompt(self, prompt_tokens) -> FOLSequent:
+        try:
+            prompt = [int(tok) for tok in prompt_tokens]
+        except TypeError as err:
+            raise ValueError("Prompt tokens must be a 1D integer sequence.") from err
+        if not prompt:
             raise ValueError("Prompt cannot be empty.")
-        if int(prompt_tokens[-1]) != int(self.sep_token_id):
-            raise ValueError("Prompt must terminate with SEP token.")
+        nonpad = [tok for tok in prompt if tok != pad_idx]
+        start_positions = [
+            idx for idx, tok in enumerate(nonpad)
+            if int(tok) == int(self.start_token_id)
+        ]
+        if not start_positions:
+            raise ValueError("Prompt must contain exactly one START token.")
+        if len(start_positions) != 1:
+            raise ValueError("Prompt must contain exactly one START token.")
 
-        symbols = [self.id_to_char(int(tok)) for tok in prompt_tokens[:-1]]
+        start_idx = int(start_positions[0])
+        body = nonpad[:start_idx]
+        sep_positions = [
+            idx for idx, tok in enumerate(body)
+            if int(tok) == int(self.sep_token_id)
+        ]
+        body_start = int(sep_positions[-1]) + 1 if sep_positions else 0
+        body_tokens = body[body_start:]
+        if not body_tokens:
+            raise ValueError("Prompt body cannot be empty.")
+
+        symbols = [self.id_to_char(int(tok)) for tok in body_tokens]
         if any(sym in _RESERVED_TOKENS for sym in symbols):
             raise ValueError("Prompt body contains reserved special tokens.")
         sequent = _decode_prompt_symbols_to_sequent(symbols)
         return parse_sequent_text(sequent.text)
 
-    def decode_completion_clause(self, completion_tokens: list[int]) -> tuple[tuple[FOLAtom, ...], tuple[FOLAtom, ...]]:
-        if len(completion_tokens) < 2:
-            raise ValueError("Completion must include clause tokens and EOT.")
-        if int(completion_tokens[-1]) != int(self.eot_token_id):
-            raise ValueError("Completion must terminate with EOT token.")
-
-        symbols = [self.id_to_char(int(tok)) for tok in completion_tokens[:-1]]
-        if any(sym in _RESERVED_TOKENS for sym in symbols):
-            raise ValueError("Completion body contains reserved special tokens.")
-        lhs, rhs = _decode_completion_symbols_to_clause(symbols)
-        canonical = f"{_format_conjunction(lhs)} → {_format_conjunction(rhs)}"
-        return parse_clause_text(canonical)
-
-    def decode_completion_text(self, completion_tokens: list[int]) -> str:
-        if len(completion_tokens) < 2:
-            raise ValueError("Completion must include clause tokens and EOT.")
-        if int(completion_tokens[-1]) != int(self.eot_token_id):
-            raise ValueError("Completion must terminate with EOT token.")
-
-        symbols = [self.id_to_char(int(tok)) for tok in completion_tokens[:-1]]
+    def _decode_completion_statement_text(self, statement_tokens: list[int]) -> str:
+        if not statement_tokens:
+            raise ValueError("Completion statement cannot be empty.")
+        symbols = [self.id_to_char(int(tok)) for tok in statement_tokens]
         if any(sym in _RESERVED_TOKENS for sym in symbols):
             raise ValueError("Completion body contains reserved special tokens.")
         try:
@@ -340,30 +360,36 @@ class FOLLayerTokenizer:
             atoms = parse_conjunction_text(_format_conjunction(atoms))
             return _format_conjunction(atoms)
 
-    def decode_completion_sequence_texts(self, completion_tokens: list[int]) -> list[str]:
+    def decode_completion_clause(self, completion_tokens: list[int]) -> tuple[tuple[FOLAtom, ...], tuple[FOLAtom, ...]]:
+        statements = self.decode_completion_texts(completion_tokens)
+        if len(statements) != 1:
+            raise ValueError("Clause decoding requires a single completion statement.")
+        return parse_clause_text(statements[0])
+
+    def decode_completion_texts(self, completion_tokens: list[int]) -> list[str]:
         if len(completion_tokens) < 2:
-            raise ValueError("Completion sequence must include content and EOT.")
+            raise ValueError("Completion must include content and EOT.")
         if int(completion_tokens[-1]) != int(self.eot_token_id):
-            raise ValueError("Completion sequence must terminate with EOT token.")
+            raise ValueError("Completion must terminate with EOT token.")
 
         body = [int(tok) for tok in completion_tokens[:-1]]
         if not body:
-            raise ValueError("Completion sequence must contain at least one statement.")
+            raise ValueError("Completion must contain at least one statement.")
 
         out: list[str] = []
         current: list[int] = []
         for tok in body:
             if tok == int(self.sep_token_id):
                 if not current:
-                    raise ValueError("Completion sequence contains an empty segment.")
-                out.append(self.decode_completion_text(current + [self.eot_token_id]))
+                    raise ValueError("Completion contains an empty segment.")
+                out.append(self._decode_completion_statement_text(current))
                 current = []
                 continue
             current.append(int(tok))
 
         if not current:
-            raise ValueError("Completion sequence cannot end with SEP before EOT.")
-        out.append(self.decode_completion_text(current + [self.eot_token_id]))
+            raise ValueError("Completion cannot end with SEP before EOT.")
+        out.append(self._decode_completion_statement_text(current))
         return out
 
     def decode_batch_ids(

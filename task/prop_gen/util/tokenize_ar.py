@@ -61,12 +61,21 @@ rule_type_to_id = {
 id_to_rule_type = {v: k for k, v in rule_type_to_id.items()}
 
 sep_token_id = _RULE_BASE + 12
-eot_token_id = _RULE_BASE + 13
+start_token_id = _RULE_BASE + 13
+eot_token_id = _RULE_BASE + 14
 
 var_base = 128
 
 
 def char_to_id(c: str) -> int:
+    if c == "<PAD>":
+        return pad_idx
+    if c == "<SEP>":
+        return sep_token_id
+    if c == "<START>":
+        return start_token_id
+    if c == "<EOT>":
+        return eot_token_id
     if c in logic_char_to_id:
         return logic_char_to_id[c]
     if c.startswith("p") and c[1:].isdigit():
@@ -75,6 +84,14 @@ def char_to_id(c: str) -> int:
 
 
 def id_to_char(i: int) -> str:
+    if i == pad_idx:
+        return "<PAD>"
+    if i == sep_token_id:
+        return "<SEP>"
+    if i == start_token_id:
+        return "<START>"
+    if i == eot_token_id:
+        return "<EOT>"
     if i in id_to_logic_char:
         return id_to_logic_char[i]
     if i >= var_base:
@@ -109,7 +126,7 @@ def tokenize_prop(prop) -> list[int]:
 
 
 def tokenize_prompt(sequent: Sequent) -> list[int]:
-    return _tokenize_prop_text(str(sequent)) + [sep_token_id]
+    return _tokenize_prop_text(str(sequent)) + [start_token_id]
 
 
 def _rule_target_prop(rule: Rule):
@@ -192,10 +209,18 @@ def _parse_prop_list(tokens: list[str]) -> list[object]:
 def decode_prompt(prompt_tokens: list[int]) -> Sequent:
     if not prompt_tokens:
         raise ValueError("Prompt cannot be empty.")
-    if prompt_tokens[-1] != sep_token_id:
-        raise ValueError("Prompt must terminate with SEP token.")
+    nonpad = [int(tok) for tok in prompt_tokens if int(tok) != pad_idx]
+    start_positions = [idx for idx, tok in enumerate(nonpad) if tok == start_token_id]
+    if len(start_positions) != 1:
+        raise ValueError("Prompt must contain exactly one START token.")
 
-    sequent_tokens = prompt_tokens[:-1]
+    start_idx = int(start_positions[0])
+    sequent_tokens = nonpad[:start_idx]
+    sep_positions = [idx for idx, tok in enumerate(sequent_tokens) if tok == sep_token_id]
+    body_start = int(sep_positions[-1]) + 1 if sep_positions else 0
+    sequent_tokens = sequent_tokens[body_start:]
+    if not sequent_tokens:
+        raise ValueError("Prompt body cannot be empty.")
     symbols = [id_to_char(tok) for tok in sequent_tokens]
     if "⊢" not in symbols:
         raise ValueError("Prompt sequent missing turnstile '⊢'.")

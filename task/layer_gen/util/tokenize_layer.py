@@ -32,7 +32,7 @@ if TYPE_CHECKING:
     from task.layer_gen.util.rule_bank import RuleBank
 
 pad_idx = 0
-TOKENIZER_VERSION = "layer_v1_compact"
+TOKENIZER_VERSION = "layer_v2_prompt_start"
 
 _LOGIC_TOKENS = ("⊢", "∧", "→", "(", ")", ",")
 _atom_re = re.compile(r"p(\d+)_(\d+)$")
@@ -62,6 +62,7 @@ class LayerTokenizer:
     atom_to_token: dict[str, int]
     token_to_atom: dict[int, str]
     sep_token_id: int
+    start_token_id: int
     eot_token_id: int
     version: str = TOKENIZER_VERSION
 
@@ -69,7 +70,8 @@ class LayerTokenizer:
     def from_atoms(cls, atoms: Iterable[str]) -> "LayerTokenizer":
         logic_to_id, id_to_logic = _build_logic_maps()
         sep = len(logic_to_id) + 1
-        eot = sep + 1
+        start = sep + 1
+        eot = start + 1
 
         unique_sorted = sorted(set(str(atom) for atom in atoms), key=_atom_sort_key)
         atom_to_token: dict[str, int] = {}
@@ -86,6 +88,7 @@ class LayerTokenizer:
             atom_to_token=atom_to_token,
             token_to_atom=token_to_atom,
             sep_token_id=sep,
+            start_token_id=start,
             eot_token_id=eot,
         )
 
@@ -113,10 +116,11 @@ class LayerTokenizer:
         logic_to_id, id_to_logic = _build_logic_maps()
 
         sep = int(payload.get("sep_token_id", len(logic_to_id) + 1))
-        eot = int(payload.get("eot_token_id", sep + 1))
-        if sep != len(logic_to_id) + 1 or eot != sep + 1:
+        start = int(payload.get("start_token_id", sep + 1))
+        eot = int(payload.get("eot_token_id", start + 1))
+        if sep != len(logic_to_id) + 1 or start != sep + 1 or eot != start + 1:
             raise ValueError(
-                "Expected contiguous special ids with SEP immediately after logic tokens."
+                "Expected contiguous special ids with SEP, START, and EOT immediately after logic tokens."
             )
 
         atom_to_id_raw = payload.get("atom_to_id", {})
@@ -144,6 +148,7 @@ class LayerTokenizer:
             atom_to_token=atom_to_token,
             token_to_atom=token_to_atom,
             sep_token_id=sep,
+            start_token_id=start,
             eot_token_id=eot,
             version=version,
         )
@@ -158,12 +163,21 @@ class LayerTokenizer:
             "pad_idx": pad_idx,
             "logic_tokens": list(_LOGIC_TOKENS),
             "sep_token_id": int(self.sep_token_id),
+            "start_token_id": int(self.start_token_id),
             "eot_token_id": int(self.eot_token_id),
             "atom_to_id": {atom: int(tok) for atom, tok in sorted(self.atom_to_token.items())},
             "vocab_size": int(self.vocab_size),
         }
 
     def char_to_id(self, token: str) -> int:
+        if token == "<PAD>":
+            return pad_idx
+        if token == "<SEP>":
+            return self.sep_token_id
+        if token == "<START>":
+            return self.start_token_id
+        if token == "<EOT>":
+            return self.eot_token_id
         if token in self.logic_char_to_id:
             return self.logic_char_to_id[token]
         if token in self.atom_to_token:
@@ -171,6 +185,14 @@ class LayerTokenizer:
         raise ValueError(f"Unknown token symbol: {token}")
 
     def id_to_char(self, token_id: int) -> str:
+        if token_id == pad_idx:
+            return "<PAD>"
+        if token_id == self.sep_token_id:
+            return "<SEP>"
+        if token_id == self.start_token_id:
+            return "<START>"
+        if token_id == self.eot_token_id:
+            return "<EOT>"
         if token_id in self.id_to_logic_char:
             return self.id_to_logic_char[token_id]
         if token_id in self.token_to_atom:
@@ -210,7 +232,7 @@ class LayerTokenizer:
         return self._tokenize_prop_text(str(prop))
 
     def tokenize_prompt(self, sequent: Sequent) -> list[int]:
-        return self._tokenize_prop_text(str(sequent)) + [self.sep_token_id]
+        return self._tokenize_prop_text(str(sequent)) + [self.start_token_id]
 
     def encode_completion(self, statement_text: str) -> list[int]:
         return self._tokenize_prop_text(statement_text) + [self.eot_token_id]
@@ -218,13 +240,31 @@ class LayerTokenizer:
     def tokenize_example(self, sequent: Sequent, statement_text: str) -> tuple[list[int], list[int]]:
         return self.tokenize_prompt(sequent), self.encode_completion(statement_text)
 
-    def decode_prompt(self, prompt_tokens: list[int]) -> Sequent:
-        if not prompt_tokens:
+    def decode_prompt(self, prompt_tokens) -> Sequent:
+        try:
+            prompt = [int(tok) for tok in prompt_tokens]
+        except TypeError as err:
+            raise ValueError("Prompt tokens must be a 1D integer sequence.") from err
+        if not prompt:
             raise ValueError("Prompt cannot be empty.")
-        if prompt_tokens[-1] != self.sep_token_id:
-            raise ValueError("Prompt must terminate with SEP token.")
+        nonpad = [tok for tok in prompt if tok != pad_idx]
+        start_positions = [
+            idx for idx, tok in enumerate(nonpad)
+            if tok == int(self.start_token_id)
+        ]
+        if len(start_positions) != 1:
+            raise ValueError("Prompt must contain exactly one START token.")
 
-        sequent_tokens = prompt_tokens[:-1]
+        start_idx = int(start_positions[0])
+        sequent_tokens = nonpad[:start_idx]
+        sep_positions = [
+            idx for idx, tok in enumerate(sequent_tokens)
+            if tok == int(self.sep_token_id)
+        ]
+        body_start = int(sep_positions[-1]) + 1 if sep_positions else 0
+        sequent_tokens = sequent_tokens[body_start:]
+        if not sequent_tokens:
+            raise ValueError("Prompt body cannot be empty.")
         symbols = [self.id_to_char(tok) for tok in sequent_tokens]
         if "⊢" not in symbols:
             raise ValueError("Prompt sequent missing turnstile '⊢'.")
@@ -274,6 +314,10 @@ class LayerTokenizer:
                     if include_special_tokens:
                         parts.append("<SEP>")
                     continue
+                if tok == self.start_token_id:
+                    if include_special_tokens:
+                        parts.append("<START>")
+                    continue
                 if tok == self.eot_token_id:
                     if include_special_tokens:
                         parts.append("<EOT>")
@@ -303,6 +347,7 @@ _default_tokenizer = LayerTokenizer.from_atoms(())
 logic_char_to_id = dict(_default_tokenizer.logic_char_to_id)
 id_to_logic_char = dict(_default_tokenizer.id_to_logic_char)
 sep_token_id = _default_tokenizer.sep_token_id
+start_token_id = _default_tokenizer.start_token_id
 eot_token_id = _default_tokenizer.eot_token_id
 
 

@@ -13,34 +13,76 @@ from task.layer_gen.util.fol_rule_bank import FOLAtom, FOLSequent
 from task.layer_gen.util.tokenize_layer_fol import FOLLayerTokenizer
 
 
+def _extract_prompt_prefix(
+    row_tokens,
+    *,
+    tokenizer: FOLLayerTokenizer,
+    pad_token_id: int = 0,
+) -> np.ndarray:
+    row = np.asarray(row_tokens, dtype=np.int32)
+    if row.ndim != 1:
+        raise ValueError(f"Expected 1D row tokens, got {row.shape}")
+
+    nonpad = row[row != int(pad_token_id)]
+    start_idx = np.where(nonpad == int(tokenizer.start_token_id))[0]
+    if start_idx.size != 1:
+        raise ValueError("Prompt rows must contain exactly one START token.")
+    return nonpad[: int(start_idx[0]) + 1].astype(np.int32)
+
+
 def _find_sequent_prompt_in_tokens(
     row_tokens,
     *,
     tokenizer: FOLLayerTokenizer,
     pad_token_id: int = 0,
 ) -> tuple[np.ndarray, FOLSequent]:
-    row = np.asarray(row_tokens, dtype=np.int32)
-    if row.ndim != 1:
-        raise ValueError(f"Expected 1D row tokens, got {row.shape}")
+    prompt_prefix = _extract_prompt_prefix(
+        row_tokens,
+        tokenizer=tokenizer,
+        pad_token_id=pad_token_id,
+    )
+    return prompt_prefix, tokenizer.decode_prompt(prompt_prefix.tolist())
 
-    nonpad = row[row != int(pad_token_id)]
-    sep_idx = np.where(nonpad == int(tokenizer.sep_token_id))[0]
-    if sep_idx.size == 0:
-        raise ValueError("Missing SEP token in row.")
 
-    for pick in reversed(sep_idx.tolist()):
-        prev = sep_idx[sep_idx < pick]
-        start = int(prev[-1]) + 1 if prev.size > 0 else 0
-        segment = nonpad[start : int(pick) + 1]
-        if segment.size < 2:
+def split_prompt_row_segments(
+    row_tokens,
+    *,
+    tokenizer: FOLLayerTokenizer,
+    pad_token_id: int = 0,
+) -> tuple[list[np.ndarray], np.ndarray]:
+    prompt_prefix = _extract_prompt_prefix(
+        row_tokens,
+        tokenizer=tokenizer,
+        pad_token_id=pad_token_id,
+    )
+    demo_segments: list[np.ndarray] = []
+    current: list[int] = []
+    for tok in prompt_prefix.tolist():
+        tok = int(tok)
+        if tok == int(tokenizer.sep_token_id):
+            demo_segments.append(np.asarray(current, dtype=np.int32))
+            current = []
             continue
-        try:
-            sequent = tokenizer.decode_prompt(segment.astype(int).tolist())
-        except ValueError:
-            continue
-        return nonpad[: int(pick) + 1].astype(np.int32), sequent
+        current.append(tok)
+    if not current:
+        raise ValueError("Prompt row did not contain a terminal sequent segment.")
+    return demo_segments, np.asarray(current, dtype=np.int32)
 
-    raise ValueError("Could not locate a valid sequent prompt segment in row tokens.")
+
+def _join_completion_texts(statement_texts: list[str]) -> str:
+    return " <SEP> ".join(str(text) for text in statement_texts)
+
+
+def _decode_completion_display_text(
+    *,
+    tokenizer: FOLLayerTokenizer,
+    completion_tokens,
+    expect_single: bool,
+) -> str:
+    statements = tokenizer.decode_completion_texts([int(tok) for tok in completion_tokens])
+    if expect_single and len(statements) != 1:
+        raise ValueError("Expected a single completion statement.")
+    return statements[0] if expect_single else _join_completion_texts(statements)
 
 
 def infer_src_layer_from_prompt_tokens(
@@ -49,10 +91,12 @@ def infer_src_layer_from_prompt_tokens(
     tokenizer: FOLLayerTokenizer,
     pad_token_id: int = 0,
 ) -> int:
-    _, sequent = _find_sequent_prompt_in_tokens(
-        row_tokens,
-        tokenizer=tokenizer,
-        pad_token_id=pad_token_id,
+    sequent = tokenizer.decode_prompt(
+        _extract_prompt_prefix(
+            row_tokens,
+            tokenizer=tokenizer,
+            pad_token_id=pad_token_id,
+        ).tolist()
     )
     if len(sequent.ants) == 0:
         raise ValueError("Prompt antecedents are empty; cannot infer src layer.")
@@ -65,11 +109,12 @@ def extract_prompt_info_from_row_tokens(
     tokenizer: FOLLayerTokenizer,
     pad_token_id: int = 0,
 ) -> tuple[np.ndarray, FOLSequent, int, int]:
-    prompt_prefix, sequent = _find_sequent_prompt_in_tokens(
+    prompt_prefix = _extract_prompt_prefix(
         row_tokens,
         tokenizer=tokenizer,
         pad_token_id=pad_token_id,
     )
+    sequent = tokenizer.decode_prompt(prompt_prefix.tolist())
     if len(sequent.ants) == 0:
         raise ValueError("Prompt antecedents are empty; cannot infer src layer.")
     src_layer = int(min(infer_fol_predicate_layer(atom.predicate) for atom in sequent.ants))
@@ -110,11 +155,17 @@ def extract_ar_rule_match_inputs(
 
         try:
             if completion_format == "full":
-                expected_statement = " <SEP> ".join(
-                    tokenizer.decode_completion_sequence_texts(gold_completion.tolist())
+                expected_statement = _decode_completion_display_text(
+                    tokenizer=tokenizer,
+                    completion_tokens=gold_completion.tolist(),
+                    expect_single=False,
                 )
             else:
-                expected_statement = tokenizer.decode_completion_text(gold_completion.tolist())
+                expected_statement = _decode_completion_display_text(
+                    tokenizer=tokenizer,
+                    completion_tokens=gold_completion.tolist(),
+                    expect_single=True,
+                )
         except (ValueError, TypeError):
             expected_statement = None
 
@@ -155,7 +206,11 @@ def extract_ar_free_run_eval_inputs(
         )
         gold_completion = labels[idx][mask].astype(np.int32)
         try:
-            expected_statement = tokenizer.decode_completion_text(gold_completion.tolist())
+            expected_statement = _decode_completion_display_text(
+                tokenizer=tokenizer,
+                completion_tokens=gold_completion.tolist(),
+                expect_single=True,
+            )
         except (ValueError, TypeError):
             expected_statement = None
 
@@ -206,11 +261,17 @@ def extract_completion_rule_match_inputs(
 
         try:
             if completion_format == "full":
-                expected_statement = " <SEP> ".join(
-                    tokenizer.decode_completion_sequence_texts(gold_completion.tolist())
+                expected_statement = _decode_completion_display_text(
+                    tokenizer=tokenizer,
+                    completion_tokens=gold_completion.tolist(),
+                    expect_single=False,
                 )
             else:
-                expected_statement = tokenizer.decode_completion_text(gold_completion.tolist())
+                expected_statement = _decode_completion_display_text(
+                    tokenizer=tokenizer,
+                    completion_tokens=gold_completion.tolist(),
+                    expect_single=True,
+                )
         except (ValueError, TypeError):
             expected_statement = None
 
@@ -273,8 +334,10 @@ def extract_ar_completion_path_inputs(
         pred_completion = preds[idx][mask].astype(np.int32)
         gold_completion = labels[idx][mask].astype(np.int32)
         try:
-            expected_completion = " <SEP> ".join(
-                tokenizer.decode_completion_sequence_texts(gold_completion.tolist())
+            expected_completion = _decode_completion_display_text(
+                tokenizer=tokenizer,
+                completion_tokens=gold_completion.tolist(),
+                expect_single=False,
             )
         except (ValueError, TypeError):
             expected_completion = None
@@ -312,8 +375,10 @@ def extract_completion_path_inputs(
         pred_completion = _truncate_at_first_eot(preds[idx], eot_token_id=eot_token_id)
         gold_completion = _truncate_at_first_eot(labels[idx], eot_token_id=eot_token_id)
         try:
-            expected_completion = " <SEP> ".join(
-                tokenizer.decode_completion_sequence_texts(gold_completion.tolist())
+            expected_completion = _decode_completion_display_text(
+                tokenizer=tokenizer,
+                completion_tokens=gold_completion.tolist(),
+                expect_single=False,
             )
         except (ValueError, TypeError):
             expected_completion = None

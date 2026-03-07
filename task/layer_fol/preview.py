@@ -6,23 +6,15 @@ from typing import Callable
 
 import numpy as np
 
-from .eval_inputs import extract_prompt_info_from_row_tokens
+from .eval_inputs import extract_prompt_info_from_row_tokens, split_prompt_row_segments
 from .task import FOLLayerTask
 
 
-def _split_prompt_segments(prompt_tokens: np.ndarray, sep_token_id: int) -> list[list[int]]:
-    segments: list[list[int]] = []
-    current: list[int] = []
-    for tok in prompt_tokens.tolist():
-        tok = int(tok)
-        if tok == int(sep_token_id):
-            segments.append(current)
-            current = []
-            continue
-        current.append(tok)
-    if current:
-        segments.append(current)
-    return segments
+def _single_completion_text(tokens: np.ndarray, *, tokenizer) -> str:
+    statements = tokenizer.decode_completion_texts(tokens.tolist())
+    if len(statements) != 1:
+        raise ValueError("Expected a single completion statement.")
+    return statements[0]
 
 
 def _format_single_completion_record(
@@ -37,14 +29,9 @@ def _format_single_completion_record(
 
     prompt = np.asarray(record["prompt"], dtype=np.int32)
     completion = np.asarray(record["completions"][0], dtype=np.int32)
-    segments = _split_prompt_segments(prompt, tokenizer.sep_token_id)
-    if not segments:
-        raise ValueError("Preview record prompt did not contain a sequent segment.")
-
-    demo_segments = segments[:-1]
-    main_segment = segments[-1] + [int(tokenizer.sep_token_id)]
-    sequent = tokenizer.decode_prompt(main_segment)
-    completion_text = tokenizer.decode_completion_text(completion.tolist())
+    demo_segments, main_segment = split_prompt_row_segments(prompt, tokenizer=tokenizer)
+    sequent = tokenizer.decode_prompt(main_segment.tolist())
+    completion_text = _single_completion_text(completion, tokenizer=tokenizer)
 
     lines = [
         (
@@ -55,7 +42,10 @@ def _format_single_completion_record(
         f"  completion: {completion_text}",
     ]
     for idx, demo in enumerate(demo_segments):
-        demo_text = tokenizer.decode_completion_text(list(demo) + [int(tokenizer.eot_token_id)])
+        demo_text = _single_completion_text(
+            np.asarray(list(demo) + [int(tokenizer.eot_token_id)], dtype=np.int32),
+            tokenizer=tokenizer,
+        )
         lines.append(f"  demo[{idx}]: {demo_text}")
     return lines
 
@@ -73,7 +63,7 @@ def _format_full_completion_record(
     prompt = np.asarray(record["prompt"], dtype=np.int32)
     completion = np.asarray(record["completions"][0], dtype=np.int32)
     _, sequent, _, _ = extract_prompt_info_from_row_tokens(prompt, tokenizer=tokenizer)
-    completion_texts = tokenizer.decode_completion_sequence_texts(completion.tolist())
+    completion_texts = tokenizer.decode_completion_texts(completion.tolist())
     n_demos = len((record.get("rule_context") or {}).get("demo_schema_texts", []))
 
     lines = [

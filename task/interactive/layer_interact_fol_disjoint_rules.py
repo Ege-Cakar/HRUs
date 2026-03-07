@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
-from task.layer_fol import FOLLayerTask
+from task.layer_fol import FOLLayerTask, split_prompt_row_segments
 from task.layer_gen.util.fol_rule_bank import (
     build_depth3_icl_split_bundle,
     load_fol_depth3_icl_split_bundle,
@@ -72,18 +72,6 @@ print(f"shared layer2 predicates: {len(split_bundle.shared_layer2_predicates)}")
 
 
 # <codecell>
-def _split_prompt_segments(prompt_tokens: np.ndarray, sep_token_id: int) -> list[list[int]]:
-    out: list[list[int]] = []
-    current: list[int] = []
-    for tok in prompt_tokens.tolist():
-        if int(tok) == int(sep_token_id):
-            out.append(current)
-            current = []
-            continue
-        current.append(int(tok))
-    return out
-
-
 def _atom_text(predicate: str, arity: int, constant: str) -> str:
     args = ",".join(str(constant) for _ in range(int(arity)))
     return f"{str(predicate)}({args})"
@@ -181,17 +169,15 @@ def preview_record(task: FOLLayerTask, record: dict, *, role: str) -> None:
     tokenizer = task.tokenizer
     prompt = np.asarray(record["prompt"], dtype=np.int32)
     completion = np.asarray(record["completions"][0], dtype=np.int32)
-    segments = _split_prompt_segments(prompt, tokenizer.sep_token_id)
-    demo_segments = segments[:-1]
-    main_segment = segments[-1] + [int(tokenizer.sep_token_id)]
+    demo_segments, main_segment = split_prompt_row_segments(prompt, tokenizer=tokenizer)
 
-    sequent = tokenizer.decode_prompt(main_segment)
+    sequent = tokenizer.decode_prompt(main_segment.tolist())
     if str(task.completion_format) == "full":
         completion_text = " <SEP> ".join(
-            tokenizer.decode_completion_sequence_texts(completion.tolist())
+            tokenizer.decode_completion_texts(completion.tolist())
         )
     else:
-        completion_text = tokenizer.decode_completion_text(completion.tolist())
+        completion_text = tokenizer.decode_completion_texts(completion.tolist())[0]
 
     print(
         f"\n[{role}] distance={int(record['distance'])} src_layer={int(record['src_layer'])} "
@@ -201,9 +187,9 @@ def preview_record(task: FOLLayerTask, record: dict, *, role: str) -> None:
     print("target completion:", completion_text)
     if demo_segments:
         for idx, demo in enumerate(demo_segments):
-            demo_text = tokenizer.decode_completion_text(
+            demo_text = tokenizer.decode_completion_texts(
                 list(demo) + [int(tokenizer.eot_token_id)]
-            )
+            )[0]
             print(f"demo[{idx}]: {demo_text}")
 
     print("prompt tokens:")
@@ -272,8 +258,8 @@ statement_text = (
     f"{_atom_text(eval_only_predicate, eval_only_arity, const0)} "
     f"→ {_atom_text(shared_l1_predicate, shared_l1_arity, const0)}"
 )
-encoded = train_task.tokenizer.encode_completion(statement_text)
-decoded = train_task.tokenizer.decode_completion_text(encoded)
+encoded = train_task.tokenizer.encode_completion_texts([statement_text])
+decoded = train_task.tokenizer.decode_completion_texts(encoded)[0]
 print("statement:", statement_text)
 print("encoded ids:", encoded)
 print("encoded symbols:", _symbol_text(train_task.tokenizer, encoded))

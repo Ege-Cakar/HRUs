@@ -71,6 +71,20 @@ def _sampled_bank(seed: int = 0):
     return bank, tokenizer, rng
 
 
+def _enc1(tokenizer, statement_text: str) -> list[int]:
+    return tokenizer.encode_completion_texts([statement_text])
+
+
+def _encs(tokenizer, statement_texts) -> list[int]:
+    return tokenizer.encode_completion_texts(statement_texts)
+
+
+def _dec1(tokenizer, completion_tokens) -> str:
+    statements = tokenizer.decode_completion_texts(completion_tokens)
+    assert len(statements) == 1
+    return statements[0]
+
+
 def _make_unknown_statement(bank, src_layer: int) -> str:
     src_pred = bank.predicates_for_layer(src_layer)[0]
     dst_pred = bank.predicates_for_layer(src_layer + 1)[0]
@@ -142,7 +156,7 @@ def test_match_rule_completion_categorizes_errors_fol() -> None:
     ok = match_rule_completion_fol(
         rule_bank=bank,
         src_layer=src_layer,
-        completion_tokens=tokenizer.encode_completion(expected_statement),
+        completion_tokens=_enc1(tokenizer, expected_statement),
         expected_statement_text=expected_statement,
         tokenizer=tokenizer,
     )
@@ -155,7 +169,7 @@ def test_match_rule_completion_categorizes_errors_fol() -> None:
     unknown = match_rule_completion_fol(
         rule_bank=bank,
         src_layer=src_layer,
-        completion_tokens=tokenizer.encode_completion(unknown_statement),
+        completion_tokens=_enc1(tokenizer, unknown_statement),
         tokenizer=tokenizer,
     )
     assert unknown.unknown_rule_error
@@ -165,7 +179,7 @@ def test_match_rule_completion_categorizes_errors_fol() -> None:
     decode_err = match_rule_completion_fol(
         rule_bank=bank,
         src_layer=src_layer,
-        completion_tokens=tokenizer.encode_completion(expected_statement)[:-1],
+        completion_tokens=_enc1(tokenizer, expected_statement)[:-1],
         tokenizer=tokenizer,
     )
     assert decode_err.decode_error
@@ -187,10 +201,10 @@ def test_evaluate_rule_matches_aggregates_fol() -> None:
         rule_bank=bank,
         src_layers=[src_layer, src_layer, src_layer, src_layer],
         completion_tokens=[
-            tokenizer.encode_completion(expected),
-            tokenizer.encode_completion(wrong),
-            tokenizer.encode_completion(unknown),
-            tokenizer.encode_completion(expected)[:-1],
+            _enc1(tokenizer, expected),
+            _enc1(tokenizer, wrong),
+            _enc1(tokenizer, unknown),
+            _enc1(tokenizer, expected)[:-1],
         ],
         expected_statement_texts=[expected, expected, expected, expected],
         tokenizer=tokenizer,
@@ -228,7 +242,7 @@ def test_evaluate_rule_matches_uses_demo_rules_by_example() -> None:
     metrics_without_demo = evaluate_rule_matches_fol(
         rule_bank=base_bank,
         src_layers=[src_layer],
-        completion_tokens=[tokenizer.encode_completion(expected)],
+        completion_tokens=[_enc1(tokenizer, expected)],
         expected_statement_texts=[expected],
         tokenizer=tokenizer,
     )
@@ -237,7 +251,7 @@ def test_evaluate_rule_matches_uses_demo_rules_by_example() -> None:
     metrics_with_demo = evaluate_rule_matches_fol(
         rule_bank=base_bank,
         src_layers=[src_layer],
-        completion_tokens=[tokenizer.encode_completion(expected)],
+        completion_tokens=[_enc1(tokenizer, expected)],
         expected_statement_texts=[expected],
         tokenizer=tokenizer,
         demo_rules_by_example=[[demo_rule]],
@@ -259,8 +273,8 @@ def test_evaluate_rule_matches_rejects_demo_rules_by_example_len_mismatch() -> N
             rule_bank=bank,
             src_layers=[src_layer, src_layer],
             completion_tokens=[
-                tokenizer.encode_completion(expected),
-                tokenizer.encode_completion(expected),
+                _enc1(tokenizer, expected),
+                _enc1(tokenizer, expected),
             ],
             expected_statement_texts=[expected, expected],
             tokenizer=tokenizer,
@@ -274,7 +288,8 @@ def test_validate_completion_path_accepts_gold_full_sequence() -> None:
     prompt = tokenizer.tokenize_prompt(
         FOLSequent(ants=sampled.step_ants[0], cons=sampled.goal_atom)
     )
-    completion = tokenizer.encode_completion_sequence(
+    completion = _encs(
+        tokenizer,
         [rule.statement_text for rule in sampled.step_rules]
     )
 
@@ -290,6 +305,34 @@ def test_validate_completion_path_accepts_gold_full_sequence() -> None:
     assert result.n_steps == 2
 
 
+def test_validate_completion_path_accepts_demo_prefixed_prompt_row() -> None:
+    bank, tokenizer, rng = _sampled_bank(seed=181)
+    sampled = sample_fol_problem(bank=bank, distance=2, initial_ant_max=3, rng=rng)
+    prompt = tokenizer.tokenize_prompt(
+        FOLSequent(ants=sampled.step_ants[0], cons=sampled.goal_atom)
+    )
+    completion = _encs(
+        tokenizer,
+        [rule.statement_text for rule in sampled.step_rules]
+    )
+    demo = _enc1(tokenizer, sampled.step_rules[0].statement_text)
+    prompt_row = np.array(
+        demo[:-1] + [int(tokenizer.sep_token_id)] + prompt + [0, 0],
+        dtype=np.int32,
+    )
+
+    result = validate_completion_path_fol(
+        rule_bank=bank,
+        prompt_tokens=prompt_row,
+        completion_tokens=completion,
+        tokenizer=tokenizer,
+    )
+
+    assert result.success
+    assert result.goal_reached
+    assert result.n_steps == len(sampled.step_rules)
+
+
 def test_validate_completion_path_accepts_alternative_goal_reaching_sequence() -> None:
     bank, tokenizer, rng = _sampled_bank(seed=82)
     sampled = sample_fol_problem(bank=bank, distance=2, initial_ant_max=3, rng=rng)
@@ -300,7 +343,8 @@ def test_validate_completion_path_accepts_alternative_goal_reaching_sequence() -
     prompt = tokenizer.tokenize_prompt(
         FOLSequent(ants=sampled.step_ants[0], cons=sampled.goal_atom)
     )
-    completion = tokenizer.encode_completion_sequence(
+    completion = _encs(
+        tokenizer,
         [rule.statement_text for rule in alternative]
     )
 
@@ -322,7 +366,7 @@ def test_evaluate_completion_paths_aggregates_failures() -> None:
     prompt = tokenizer.tokenize_prompt(
         FOLSequent(ants=sampled.step_ants[0], cons=sampled.goal_atom)
     )
-    gold = tokenizer.encode_completion_sequence([rule.statement_text for rule in sampled.step_rules])
+    gold = _encs(tokenizer, [rule.statement_text for rule in sampled.step_rules])
     bad = gold[:-1]
 
     metrics = evaluate_completion_paths_fol(
@@ -337,6 +381,34 @@ def test_evaluate_completion_paths_aggregates_failures() -> None:
     assert metrics.n_failure_decode_error == 1
 
 
+def test_evaluate_completion_paths_accepts_demo_prefixed_prompt_rows() -> None:
+    bank, tokenizer, rng = _sampled_bank(seed=182)
+    sampled = sample_fol_problem(bank=bank, distance=2, initial_ant_max=3, rng=rng)
+    prompt = tokenizer.tokenize_prompt(
+        FOLSequent(ants=sampled.step_ants[0], cons=sampled.goal_atom)
+    )
+    demo = _enc1(tokenizer, sampled.step_rules[0].statement_text)
+    prompt_row = np.array(
+        demo[:-1] + [int(tokenizer.sep_token_id)] + prompt + [0, 0],
+        dtype=np.int32,
+    )
+    completion = _encs(
+        tokenizer,
+        [rule.statement_text for rule in sampled.step_rules]
+    )
+
+    metrics = evaluate_completion_paths_fol(
+        rule_bank=bank,
+        prompt_tokens=[prompt_row],
+        completion_tokens=[completion],
+        tokenizer=tokenizer,
+    )
+
+    assert metrics.n_examples == 1
+    assert metrics.n_success == 1
+    assert metrics.n_failure_decode_error == 0
+
+
 def test_run_layer_rollout_success_with_scripted_rules_fol() -> None:
     bank, tokenizer, rng = _sampled_bank(seed=21)
     sampled = sample_fol_problem(bank=bank, distance=3, initial_ant_max=3, rng=rng)
@@ -349,7 +421,7 @@ def test_run_layer_rollout_success_with_scripted_rules_fol() -> None:
         max_steps=sampled.distance,
     )
     adapter = _ScriptedAdapter(
-        [tokenizer.encode_completion(rule.statement_text) for rule in sampled.step_rules]
+        [_enc1(tokenizer, rule.statement_text) for rule in sampled.step_rules]
     )
 
     result = run_layer_rollout_fol(
@@ -369,7 +441,7 @@ def test_run_layer_rollout_unknown_rule_fails_fol() -> None:
     bank, tokenizer, rng = _sampled_bank(seed=22)
     sampled = sample_fol_problem(bank=bank, distance=2, initial_ant_max=3, rng=rng)
     unknown_statement = _make_unknown_statement(bank, sampled.start_layer)
-    adapter = _ScriptedAdapter([tokenizer.encode_completion(unknown_statement)])
+    adapter = _ScriptedAdapter([_enc1(tokenizer, unknown_statement)])
     example = FOLLayerRolloutExample(
         distance=sampled.distance,
         start_layer=sampled.start_layer,
@@ -419,7 +491,7 @@ def test_run_layer_rollout_inapplicable_rule_fails_fol() -> None:
     if bad_rule is None:
         pytest.skip("Could not construct an inapplicable but valid instantiated rule.")
 
-    adapter = _ScriptedAdapter([tokenizer.encode_completion(bad_rule.statement_text)])
+    adapter = _ScriptedAdapter([_enc1(tokenizer, bad_rule.statement_text)])
     example = FOLLayerRolloutExample(
         distance=sampled.distance,
         start_layer=sampled.start_layer,
@@ -442,7 +514,7 @@ def test_run_layer_rollout_inapplicable_rule_fails_fol() -> None:
 def test_run_layer_rollout_goal_not_reached_fails_fol() -> None:
     bank, tokenizer, rng = _sampled_bank(seed=24)
     sampled = sample_fol_problem(bank=bank, distance=2, initial_ant_max=3, rng=rng)
-    adapter = _ScriptedAdapter([tokenizer.encode_completion(sampled.step_rules[0].statement_text)])
+    adapter = _ScriptedAdapter([_enc1(tokenizer, sampled.step_rules[0].statement_text)])
     example = FOLLayerRolloutExample(
         distance=sampled.distance,
         start_layer=sampled.start_layer,
@@ -486,8 +558,8 @@ def test_evaluate_layer_rollouts_aggregates_fol() -> None:
     ]
     adapter = _ScriptedAdapter(
         [
-            tokenizer.encode_completion(sampled_ok.step_rules[0].statement_text),
-            tokenizer.encode_completion(unknown_statement),
+            _enc1(tokenizer, sampled_ok.step_rules[0].statement_text),
+            _enc1(tokenizer, unknown_statement),
         ]
     )
 
@@ -506,7 +578,7 @@ def test_evaluate_layer_rollouts_aggregates_fol() -> None:
 def test_completion_logits_adapter_decodes_greedy_fol() -> None:
     bank, tokenizer, rng = _sampled_bank(seed=41)
     sampled = sample_fol_problem(bank=bank, distance=1, initial_ant_max=3, rng=rng)
-    completion = tokenizer.encode_completion(sampled.step_rules[0].statement_text)
+    completion = _enc1(tokenizer, sampled.step_rules[0].statement_text)
     vocab = tokenizer.vocab_size
     out_len = len(completion)
 
@@ -543,7 +615,7 @@ def test_autoregressive_logits_adapter_decodes_greedy_fol() -> None:
         logits[0, last_idx, int(tok_id)] = 8.0
         return logits
 
-    prompt = np.asarray([tokenizer.char_to_id("a"), tokenizer.sep_token_id], dtype=np.int32)
+    prompt = np.asarray([tokenizer.char_to_id("a"), tokenizer.start_token_id], dtype=np.int32)
     adapter = AutoregressiveLogitsAdapter(n_seq=16, max_completion_len=4)
     decoded = adapter.predict_completion(
         model=model,
@@ -568,7 +640,7 @@ def test_autoregressive_logits_adapter_uses_cache_when_supported_fol() -> None:
         logits[0, -1, int(tok_id)] = 9.0
         return logits, step + 1
 
-    prompt = np.asarray([tokenizer.char_to_id("a"), tokenizer.sep_token_id], dtype=np.int32)
+    prompt = np.asarray([tokenizer.char_to_id("a"), tokenizer.start_token_id], dtype=np.int32)
     adapter = AutoregressiveLogitsAdapter(n_seq=16, max_completion_len=4)
     decoded = adapter.predict_completion(
         model=model,
@@ -602,7 +674,7 @@ def test_autoregressive_logits_adapter_jit_step_uses_cache_when_supported_fol() 
             logits = logits.at[0, -1, tok].set(8.0)
             return logits, step + 1
 
-    prompt = np.asarray([tokenizer.char_to_id("a"), tokenizer.sep_token_id], dtype=np.int32)
+    prompt = np.asarray([tokenizer.char_to_id("a"), tokenizer.start_token_id], dtype=np.int32)
     adapter = AutoregressiveLogitsAdapter(
         n_seq=16,
         max_completion_len=4,
@@ -678,7 +750,7 @@ def test_schema_match_renamed_predicates_is_wrong_rule() -> None:
     result = match_rule_completion_fol(
         rule_bank=bank,
         src_layer=src_layer,
-        completion_tokens=fresh_tokenizer.encode_completion(instantiated.statement_text),
+        completion_tokens=fresh_tokenizer.encode_completion_texts([instantiated.statement_text]),
         tokenizer=fresh_tokenizer,
     )
     # Schema should match (same arity pattern, same variable binding structure)
@@ -697,7 +769,7 @@ def test_schema_mismatch_wrong_arity_is_unknown_rule() -> None:
     result = match_rule_completion_fol(
         rule_bank=bank,
         src_layer=src_layer,
-        completion_tokens=tokenizer.encode_completion(unknown_statement),
+        completion_tokens=_enc1(tokenizer, unknown_statement),
         tokenizer=tokenizer,
     )
     # _make_unknown_statement inflates arities, so schema should NOT match
@@ -734,7 +806,7 @@ def test_schema_match_with_demo_rules() -> None:
     result_no_demo = match_rule_completion_fol(
         rule_bank=bank,
         src_layer=src_layer,
-        completion_tokens=demo_tokenizer.encode_completion(instantiated.statement_text),
+        completion_tokens=demo_tokenizer.encode_completion_texts([instantiated.statement_text]),
         tokenizer=demo_tokenizer,
     )
     # Schema should match against bank rules since the structural pattern is the same
@@ -744,7 +816,7 @@ def test_schema_match_with_demo_rules() -> None:
     result_with_demo = match_rule_completion_fol(
         rule_bank=bank,
         src_layer=src_layer,
-        completion_tokens=demo_tokenizer.encode_completion(instantiated.statement_text),
+        completion_tokens=demo_tokenizer.encode_completion_texts([instantiated.statement_text]),
         tokenizer=demo_tokenizer,
         demo_rules=[demo_rule],
     )
@@ -778,7 +850,7 @@ def test_rollout_wrong_rule_failure_reason() -> None:
 
     rollout_tokenizer = _extended_tokenizer(bank, set(pred_map.values()))
 
-    adapter = _ScriptedAdapter([rollout_tokenizer.encode_completion(instantiated.statement_text)])
+    adapter = _ScriptedAdapter([rollout_tokenizer.encode_completion_texts([instantiated.statement_text])])
     example = FOLLayerRolloutExample(
         distance=sampled.distance,
         start_layer=sampled.start_layer,
@@ -854,7 +926,7 @@ def test_rollout_succeeds_with_fresh_predicate_bank() -> None:
         max_steps=sampled.distance,
     )
     adapter = _ScriptedAdapter(
-        [tokenizer.encode_completion(rule.statement_text) for rule in sampled.step_rules]
+        [_enc1(tokenizer, rule.statement_text) for rule in sampled.step_rules]
     )
 
     result = run_layer_rollout_fol(
@@ -900,7 +972,7 @@ def test_rollout_uses_adapter_demo_rules() -> None:
             break
     assert demo_rule is not None
 
-    no_demo_adapter = _ScriptedAdapter([tokenizer.encode_completion(expected)])
+    no_demo_adapter = _ScriptedAdapter([_enc1(tokenizer, expected)])
     no_demo_result = run_layer_rollout_fol(
         rule_bank=base_bank,
         example=example,
@@ -912,7 +984,7 @@ def test_rollout_uses_adapter_demo_rules() -> None:
     assert no_demo_result.failure_reason == FAILURE_WRONG_RULE_ERROR
 
     with_demo_adapter = _ScriptedAdapterWithDemoRules(
-        [tokenizer.encode_completion(expected)],
+        [_enc1(tokenizer, expected)],
         [demo_rule],
     )
     with_demo_result = run_layer_rollout_fol(
@@ -991,7 +1063,7 @@ def test_match_rule_demo_rules_exact_instantiation() -> None:
     result = match_rule_completion_fol(
         rule_bank=base_bank,
         src_layer=src_layer,
-        completion_tokens=tokenizer.encode_completion(expected),
+        completion_tokens=_enc1(tokenizer, expected),
         expected_statement_text=expected,
         tokenizer=tokenizer,
         demo_rules=[demo_rule],
@@ -1026,7 +1098,7 @@ def test_match_rule_demo_rules_wrong_prediction() -> None:
     result = match_rule_completion_fol(
         rule_bank=base_bank,
         src_layer=0,
-        completion_tokens=tokenizer.encode_completion(inst_a.statement_text),
+        completion_tokens=_enc1(tokenizer, inst_a.statement_text),
         expected_statement_text=inst_b.statement_text,
         tokenizer=tokenizer,
         demo_rules=[rule_a, rule_b],
@@ -1055,7 +1127,7 @@ def test_match_rule_fresh_bank_correct() -> None:
     result = match_rule_completion_fol(
         rule_bank=temp_bank,
         src_layer=src_layer,
-        completion_tokens=tokenizer.encode_completion(expected),
+        completion_tokens=_enc1(tokenizer, expected),
         expected_statement_text=expected,
         tokenizer=tokenizer,
     )
@@ -1077,7 +1149,7 @@ def test_match_rule_completion_uses_active_then_fixed_sources() -> None:
     active_match = match_rule_completion_fol(
         rule_bank=base_bank,
         src_layer=src_layer,
-        completion_tokens=tokenizer.encode_completion(expected),
+        completion_tokens=_enc1(tokenizer, expected),
         expected_statement_text=expected,
         tokenizer=tokenizer,
         active_rules=list(temp_bank.transition_rules(src_layer)),
@@ -1093,7 +1165,7 @@ def test_match_rule_completion_uses_active_then_fixed_sources() -> None:
     fixed_match = match_rule_completion_fol(
         rule_bank=base_bank,
         src_layer=src_layer_l1,
-        completion_tokens=tokenizer.encode_completion(expected_l1),
+        completion_tokens=_enc1(tokenizer, expected_l1),
         expected_statement_text=expected_l1,
         tokenizer=tokenizer,
         active_rules=[],

@@ -104,7 +104,7 @@ def compute_fol_dims(
         )
         max_atom_len = max(
             int(max_atom_len),
-            len(tokenizer.encode_completion(atom.text)) - 1,
+            len(tokenizer.encode_completion_texts([atom.text])) - 1,
         )
 
     max_prompt_len = (
@@ -117,7 +117,7 @@ def compute_fol_dims(
 
     if int(max_n_demos) > 0:
         max_demo_clause_len = max(
-            len(tokenizer.encode_completion(rule.statement_text)) - 1
+            len(tokenizer.encode_completion_texts([rule.statement_text])) - 1
             for rule in all_rules
         )
         if fresh_k_in_max is not None and fresh_k_out_max is not None:
@@ -126,7 +126,7 @@ def compute_fol_dims(
         max_prompt_len += int(max_n_demos) * (int(max_demo_clause_len) + 1)
 
     max_completion_len = max(
-        len(tokenizer.encode_completion(rule.statement_text))
+        len(tokenizer.encode_completion_texts([rule.statement_text]))
         for rule in all_rules
     )
     if fresh_k_in_max is not None and fresh_k_out_max is not None:

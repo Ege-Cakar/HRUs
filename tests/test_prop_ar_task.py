@@ -19,11 +19,11 @@ def _write_array_record(path: Path, records) -> None:
 
 
 def test_batch_records_autoreg_masks_prompt_labels() -> None:
-    sep = tokenize_ar.sep_token_id
+    start = tokenize_ar.start_token_id
     eot = tokenize_ar.eot_token_id
     records = [
         {
-            "prompt": np.array([11, 12, 13, sep], dtype=np.int32),
+            "prompt": np.array([11, 12, 13, start], dtype=np.int32),
             "completions": [np.array([40, 41, eot], dtype=np.int32)],
         }
     ]
@@ -38,11 +38,11 @@ def test_batch_records_autoreg_masks_prompt_labels() -> None:
 
 
 def test_batch_records_autoreg_samples_among_candidates() -> None:
-    sep = tokenize_ar.sep_token_id
+    start = tokenize_ar.start_token_id
     eot = tokenize_ar.eot_token_id
     records = [
         {
-            "prompt": np.array([1, sep], dtype=np.int32),
+            "prompt": np.array([1, start], dtype=np.int32),
             "completions": [
                 np.array([50, eot], dtype=np.int32),
                 np.array([51, eot], dtype=np.int32),
@@ -58,7 +58,7 @@ def test_batch_records_autoreg_samples_among_candidates() -> None:
 
 
 def test_imply_autoreg_size_task_batching(tmp_path: Path) -> None:
-    sep = tokenize_ar.sep_token_id
+    start = tokenize_ar.start_token_id
     eot = tokenize_ar.eot_token_id
 
     size_dir = tmp_path / "size_02"
@@ -66,11 +66,11 @@ def test_imply_autoreg_size_task_batching(tmp_path: Path) -> None:
     shard_path = size_dir / "shard_00000.array_record"
 
     rec1 = {
-        "prompt": np.array([1, 2, sep], dtype=np.int32),
+        "prompt": np.array([1, 2, start], dtype=np.int32),
         "completions": [np.array([40, eot], dtype=np.int32)],
     }
     rec2 = {
-        "prompt": np.array([3, sep], dtype=np.int32),
+        "prompt": np.array([3, start], dtype=np.int32),
         "completions": [
             np.array([41, eot], dtype=np.int32),
             np.array([42, eot], dtype=np.int32),

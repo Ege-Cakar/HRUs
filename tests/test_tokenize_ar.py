@@ -22,7 +22,7 @@ def test_tokenize_ar_roundtrip_targeted_rule():
     rule = ImpliesLeft(ant)
 
     prompt, completions = tokenize_ar.tokenize((sequent, [rule]))
-    assert prompt[-1] == tokenize_ar.sep_token_id
+    assert prompt[-1] == tokenize_ar.start_token_id
     assert len(completions) == 1
     assert completions[0][-1] == tokenize_ar.eot_token_id
 
@@ -56,7 +56,7 @@ def test_tokenize_ar_unprovable_completion():
     assert isinstance(decoded, Unprovable)
 
 
-def test_decode_prompt_requires_sep():
+def test_decode_prompt_requires_start():
     sequent = Sequent([], PFalse())
     prompt = tokenize_ar.tokenize_prompt(sequent)
 
@@ -64,6 +64,6 @@ def test_decode_prompt_requires_sep():
     try:
         tokenize_ar.decode_prompt(bad_prompt)
     except ValueError as exc:
-        assert "SEP" in str(exc)
+        assert "START" in str(exc)
     else:
-        raise AssertionError("Expected ValueError for missing SEP")
+        raise AssertionError("Expected ValueError for missing START")

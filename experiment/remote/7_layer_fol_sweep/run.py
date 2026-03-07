@@ -448,7 +448,7 @@ def _evaluate_by_distance(
                 prompt_builder=lambda xs: build_prompt_only_inputs(
                     xs,
                     n_seq=n_seq_completion,
-                    sep_token_id=int(tokenizer.sep_token_id),
+                    start_token_id=int(tokenizer.start_token_id),
                     pad_token_id=0,
                 ),
                 target_builder=lambda ys: pad_completion_targets(
@@ -781,7 +781,7 @@ for train_max_distance in TRAIN_MAX_DISTANCES:
             prompt_builder=lambda xs: build_prompt_only_inputs(
                 xs,
                 n_seq=N_SEQ_COMPLETION,
-                sep_token_id=int(SHARED_TOKENIZER.sep_token_id),
+                start_token_id=int(SHARED_TOKENIZER.start_token_id),
                 pad_token_id=0,
             ),
             target_builder=lambda ys: pad_completion_targets(
@@ -795,7 +795,7 @@ for train_max_distance in TRAIN_MAX_DISTANCES:
             prompt_builder=lambda xs: build_prompt_only_inputs(
                 xs,
                 n_seq=N_SEQ_COMPLETION,
-                sep_token_id=int(SHARED_TOKENIZER.sep_token_id),
+                start_token_id=int(SHARED_TOKENIZER.start_token_id),
                 pad_token_id=0,
             ),
             target_builder=lambda ys: pad_completion_targets(

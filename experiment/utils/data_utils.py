@@ -22,20 +22,20 @@ def build_prompt_only_inputs(
     xs,
     *,
     n_seq: int,
-    sep_token_id: int,
+    start_token_id: int,
     pad_token_id: int = 0,
 ) -> np.ndarray:
-    """Build fixed-length prompt-only inputs by zeroing tokens after SEP."""
+    """Build fixed-length prompt-only inputs by zeroing tokens after START."""
     out = _pad_or_trim_right(xs, target_len=n_seq, pad_value=pad_token_id)
-    sep_hits = out == int(sep_token_id)
-    has_sep = sep_hits.any(axis=1)
-    if not np.all(has_sep):
-        bad_rows = np.where(~has_sep)[0].tolist()
-        raise ValueError(f"Missing SEP token in rows: {bad_rows}")
+    start_hits = out == int(start_token_id)
+    hit_counts = start_hits.sum(axis=1)
+    if not np.all(hit_counts == 1):
+        bad_rows = np.where(hit_counts != 1)[0].tolist()
+        raise ValueError(f"Expected exactly one START token in rows: {bad_rows}")
 
-    sep_idx = sep_hits.argmax(axis=1)
+    start_idx = start_hits.argmax(axis=1)
     positions = np.arange(int(n_seq))[None, :]
-    keep_mask = positions <= sep_idx[:, None]
+    keep_mask = positions <= start_idx[:, None]
     return np.where(keep_mask, out, int(pad_token_id)).astype(np.int32)
 
 
@@ -119,4 +119,3 @@ def build_completion_targets(
         lengths[idx] = int(completion.size)
 
     return targets, lengths
-

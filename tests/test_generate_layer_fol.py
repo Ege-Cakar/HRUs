@@ -107,7 +107,7 @@ def test_generate_layer_fol_outputs_and_metadata(tmp_path: Path) -> None:
 
     rec = _read_one(out_dir / "distance_001")
     sequent = tokenizer.decode_prompt(rec["prompt"].tolist())
-    statement = tokenizer.decode_completion_text(rec["completions"][0].tolist())
+    statement = tokenizer.decode_completion_texts(rec["completions"][0].tolist())[0]
     assert sequent.cons.text.startswith("r")
     assert "→" in statement
 
@@ -125,7 +125,7 @@ def test_generate_layer_fol_full_completion_outputs_sequence(tmp_path: Path) -> 
     tokenizer = tok.FOLLayerTokenizer.from_dict(root_meta["tokenizer"])
     rec = _read_one(out_dir / "distance_002")
 
-    statements = tokenizer.decode_completion_sequence_texts(rec["completions"][0].tolist())
+    statements = tokenizer.decode_completion_texts(rec["completions"][0].tolist())
     assert root_meta["config"]["completion_format"] == "full"
     assert rec["completion_format"] == "full"
     assert rec["statement_texts"] == statements

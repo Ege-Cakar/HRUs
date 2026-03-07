@@ -72,7 +72,7 @@ def test_extract_ar_rule_match_inputs_fol() -> None:
         FOLSequent(ants=sampled.step_ants[0], cons=sampled.goal_atom)
     )
     completion = np.array(
-        tokenizer.encode_completion(sampled.step_rules[0].statement_text),
+        tokenizer.encode_completion_texts([sampled.step_rules[0].statement_text]),
         dtype=np.int32,
     )
 
@@ -106,7 +106,7 @@ def test_extract_completion_rule_match_inputs_truncates_after_first_eot_fol() ->
         FOLSequent(ants=sampled.step_ants[0], cons=sampled.goal_atom)
     )
     completion = np.array(
-        tokenizer.encode_completion(sampled.step_rules[0].statement_text),
+        tokenizer.encode_completion_texts([sampled.step_rules[0].statement_text]),
         dtype=np.int32,
     )
     eot_token_id = int(tokenizer.eot_token_id)

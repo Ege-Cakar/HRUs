@@ -255,7 +255,7 @@ def _prepend_demo_statements_to_prompt(
 ) -> list[int]:
     out: list[int] = []
     for statement in demo_statements:
-        demo_completion = tokenizer.encode_completion(statement)
+        demo_completion = tokenizer.encode_completion_texts([statement])
         out.extend(int(tok) for tok in demo_completion[:-1])
         out.append(int(tokenizer.sep_token_id))
     out.extend(int(tok) for tok in prompt_tokens)

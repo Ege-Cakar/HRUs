@@ -34,8 +34,8 @@ from model.transformer import TransformerConfig
 
 
 class _TokenizerStub:
-    def __init__(self, *, sep_token_id: int, eot_token_id: int):
-        self.sep_token_id = int(sep_token_id)
+    def __init__(self, *, start_token_id: int, eot_token_id: int):
+        self.start_token_id = int(start_token_id)
         self.eot_token_id = int(eot_token_id)
 
 
@@ -127,8 +127,8 @@ def main() -> None:
 
     rng = np.random.default_rng(args.seed)
     prompt = rng.integers(2, args.n_vocab, size=(args.prompt_len,), dtype=np.int32)
-    prompt[-1] = 1  # Ensure a SEP token is present for adapter prompt validation.
-    tokenizer = _TokenizerStub(sep_token_id=1, eot_token_id=-1)
+    prompt[-1] = 1  # Ensure a START token is present for adapter prompt validation.
+    tokenizer = _TokenizerStub(start_token_id=1, eot_token_id=-1)
 
     def model_mamba2_no_cache(batch_tokens: np.ndarray):
         return mamba2(jnp.asarray(batch_tokens, dtype=jnp.int32))

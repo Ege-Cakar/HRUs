@@ -54,7 +54,7 @@ class CompletionLogitsAdapter:
         prompt_only = _build_prompt_only_inputs_single(
             prompt_tokens=prompt_tokens,
             n_seq=self.n_seq,
-            sep_token_id=int(tokenizer.sep_token_id),
+            start_token_id=int(tokenizer.start_token_id),
             pad_token_id=self.pad_token_id,
         )
 
@@ -485,7 +485,7 @@ def _build_prompt_only_inputs_single(
     *,
     prompt_tokens: list[int] | np.ndarray,
     n_seq: int,
-    sep_token_id: int,
+    start_token_id: int,
     pad_token_id: int,
 ) -> np.ndarray:
     prompt = np.asarray(prompt_tokens, dtype=np.int32)
@@ -496,11 +496,11 @@ def _build_prompt_only_inputs_single(
 
     out = np.full((n_seq,), int(pad_token_id), dtype=np.int32)
     out[: prompt.shape[0]] = prompt
-    sep_hits = np.where(out == int(sep_token_id))[0]
-    if sep_hits.size == 0:
-        raise ValueError("Prompt must include SEP token.")
-    sep_idx = int(sep_hits[0])
-    out[sep_idx + 1 :] = int(pad_token_id)
+    start_hits = np.where(out == int(start_token_id))[0]
+    if start_hits.size != 1:
+        raise ValueError("Prompt must include exactly one START token.")
+    start_idx = int(start_hits[0])
+    out[start_idx + 1 :] = int(pad_token_id)
     return out
 
 

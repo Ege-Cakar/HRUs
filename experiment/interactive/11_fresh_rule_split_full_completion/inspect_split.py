@@ -48,6 +48,7 @@ TASK_CFG = {
     "train_max_n_demos": 8,
     "eval_max_n_demos": 8,
 }
+COMPLETION_STEPS_MAX = 2
 
 
 # <codecell>
@@ -62,7 +63,7 @@ def preview_record(task: FOLLayerTask, record: dict, *, role: str) -> None:
     tokenizer = task.tokenizer
     prompt = np.asarray(record["prompt"], dtype=np.int32)
     completion = np.asarray(record["completions"][0], dtype=np.int32)
-    completion_texts = tokenizer.decode_completion_sequence_texts(completion.tolist())
+    completion_texts = tokenizer.decode_completion_texts(completion.tolist())
     _, sequent, _, _ = extract_prompt_info_from_row_tokens(prompt, tokenizer=tokenizer)
 
     print(
@@ -99,7 +100,7 @@ dims_train = compute_fol_dims(
     initial_ant_max=int(TASK_CFG["initial_ant_max"]),
     max_n_demos=int(TASK_CFG["train_max_n_demos"]),
     completion_format="full",
-    completion_steps_max=2,
+    completion_steps_max=int(COMPLETION_STEPS_MAX),
     extra_predicate_arities=extra_arities,
     fresh_k_in_max=int(FRESH_ICL_CFG["k_in_max"]),
     fresh_k_out_max=int(FRESH_ICL_CFG["k_out_max"]),
@@ -110,7 +111,7 @@ dims_eval = compute_fol_dims(
     initial_ant_max=int(TASK_CFG["initial_ant_max"]),
     max_n_demos=int(TASK_CFG["eval_max_n_demos"]),
     completion_format="full",
-    completion_steps_max=2,
+    completion_steps_max=int(COMPLETION_STEPS_MAX),
     extra_predicate_arities=extra_arities,
     fresh_k_in_max=int(FRESH_ICL_CFG["k_in_max"]),
     fresh_k_out_max=int(FRESH_ICL_CFG["k_out_max"]),
@@ -245,8 +246,8 @@ pred_completion = adapter.predict_completion(
     temperature=0.0,
     rng=np.random.default_rng(0),
 )
-print("target:", eval_task.tokenizer.decode_completion_sequence_texts(record["completions"][0].tolist()))
-print("pred:", eval_task.tokenizer.decode_completion_sequence_texts(pred_completion.tolist()))
+print("target:", eval_task.tokenizer.decode_completion_texts(record["completions"][0].tolist()))
+print("pred:", eval_task.tokenizer.decode_completion_texts(pred_completion.tolist()))
 
 
 # <codecell>

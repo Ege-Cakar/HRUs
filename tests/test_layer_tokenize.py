@@ -20,12 +20,12 @@ def test_layer_tokenize_roundtrip_prompt_and_completion() -> None:
 
     assert decoded_seq == sequent
     assert decoded_statement == statement
-    assert prompt[-1] == tokenizer.sep_token_id
+    assert prompt[-1] == tokenizer.start_token_id
     assert completion[-1] == tokenizer.eot_token_id
     assert tokenizer.vocab_size == tokenizer.eot_token_id + 1 + 5
 
 
-def test_decode_prompt_requires_sep() -> None:
+def test_decode_prompt_requires_start() -> None:
     tokenizer = tok.build_tokenizer_from_atoms(["p0_1", "p1_1"])
     sequent = Sequent([Atom("p0_1")], Atom("p1_1"))
     prompt = tokenizer.tokenize_prompt(sequent)
@@ -34,9 +34,9 @@ def test_decode_prompt_requires_sep() -> None:
     try:
         tokenizer.decode_prompt(bad_prompt)
     except ValueError as exc:
-        assert "SEP" in str(exc)
+        assert "START" in str(exc)
     else:
-        raise AssertionError("Expected ValueError for missing SEP")
+        raise AssertionError("Expected ValueError for missing START")
 
 
 def test_tokenizer_compact_atom_ids_are_contiguous() -> None:
@@ -73,5 +73,5 @@ def test_decode_batch_ids_from_task_like_arrays() -> None:
     batch[1, : len(completion)] = np.asarray(completion, dtype=np.int32)
 
     decoded = tokenizer.decode_batch_ids(batch)
-    assert decoded[0] == "p0_1⊢p1_1<SEP>"
+    assert decoded[0] == "p0_1⊢p1_1<START>"
     assert decoded[1] == "p0_1∧p1_2→p1_1<EOT>"
