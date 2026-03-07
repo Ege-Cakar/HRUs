@@ -76,10 +76,8 @@ def extract_ar_rule_match_inputs(
         pred_completion = preds[idx][mask].astype(np.int32)
         gold_completion = labels[idx][mask].astype(np.int32)
 
-        try:
-            expected_statement = tokenizer.decode_completion_text(gold_completion.tolist())
-        except (ValueError, TypeError):
-            expected_statement = None
+        decoded = tokenizer.try_decode_completion_text(gold_completion.tolist())
+        expected_statement = decoded.value if decoded.ok else None
 
         src_layers.append(int(src_layer))
         pred_completions.append(pred_completion)
@@ -114,10 +112,8 @@ def extract_completion_rule_match_inputs(
         pred_completion = _truncate_at_first_eot(preds[idx], eot_token_id=eot_token_id)
         gold_completion = _truncate_at_first_eot(labels[idx], eot_token_id=eot_token_id)
 
-        try:
-            expected_statement = tokenizer.decode_completion_text(gold_completion.tolist())
-        except (ValueError, TypeError):
-            expected_statement = None
+        decoded = tokenizer.try_decode_completion_text(gold_completion.tolist())
+        expected_statement = decoded.value if decoded.ok else None
 
         src_layers.append(int(src_layer))
         pred_completions.append(pred_completion.astype(np.int32))

@@ -91,6 +91,31 @@ def test_extract_completion_rule_match_inputs_truncates_after_first_eot() -> Non
     assert expected == ["p1_1 → p2_1"]
 
 
+def test_extract_completion_rule_match_inputs_uses_none_for_malformed_gold_completion() -> None:
+    tokenizer = tok.build_tokenizer_from_atoms(["p1_1", "p2_1", "p3_1"])
+    prompt = tokenizer.tokenize_prompt(Sequent([Atom("p1_1")], Atom("p3_1")))
+    completion = np.array(tokenizer.encode_completion("p1_1 → p2_1"), dtype=np.int32)
+    eot_token_id = int(tokenizer.eot_token_id)
+
+    xs = np.array([prompt + [0, 0]], dtype=np.int32)
+    labels = np.full((1, completion.size), int(tokenizer.start_token_id), dtype=np.int32)
+    preds = np.full((1, completion.size), eot_token_id, dtype=np.int32)
+    labels[0, : completion.size - 1] = completion[:-1]
+    preds[0, : completion.size] = completion
+
+    src_layers, pred_completions, expected = extract_completion_rule_match_inputs(
+        preds=preds,
+        labels=labels,
+        xs=xs,
+        tokenizer=tokenizer,
+        eot_token_id=eot_token_id,
+    )
+
+    assert src_layers == [1]
+    assert np.array_equal(pred_completions[0], completion)
+    assert expected == [None]
+
+
 def test_summarize_rule_match_metrics() -> None:
     results = (
         RuleMatchResult(
@@ -137,4 +162,3 @@ def test_summarize_rule_match_metrics() -> None:
     assert summary["valid_rule_rate"] == 0.5
     assert summary["invalid_rule_rate"] == 0.5
     assert summary["correct_given_valid_rate"] == 1.0
-

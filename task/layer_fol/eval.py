@@ -9,6 +9,7 @@ from typing import Any, Callable, Iterable, Protocol
 import numpy as np
 
 from task.layer_gen.util import tokenize_layer_fol
+from task.layer_gen.util.decode_result import DecodeAttempt
 from task.layer_gen.util.fol_rule_bank import (
     FOLAtom,
     FOLLayerRule,
@@ -83,13 +84,16 @@ def _decode_single_completion_statement(
     *,
     tokenizer: tokenize_layer_fol.FOLLayerTokenizer,
     completion_tokens: list[int] | np.ndarray,
-) -> str:
-    statements = tokenizer.decode_completion_texts(
+) -> DecodeAttempt[str]:
+    decoded = tokenizer.try_decode_completion_texts(
         [int(tok) for tok in np.asarray(completion_tokens, dtype=np.int32).tolist()]
     )
+    if not decoded.ok or decoded.value is None:
+        return DecodeAttempt.failure(decoded.error or "Unknown decode error.")
+    statements = decoded.value
     if len(statements) != 1:
-        raise ValueError("Expected a single completion statement.")
-    return statements[0]
+        return DecodeAttempt.failure("Expected a single completion statement.")
+    return DecodeAttempt.success(statements[0])
 
 
 class FOLLayerPredictionAdapter(Protocol):
@@ -505,11 +509,25 @@ def match_rule_completion_fol(
     except (TypeError, ValueError):
         completion = []
 
-    try:
-        decoded_statement = _decode_single_completion_statement(
-            tokenizer=tokenizer,
-            completion_tokens=completion,
+    decoded = _decode_single_completion_statement(
+        tokenizer=tokenizer,
+        completion_tokens=completion,
+    )
+    if not decoded.ok or decoded.value is None:
+        return FOLRuleMatchResult(
+            src_layer=src_layer,
+            decoded_statement=None,
+            expected_statement_text=expected_statement_text,
+            matched_rule=None,
+            decode_error=True,
+            unknown_rule_error=False,
+            wrong_rule_error=False,
+            is_valid_rule=False,
+            is_correct=False,
+            match_source=None,
         )
+    decoded_statement = decoded.value
+    try:
         lhs_ground, rhs_ground = parse_clause_text(decoded_statement)
     except (ValueError, TypeError):
         return FOLRuleMatchResult(
@@ -775,9 +793,8 @@ def validate_completion_path_fol(
     except (TypeError, ValueError):
         completion = []
 
-    try:
-        decoded_statements = tokenizer.decode_completion_texts(completion)
-    except (ValueError, TypeError):
+    decoded = tokenizer.try_decode_completion_texts(completion)
+    if not decoded.ok or decoded.value is None:
         return FOLCompletionPathResult(
             success=False,
             failure_reason=FAILURE_DECODE_ERROR,
@@ -787,6 +804,7 @@ def validate_completion_path_fol(
             final_facts=tuple(atom.text for atom in _sorted_fol_atoms(facts)),
             steps=(),
         )
+    decoded_statements = decoded.value
 
     current_layer = int(initial_layer)
     active_rules_list = list(active_rules) if active_rules is not None else None

@@ -8,6 +8,8 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Iterable
 
+from .decode_result import DecodeAttempt
+
 try:
     from task.prop_gen.util.elem import (
         And,
@@ -282,6 +284,12 @@ class LayerTokenizer:
 
         return Sequent(ants, cons)
 
+    def try_decode_prompt(self, prompt_tokens) -> DecodeAttempt[Sequent]:
+        try:
+            return DecodeAttempt.success(self.decode_prompt(prompt_tokens))
+        except (TypeError, ValueError) as err:
+            return DecodeAttempt.failure(str(err))
+
     def decode_completion_prop(self, completion_tokens: list[int]) -> Proposition:
         if len(completion_tokens) < 2:
             raise ValueError("Completion must include proposition tokens and EOT.")
@@ -291,8 +299,26 @@ class LayerTokenizer:
         symbols = [self.id_to_char(tok) for tok in completion_tokens[:-1]]
         return _parse_layer_completion_symbols(symbols)
 
+    def try_decode_completion_prop(
+        self,
+        completion_tokens: list[int],
+    ) -> DecodeAttempt[Proposition]:
+        try:
+            return DecodeAttempt.success(self.decode_completion_prop(completion_tokens))
+        except (TypeError, ValueError) as err:
+            return DecodeAttempt.failure(str(err))
+
     def decode_completion_text(self, completion_tokens: list[int]) -> str:
         return _format_layer_completion_prop(self.decode_completion_prop(completion_tokens))
+
+    def try_decode_completion_text(
+        self,
+        completion_tokens: list[int],
+    ) -> DecodeAttempt[str]:
+        decoded = self.try_decode_completion_prop(completion_tokens)
+        if not decoded.ok or decoded.value is None:
+            return DecodeAttempt.failure(decoded.error or "Unknown decode error.")
+        return DecodeAttempt.success(_format_layer_completion_prop(decoded.value))
 
     def decode_batch_ids(
         self,

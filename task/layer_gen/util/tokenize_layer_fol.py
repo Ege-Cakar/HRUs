@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import re
 from typing import Iterable
 
+from .decode_result import DecodeAttempt
 from .fol_rule_bank import (
     FOLAtom,
     FOLRuleBank,
@@ -344,6 +345,12 @@ class FOLLayerTokenizer:
         sequent = _decode_prompt_symbols_to_sequent(symbols)
         return parse_sequent_text(sequent.text)
 
+    def try_decode_prompt(self, prompt_tokens) -> DecodeAttempt[FOLSequent]:
+        try:
+            return DecodeAttempt.success(self.decode_prompt(prompt_tokens))
+        except (TypeError, ValueError) as err:
+            return DecodeAttempt.failure(str(err))
+
     def _decode_completion_statement_text(self, statement_tokens: list[int]) -> str:
         if not statement_tokens:
             raise ValueError("Completion statement cannot be empty.")
@@ -365,6 +372,15 @@ class FOLLayerTokenizer:
         if len(statements) != 1:
             raise ValueError("Clause decoding requires a single completion statement.")
         return parse_clause_text(statements[0])
+
+    def try_decode_completion_clause(
+        self,
+        completion_tokens: list[int],
+    ) -> DecodeAttempt[tuple[tuple[FOLAtom, ...], tuple[FOLAtom, ...]]]:
+        try:
+            return DecodeAttempt.success(self.decode_completion_clause(completion_tokens))
+        except (TypeError, ValueError) as err:
+            return DecodeAttempt.failure(str(err))
 
     def decode_completion_texts(self, completion_tokens: list[int]) -> list[str]:
         if len(completion_tokens) < 2:
@@ -391,6 +407,15 @@ class FOLLayerTokenizer:
             raise ValueError("Completion cannot end with SEP before EOT.")
         out.append(self._decode_completion_statement_text(current))
         return out
+
+    def try_decode_completion_texts(
+        self,
+        completion_tokens: list[int],
+    ) -> DecodeAttempt[list[str]]:
+        try:
+            return DecodeAttempt.success(self.decode_completion_texts(completion_tokens))
+        except (TypeError, ValueError) as err:
+            return DecodeAttempt.failure(str(err))
 
     def decode_batch_ids(
         self,

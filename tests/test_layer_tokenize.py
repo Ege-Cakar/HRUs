@@ -39,6 +39,22 @@ def test_decode_prompt_requires_start() -> None:
         raise AssertionError("Expected ValueError for missing START")
 
 
+def test_try_decode_prompt_reports_error_without_raising() -> None:
+    tokenizer = tok.build_tokenizer_from_atoms(["p0_1", "p1_1"])
+    sequent = Sequent([Atom("p0_1")], Atom("p1_1"))
+    prompt = tokenizer.tokenize_prompt(sequent)
+
+    decoded = tokenizer.try_decode_prompt(prompt)
+    assert decoded.ok
+    assert decoded.value == sequent
+    assert decoded.error is None
+
+    bad = tokenizer.try_decode_prompt(prompt[:-1])
+    assert not bad.ok
+    assert bad.value is None
+    assert bad.error is not None
+
+
 def test_tokenizer_compact_atom_ids_are_contiguous() -> None:
     tokenizer = tok.build_tokenizer_from_atoms(["p3_2", "p0_1", "p1_4"])
     expected = {
@@ -60,6 +76,26 @@ def test_decode_completion_rejects_parenthesized_legacy_form() -> None:
         assert "does not allow parentheses" in str(exc)
     else:
         raise AssertionError("Expected ValueError for legacy parenthesized completion format")
+
+
+def test_try_decode_completion_helpers_report_error_without_raising() -> None:
+    tokenizer = tok.build_tokenizer_from_atoms(["p1_2", "p1_4", "p2_1", "p2_3"])
+    completion = tokenizer.encode_completion("p1_2 ∧ p1_4 → p2_1 ∧ p2_3")
+
+    decoded_text = tokenizer.try_decode_completion_text(completion)
+    assert decoded_text.ok
+    assert decoded_text.value == "p1_2 ∧ p1_4 → p2_1 ∧ p2_3"
+    assert decoded_text.error is None
+
+    decoded_prop = tokenizer.try_decode_completion_prop(completion)
+    assert decoded_prop.ok
+    assert decoded_prop.value is not None
+    assert decoded_prop.error is None
+
+    bad = tokenizer.try_decode_completion_text(completion[:-1])
+    assert not bad.ok
+    assert bad.value is None
+    assert bad.error is not None
 
 
 def test_decode_batch_ids_from_task_like_arrays() -> None:

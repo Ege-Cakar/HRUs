@@ -883,9 +883,8 @@ def match_rule_completion(
     except (TypeError, ValueError):
         completion = []
 
-    try:
-        statement = tokenizer.decode_completion_text(completion)
-    except (ValueError, TypeError):
+    decoded = tokenizer.try_decode_completion_text(completion)
+    if not decoded.ok or decoded.value is None:
         return RuleMatchResult(
             src_layer=src_layer,
             decoded_statement=None,
@@ -897,6 +896,7 @@ def match_rule_completion(
             is_valid_rule=False,
             is_correct=False,
         )
+    statement = decoded.value
 
     matched_rule = _match_rule_statement(rule_bank=rule_bank, src_layer=src_layer, statement=statement)
     if matched_rule is None:

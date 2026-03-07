@@ -79,7 +79,10 @@ def _decode_completion_display_text(
     completion_tokens,
     expect_single: bool,
 ) -> str:
-    statements = tokenizer.decode_completion_texts([int(tok) for tok in completion_tokens])
+    decoded = tokenizer.try_decode_completion_texts([int(tok) for tok in completion_tokens])
+    if not decoded.ok or decoded.value is None:
+        raise ValueError(decoded.error or "Unknown decode error.")
+    statements = decoded.value
     if expect_single and len(statements) != 1:
         raise ValueError("Expected a single completion statement.")
     return statements[0] if expect_single else _join_completion_texts(statements)

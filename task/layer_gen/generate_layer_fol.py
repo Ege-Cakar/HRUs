@@ -399,26 +399,58 @@ def _load_fol_online_worker_fns():
     try:
         from task.layer_fol import (  # pylint: disable=import-outside-toplevel
             _init_fol_online_worker,
+            _init_fol_online_fresh_worker,
             _sample_fol_online_worker_records,
+            _sample_fol_online_fresh_worker_records,
         )
     except Exception as err:
         raise RuntimeError(
             "Could not import FOL online worker functions. "
             "Run server mode as module: python -m task.layer_gen.generate_layer_fol --server-mode"
         ) from err
-    return _init_fol_online_worker, _sample_fol_online_worker_records
+    return {
+        "standard": (
+            _init_fol_online_worker,
+            _sample_fol_online_worker_records,
+        ),
+        "fresh_icl": (
+            _init_fol_online_fresh_worker,
+            _sample_fol_online_fresh_worker_records,
+        ),
+    }
 
 
-class _FOLSamplerServerState:
-    def __init__(self, *, config: dict) -> None:
-        init_worker_fn, sample_records_fn = _load_fol_online_worker_fns()
-        self._sample_records_fn = sample_records_fn
-        self._executor = None
-        self._prefetch_buffer: online_prefetch_util.AsyncRecordPrefetchBuffer | None = None
+def _server_worker_spec_from_config(config: dict) -> tuple[object, object, tuple]:
+    worker_fns = _load_fol_online_worker_fns()
+    sampler_kind = str(config.get("sampler_kind", "standard"))
+    if sampler_kind not in worker_fns:
+        raise ValueError(f"Unsupported sampler_kind: {sampler_kind!r}")
 
-        workers = int(config["workers"])
-        buffer_size = int(config["buffer_size"])
-        batch_size = int(config["batch_size"])
+    if sampler_kind == "fresh_icl":
+        initargs = (
+            int(config["seed"]),
+            dict(config["base_bank_payload"]),
+            dict(config["tokenizer_payload"]),
+            int(config["fresh_icl_n_predicates"]),
+            int(config["rules_per_transition"]),
+            int(config["k_in_min"]),
+            int(config["k_in_max"]),
+            int(config["k_out_min"]),
+            int(config["k_out_max"]),
+            int(config["initial_ant_max"]),
+            int(config["sample_max_attempts"]),
+            int(config["max_unify_solutions"]),
+            int(config["max_n_demos"]),
+            int(config.get("min_n_demos", 0)),
+            (
+                None
+                if config.get("forced_step_idx", None) is None
+                else int(config["forced_step_idx"])
+            ),
+            str(config.get("completion_format", "single")),
+            int(config.get("predicate_name_len", 1)),
+        )
+    else:
         max_n_demos = int(config["max_n_demos"])
         min_n_demos = int(
             config.get(
@@ -426,7 +458,6 @@ class _FOLSamplerServerState:
                 0 if max_n_demos == 0 else 1,
             )
         )
-
         initargs = (
             int(config["seed"]),
             dict(config["bank_payload"]),
@@ -444,6 +475,20 @@ class _FOLSamplerServerState:
             ),
             str(config.get("completion_format", "single")),
         )
+    init_worker_fn, sample_records_fn = worker_fns[sampler_kind]
+    return init_worker_fn, sample_records_fn, initargs
+
+
+class _FOLSamplerServerState:
+    def __init__(self, *, config: dict) -> None:
+        init_worker_fn, sample_records_fn, initargs = _server_worker_spec_from_config(config)
+        self._sample_records_fn = sample_records_fn
+        self._executor = None
+        self._prefetch_buffer: online_prefetch_util.AsyncRecordPrefetchBuffer | None = None
+
+        workers = int(config["workers"])
+        buffer_size = int(config["buffer_size"])
+        batch_size = int(config["batch_size"])
 
         def _make_process_executor():
             return ProcessPoolExecutor(

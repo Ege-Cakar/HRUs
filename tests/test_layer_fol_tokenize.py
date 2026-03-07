@@ -78,6 +78,25 @@ def test_decode_prompt_requires_start() -> None:
         raise AssertionError("Expected ValueError for missing START")
 
 
+def test_try_decode_prompt_reports_error_without_raising_fol() -> None:
+    tokenizer = tok.build_tokenizer_from_identifiers(["r0_1", "r1_1", "a", "b"])
+    sequent = FOLSequent(
+        ants=(FOLAtom("r0_1", ("a",)),),
+        cons=FOLAtom("r1_1", ("b",)),
+    )
+    prompt = tokenizer.tokenize_prompt(sequent)
+
+    decoded = tokenizer.try_decode_prompt(prompt)
+    assert decoded.ok
+    assert decoded.value == sequent
+    assert decoded.error is None
+
+    bad = tokenizer.try_decode_prompt(prompt[:-1])
+    assert not bad.ok
+    assert bad.value is None
+    assert bad.error is not None
+
+
 def test_decode_prompt_accepts_demo_prefixed_row_and_completion_suffix() -> None:
     tokenizer = tok.build_tokenizer_from_identifiers(
         ["r0_1", "r1_1", "r2_1", "a", "b", "x1"],
@@ -127,6 +146,29 @@ def test_special_tokens_are_in_unified_maps() -> None:
     assert tokenizer.id_to_char(tokenizer.start_token_id) == "<START>"
     assert tokenizer.char_to_id("<EOT>") == tokenizer.eot_token_id
     assert tokenizer.id_to_char(tokenizer.eot_token_id) == "<EOT>"
+
+
+def test_try_decode_completion_helpers_report_error_without_raising_fol() -> None:
+    tokenizer = tok.build_tokenizer_from_identifiers(
+        ["r0_1", "r1_1", "r2_1", "a", "b", "x1"],
+    )
+    statement = "r0_1(a,b) → r1_1(a,b)"
+    completion = tokenizer.encode_completion_texts([statement])
+
+    decoded_texts = tokenizer.try_decode_completion_texts(completion)
+    assert decoded_texts.ok
+    assert decoded_texts.value == [statement]
+    assert decoded_texts.error is None
+
+    decoded_clause = tokenizer.try_decode_completion_clause(completion)
+    assert decoded_clause.ok
+    assert decoded_clause.value is not None
+    assert decoded_clause.error is None
+
+    bad = tokenizer.try_decode_completion_texts(completion[:-1])
+    assert not bad.ok
+    assert bad.value is None
+    assert bad.error is not None
 
 
 def test_from_dict_rejects_v1_payload() -> None:

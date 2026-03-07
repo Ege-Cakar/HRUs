@@ -181,4 +181,32 @@ class Depth3FreshICLSplitStrategy(FOLTaskSplitStrategy):
         buffer_size: int,
         batch_size: int,
     ) -> dict | None:
-        return None
+        if self.base_bank is None or self.fresh_icl_n_predicates is None:
+            raise RuntimeError("Fresh-ICL server prefetch requires base bank metadata.")
+        return {
+            "sampler_kind": "fresh_icl",
+            "seed": int(self.sample_config.seed_base),
+            "base_bank_payload": self.base_bank.to_dict(),
+            "tokenizer_payload": self.tokenizer.to_dict(),
+            "fresh_icl_n_predicates": int(self.fresh_icl_n_predicates),
+            "rules_per_transition": int(self.sample_config.rules_per_transition),
+            "k_in_min": int(self.sample_config.k_in_min),
+            "k_in_max": int(self.sample_config.k_in_max),
+            "k_out_min": int(self.sample_config.k_out_min),
+            "k_out_max": int(self.sample_config.k_out_max),
+            "initial_ant_max": int(self.sample_config.initial_ant_max),
+            "sample_max_attempts": int(self.sample_config.sample_max_attempts),
+            "max_unify_solutions": int(self.sample_config.max_unify_solutions),
+            "max_n_demos": int(self.sample_config.max_n_demos),
+            "min_n_demos": int(self.sample_config.min_n_demos),
+            "forced_step_idx": (
+                None
+                if self.online_forced_step_idx is None
+                else int(self.online_forced_step_idx)
+            ),
+            "completion_format": str(self.sample_config.completion_format),
+            "predicate_name_len": int(self.sample_config.predicate_name_len),
+            "workers": int(workers),
+            "buffer_size": int(buffer_size),
+            "batch_size": int(batch_size),
+        }

@@ -1394,8 +1394,77 @@ def test_layer_fol_task_fresh_icl_prefetch_enabled() -> None:
         max_n_demos=0,
     )
     assert task.online_prefetch_enabled
-    assert task.online_prefetch_backend_resolved in ("thread", "process")
+    assert task.online_prefetch_backend_resolved in {"server", "thread", "sync"}
     task.close()
+
+
+def test_layer_fol_task_fresh_icl_prefetch_server_backend_samples() -> None:
+    task = FOLLayerTask(
+        mode="online",
+        task_split="depth3_fresh_icl",
+        split_role="train",
+        distance_range=(2, 2),
+        batch_size=2,
+        seed=3061,
+        predicates_per_layer=4,
+        rules_per_transition=8,
+        arity_max=3,
+        vars_per_rule_max=4,
+        constants=("a", "b", "c"),
+        k_in_max=2,
+        k_out_max=2,
+        initial_ant_max=3,
+        max_n_demos=2,
+        online_prefetch_backend="server",
+        online_prefetch_workers=1,
+        online_prefetch_buffer_size=4,
+    )
+    try:
+        assert task.online_prefetch_backend_resolved in {"server", "thread", "sync"}
+        xs, ys = next(task)
+        assert xs.shape[0] == 2
+        assert ys.shape[0] == 2
+        rec = task._sample_online_record()
+        assert "rule_context" in rec
+    finally:
+        task.close()
+
+
+def test_layer_fol_task_fresh_icl_prefetch_server_fallback(monkeypatch) -> None:
+    class _FailServerClient:
+        def __init__(self, **kwargs):
+            raise RuntimeError("server unavailable")
+
+    monkeypatch.setattr(
+        "task.layer_fol.task_prefetch._FOLOnlineSamplerServerClient",
+        _FailServerClient,
+    )
+    task = FOLLayerTask(
+        mode="online",
+        task_split="depth3_fresh_icl",
+        distance_range=(2, 2),
+        batch_size=2,
+        seed=3062,
+        predicates_per_layer=4,
+        rules_per_transition=8,
+        arity_max=3,
+        vars_per_rule_max=4,
+        constants=("a", "b", "c"),
+        k_in_max=2,
+        k_out_max=2,
+        initial_ant_max=3,
+        max_n_demos=0,
+        online_prefetch_backend="server",
+        online_prefetch_workers=1,
+        online_prefetch_buffer_size=4,
+    )
+    try:
+        assert task.online_prefetch_backend_resolved in {"thread", "sync"}
+        xs, ys = next(task)
+        assert xs.shape[0] == 2
+        assert ys.shape[0] == 2
+    finally:
+        task.close()
 
 
 def test_layer_fol_task_fresh_icl_respects_fresh_icl_n_predicates() -> None:

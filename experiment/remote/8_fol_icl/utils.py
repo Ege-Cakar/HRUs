@@ -104,10 +104,10 @@ def extract_ar_rule_match_inputs(
         pred_completion = preds[idx][mask].astype(np.int32)
         gold_completion = labels[idx][mask].astype(np.int32)
 
-        try:
-            statements = tokenizer.decode_completion_texts(gold_completion.tolist())
-            expected_statement = statements[0] if len(statements) == 1 else None
-        except (ValueError, TypeError):
+        decoded = tokenizer.try_decode_completion_texts(gold_completion.tolist())
+        if decoded.ok and decoded.value is not None and len(decoded.value) == 1:
+            expected_statement = decoded.value[0]
+        else:
             expected_statement = None
 
         src_layers.append(int(src_layer))
