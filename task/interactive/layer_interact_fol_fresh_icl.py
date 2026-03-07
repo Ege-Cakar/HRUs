@@ -26,6 +26,7 @@ from task.layer_fol import FOLLayerTask, split_prompt_row_segments
 # ---- CONFIG (edit in-place for local iteration) ----
 TASK_CFG = {
     "seed": np.random.randint(0, 999),
+    "base_bank_seed": 2042,
     "predicates_per_layer": 8,
     "fresh_icl_n_predicates": 8,
     "rules_per_transition": 32,
@@ -103,6 +104,7 @@ train_task = FOLLayerTask(
     seed=int(TASK_CFG["seed"]) + 1,
     predicates_per_layer=int(TASK_CFG["predicates_per_layer"]),
     fresh_icl_n_predicates=int(TASK_CFG["fresh_icl_n_predicates"]),
+    fresh_icl_base_bank_seed=int(TASK_CFG["base_bank_seed"]),
     rules_per_transition=int(TASK_CFG["rules_per_transition"]),
     arity_max=int(TASK_CFG["arity_max"]),
     vars_per_rule_max=int(TASK_CFG["vars_per_rule_max"]),
@@ -125,6 +127,7 @@ eval_task = FOLLayerTask(
     seed=int(TASK_CFG["seed"]) + 1000,
     predicates_per_layer=int(TASK_CFG["predicates_per_layer"]),
     fresh_icl_n_predicates=int(TASK_CFG["fresh_icl_n_predicates"]),
+    fresh_icl_base_bank_seed=int(TASK_CFG["base_bank_seed"]),
     rules_per_transition=int(TASK_CFG["rules_per_transition"]),
     arity_max=int(TASK_CFG["arity_max"]),
     vars_per_rule_max=int(TASK_CFG["vars_per_rule_max"]),

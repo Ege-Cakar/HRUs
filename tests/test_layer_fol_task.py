@@ -1631,6 +1631,103 @@ def test_layer_fol_task_fresh_icl_respects_fresh_icl_n_predicates() -> None:
     assert xs.shape[0] == 1
 
 
+def test_layer_fol_task_fresh_icl_shares_base_bank_across_task_instances() -> None:
+    train_task = FOLLayerTask(
+        mode="online",
+        task_split="depth3_fresh_icl",
+        split_role="train",
+        distance_range=(2, 2),
+        batch_size=1,
+        seed=3071,
+        fresh_icl_base_bank_seed=9001,
+        predicates_per_layer=4,
+        rules_per_transition=8,
+        arity_max=3,
+        vars_per_rule_max=4,
+        constants=("a", "b", "c"),
+        k_in_max=2,
+        k_out_max=2,
+        initial_ant_max=3,
+        max_n_demos=0,
+        online_prefetch_backend="sync",
+    )
+    eval_task = FOLLayerTask(
+        mode="online",
+        task_split="depth3_fresh_icl",
+        split_role="eval",
+        distance_range=(2, 2),
+        batch_size=1,
+        seed=3072,
+        fresh_icl_base_bank_seed=9001,
+        predicates_per_layer=4,
+        rules_per_transition=8,
+        arity_max=3,
+        vars_per_rule_max=4,
+        constants=("a", "b", "c"),
+        k_in_max=2,
+        k_out_max=2,
+        initial_ant_max=3,
+        max_n_demos=0,
+        online_prefetch_backend="sync",
+    )
+    assert train_task._base_bank is not None
+    assert eval_task._base_bank is not None
+    assert (
+        train_task._base_bank.transition_rules(1)
+        == eval_task._base_bank.transition_rules(1)
+    )
+    assert (
+        train_task._base_bank.predicates_for_layer(1)
+        == eval_task._base_bank.predicates_for_layer(1)
+    )
+    assert (
+        train_task._base_bank.predicates_for_layer(2)
+        == eval_task._base_bank.predicates_for_layer(2)
+    )
+
+
+def test_layer_fol_task_fresh_icl_base_bank_seed_changes_fixed_rules() -> None:
+    task_a = FOLLayerTask(
+        mode="online",
+        task_split="depth3_fresh_icl",
+        distance_range=(2, 2),
+        batch_size=1,
+        seed=3073,
+        fresh_icl_base_bank_seed=9002,
+        predicates_per_layer=4,
+        rules_per_transition=8,
+        arity_max=3,
+        vars_per_rule_max=4,
+        constants=("a", "b", "c"),
+        k_in_max=2,
+        k_out_max=2,
+        initial_ant_max=3,
+        max_n_demos=0,
+        online_prefetch_backend="sync",
+    )
+    task_b = FOLLayerTask(
+        mode="online",
+        task_split="depth3_fresh_icl",
+        distance_range=(2, 2),
+        batch_size=1,
+        seed=3074,
+        fresh_icl_base_bank_seed=9003,
+        predicates_per_layer=4,
+        rules_per_transition=8,
+        arity_max=3,
+        vars_per_rule_max=4,
+        constants=("a", "b", "c"),
+        k_in_max=2,
+        k_out_max=2,
+        initial_ant_max=3,
+        max_n_demos=0,
+        online_prefetch_backend="sync",
+    )
+    assert task_a._base_bank is not None
+    assert task_b._base_bank is not None
+    assert task_a._base_bank.transition_rules(1) != task_b._base_bank.transition_rules(1)
+
+
 def test_layer_fol_task_fresh_icl_demos_use_fresh_rules() -> None:
     task = FOLLayerTask(
         mode="online",
@@ -1775,3 +1872,15 @@ def test_layer_fol_task_fresh_icl_rule_context_matches_active_rules() -> None:
                 )
             break
     assert saw_demo_context
+
+
+def test_layer_fol_task_rejects_fresh_icl_base_bank_seed_for_other_splits() -> None:
+    with pytest.raises(ValueError, match="fresh_icl_base_bank_seed can only be used"):
+        FOLLayerTask(
+            mode="online",
+            task_split="none",
+            distance_range=(1, 1),
+            batch_size=1,
+            fresh_icl_base_bank_seed=42,
+            online_prefetch_backend="sync",
+        )

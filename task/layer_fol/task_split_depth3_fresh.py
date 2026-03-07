@@ -62,6 +62,7 @@ class Depth3FreshICLSplitStrategy(FOLTaskSplitStrategy):
         include_oracle: bool,
         completion_format: str,
         fresh_icl_n_predicates,
+        fresh_icl_base_bank_seed,
         predicate_name_len: int,
         rule_bank_path,
         split_rule_bundle_path,
@@ -82,11 +83,17 @@ class Depth3FreshICLSplitStrategy(FOLTaskSplitStrategy):
                 "task_split='depth3_fresh_icl' requires distance_range to resolve "
                 f"to [2], got {list(distances)}."
             )
+        _ = rng
 
         fresh_n_predicates = (
             int(fresh_icl_n_predicates)
             if fresh_icl_n_predicates is not None
             else int(predicates_per_layer)
+        )
+        base_bank_seed = (
+            int(seed)
+            if fresh_icl_base_bank_seed is None
+            else int(fresh_icl_base_bank_seed)
         )
         base_bank = build_random_fol_rule_bank(
             n_layers=3,
@@ -100,7 +107,7 @@ class Depth3FreshICLSplitStrategy(FOLTaskSplitStrategy):
             k_in_max=int(k_in_max),
             k_out_min=int(k_out_min),
             k_out_max=int(k_out_max),
-            rng=rng,
+            rng=np.random.default_rng(base_bank_seed),
         )
         tokenizer = _build_tokenizer_for_fresh_icl(
             base_bank=base_bank,

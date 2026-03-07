@@ -86,6 +86,7 @@ class FOLLayerTask:
         online_prefetch_workers=None,
         online_prefetch_buffer_size=None,
         fresh_icl_n_predicates=None,
+        fresh_icl_base_bank_seed=None,
         arity_min=1,
         predicate_name_len=1,
     ) -> None:
@@ -128,6 +129,19 @@ class FOLLayerTask:
             raise ValueError(
                 "split_role must be 'train' or 'eval', "
                 f"got {self.split_role!r}"
+            )
+        self.fresh_icl_base_bank_seed = (
+            None
+            if fresh_icl_base_bank_seed is None
+            else int(fresh_icl_base_bank_seed)
+        )
+        if (
+            self.fresh_icl_base_bank_seed is not None
+            and self.task_split != "depth3_fresh_icl"
+        ):
+            raise ValueError(
+                "fresh_icl_base_bank_seed can only be used with "
+                "task_split='depth3_fresh_icl'."
             )
 
         self.split_rule_bundle_path = (
@@ -339,6 +353,7 @@ class FOLLayerTask:
             include_oracle=bool(self.include_oracle),
             completion_format=str(self.completion_format),
             fresh_icl_n_predicates=kwargs["fresh_icl_n_predicates"],
+            fresh_icl_base_bank_seed=self.fresh_icl_base_bank_seed,
             predicate_name_len=int(self._predicate_name_len),
             rule_bank_path=kwargs["rule_bank_path"],
             split_rule_bundle_path=kwargs["split_rule_bundle_path"],

@@ -241,6 +241,7 @@ def _make_layer_task(
         predicates_per_layer=int(PREDICATES_PER_LAYER),
         rules_per_transition=int(RULES_PER_TRANSITION),
         fresh_icl_n_predicates=int(FRESH_ICL_N_PREDICATES),
+        fresh_icl_base_bank_seed=int(BASE_BANK_SEED),
         arity_max=int(ARITY_MAX),
         vars_per_rule_max=int(VARS_PER_RULE_MAX),
         constants=tuple(str(tok) for tok in CONSTANTS),
