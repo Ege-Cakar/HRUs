@@ -39,6 +39,7 @@ FRESH_ICL_CFG = {
     "k_in_max": 1,
     "k_out_max": 3,
     "constants": tuple(f"p{i}" for i in range(8)),
+    "predicate_name_len": 4,
 }
 TASK_CFG = {
     "distance_range": (2, 2),
@@ -46,6 +47,7 @@ TASK_CFG = {
     "train_min_n_demos": 4,
     "train_max_n_demos": 8,
     "eval_max_n_demos": 8,
+    "train_include_oracle": True,
 }
 COMPLETION_STEPS_MAX = 2
 
@@ -89,9 +91,12 @@ base_bank = build_random_fol_rule_bank(
     k_out_max=int(FRESH_ICL_CFG["k_out_max"]),
     rng=np.random.default_rng(int(FRESH_ICL_CFG["seed"])),
 )
-tokenizer = _build_tokenizer_for_fresh_icl(base_bank=base_bank)
+tokenizer = _build_tokenizer_for_fresh_icl(
+    base_bank=base_bank,
+    predicate_name_len=int(FRESH_ICL_CFG["predicate_name_len"]),
+)
 
-sentinels = _fresh_predicate_sentinels()
+sentinels = _fresh_predicate_sentinels(name_len=int(FRESH_ICL_CFG["predicate_name_len"]))
 extra_arities = {s: int(base_bank.arity_max) for s in sentinels}
 dims_train = compute_fol_dims(
     rule_banks=[base_bank],
@@ -161,8 +166,10 @@ train_task = FOLLayerTask(
     initial_ant_max=int(TASK_CFG["initial_ant_max"]),
     min_n_demos=int(TASK_CFG["train_min_n_demos"]),
     max_n_demos=int(TASK_CFG["train_max_n_demos"]),
+    include_oracle=bool(TASK_CFG["train_include_oracle"]),
     fixed_length_mode="next_pow2",
     fixed_length_n_seq=int(N_SEQ),
+    predicate_name_len=int(FRESH_ICL_CFG["predicate_name_len"]),
 )
 eval_task = FOLLayerTask(
     mode="online",
@@ -189,6 +196,7 @@ eval_task = FOLLayerTask(
     max_n_demos=int(TASK_CFG["eval_max_n_demos"]),
     fixed_length_mode="next_pow2",
     fixed_length_n_seq=int(N_SEQ),
+    predicate_name_len=int(FRESH_ICL_CFG["predicate_name_len"]),
 )
 
 preview_record(train_task, train_task._sample_online_record(), role="train")

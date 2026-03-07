@@ -1,7 +1,8 @@
 """Multi-model finetuning sweep on FOL fresh-ICL (distributed via Accelerate).
 
 Compares pretrained Pythia 1B (Transformer) vs Mamba 2 1.3B (SSM) finetuned
-on FOL data.  The model is selected by ``RUN_SPLIT`` index (sys.argv[1]).
+on FOL data. The run split selects a combined ``(model, task_shape)``
+configuration via ``sys.argv[1]``.
 
 Each GPU rank creates its own FOLLayerTask with a unique seed, so no
 DataLoader/sampler wrapping is needed.  The Accelerate library handles
@@ -63,17 +64,21 @@ MODEL_CONFIGS = [
     },
 ]
 
-RUN_SPLIT = 2  # one per model
+BASE_NUM_PRED = 16
+SWEEP_MID_PRED = [64, 128, 256]
+SWEEP_TASK_SHAPES = [
+    {
+        "predicates_per_layer": (1, p1, BASE_NUM_PRED),
+        "rules_per_transition": (BASE_NUM_PRED, BASE_NUM_PRED**2),
+    }
+    for p1 in SWEEP_MID_PRED
+]
 
 
 # ── Experiment parameters ───────────────────────────────────────────────
 
-run_idx = int(sys.argv[1]) - 1 if len(sys.argv) > 1 else 0
-model_cfg = MODEL_CONFIGS[run_idx % len(MODEL_CONFIGS)]
-
 RUN_ID = new_seed()
 print("RUN ID", RUN_ID)
-print(f"Model config [{run_idx}]: {model_cfg}")
 
 WANDB_PROJECT = Path(__file__).resolve().parent.name
 WANDB_API_KEY_PATH = ROOT / "key" / "wandb.txt"
@@ -85,17 +90,13 @@ TEST_EVERY = 100
 TEST_ITERS = 2
 GRAD_ACCUM_STEPS = 1
 
-MODEL_NAME = model_cfg["model_name_or_path"]
 FROM_SCRATCH = False
 TOKENIZE_MODE = "native"
-LR = model_cfg["lr"]
 WEIGHT_DECAY = 0.01
 WARMUP_FRAC = 0.1
 MAX_GRAD_NORM = 1.0
 MIXED_PRECISION = "no"   # models loaded in bf16 via torch_dtype; Accelerate autocast is redundant
 
-PREDICATES_PER_LAYER = 8
-RULES_PER_TRANSITION = 16
 N_LAYERS = 3
 ARITY_MAX = 1
 VARS_PER_RULE_MAX = 6
@@ -106,6 +107,8 @@ CONSTANTS = [f"p{i}" for i in range(1)]
 SAMPLE_MAX_ATTEMPTS = 4096
 MAX_UNIFY_SOLUTIONS = 128
 BASE_BANK_SEED = 2042
+PREDICATE_NAME_LEN = 4
+TRAIN_INCLUDE_ORACLE = True
 
 TRAIN_MIN_N_DEMOS = 4
 TRAIN_MAX_N_DEMOS = 8
@@ -133,15 +136,68 @@ BASE_SEED = 1000
 # USE_WANDB = False
 ### END TEST CONFIGS
 
+RUN_SPLIT = len(MODEL_CONFIGS) * len(SWEEP_TASK_SHAPES)
+
+run_idx = int(sys.argv[1]) - 1 if len(sys.argv) > 1 else 0
+combo_idx = int(run_idx) % int(RUN_SPLIT)
+model_idx = int(combo_idx % len(MODEL_CONFIGS))
+task_shape_idx = int(combo_idx // len(MODEL_CONFIGS))
+model_cfg = MODEL_CONFIGS[model_idx]
+TASK_SHAPE = {
+    "predicates_per_layer": tuple(int(v) for v in SWEEP_TASK_SHAPES[task_shape_idx]["predicates_per_layer"]),
+    "rules_per_transition": tuple(int(v) for v in SWEEP_TASK_SHAPES[task_shape_idx]["rules_per_transition"]),
+}
+
+print(
+    "SELECTED CONFIG",
+    {
+        "run_idx": int(run_idx),
+        "combo_idx": int(combo_idx),
+        "model_idx": int(model_idx),
+        "task_shape_idx": int(task_shape_idx),
+        "model_name": model_cfg["name"],
+        "task_shape": TASK_SHAPE,
+    },
+)
+
+MODEL_NAME = globals().get("MODEL_NAME", model_cfg["model_name_or_path"])
+LR = globals().get("LR", model_cfg["lr"])
+
 
 # ── Build rule bank & tokenizer ─────────────────────────────────────────
 # <codecell>
 
-def _build_base_bank_and_tokenizer():
+def _task_shape_tag(task_shape: dict) -> str:
+    return f"mid{int(task_shape['predicates_per_layer'][1])}"
+
+
+def _fresh_icl_config(task_shape: dict) -> dict:
+    return {
+        "base_bank_seed": BASE_BANK_SEED,
+        "predicates_per_layer": tuple(int(v) for v in task_shape["predicates_per_layer"]),
+        "rules_per_transition": tuple(int(v) for v in task_shape["rules_per_transition"]),
+        "mid_pred": int(task_shape["predicates_per_layer"][1]),
+        "n_layers": N_LAYERS,
+        "arity_max": ARITY_MAX,
+        "vars_per_rule_max": VARS_PER_RULE_MAX,
+        "k_in_max": K_IN_MAX,
+        "k_out_max": K_OUT_MAX,
+        "initial_ant_max": INITIAL_ANT_MAX,
+        "constants": list(CONSTANTS),
+        "train_max_n_demos": TRAIN_MAX_N_DEMOS,
+        "eval_max_n_demos": EVAL_MAX_N_DEMOS,
+        "predicate_name_len": int(PREDICATE_NAME_LEN),
+        "train_include_oracle": bool(TRAIN_INCLUDE_ORACLE),
+        "sample_max_attempts": SAMPLE_MAX_ATTEMPTS,
+        "max_unify_solutions": MAX_UNIFY_SOLUTIONS,
+    }
+
+
+def _build_base_bank_and_tokenizer(*, task_shape: dict):
     base_bank = build_random_fol_rule_bank(
         n_layers=int(N_LAYERS),
-        predicates_per_layer=PREDICATES_PER_LAYER,
-        rules_per_transition=RULES_PER_TRANSITION,
+        predicates_per_layer=task_shape["predicates_per_layer"],
+        rules_per_transition=task_shape["rules_per_transition"],
         arity_max=int(ARITY_MAX),
         vars_per_rule_max=int(VARS_PER_RULE_MAX),
         k_in_max=int(K_IN_MAX),
@@ -149,7 +205,10 @@ def _build_base_bank_and_tokenizer():
         constants=tuple(str(c) for c in CONSTANTS),
         rng=np.random.default_rng(int(BASE_BANK_SEED)),
     )
-    tokenizer = _build_tokenizer_for_fresh_icl(base_bank=base_bank)
+    tokenizer = _build_tokenizer_for_fresh_icl(
+        base_bank=base_bank,
+        predicate_name_len=int(PREDICATE_NAME_LEN),
+    )
     return base_bank, tokenizer
 
 
@@ -162,11 +221,13 @@ def _ceil_pow2_int(n: int) -> int:
 
 def _make_layer_task(
     *,
+    task_shape: dict,
     split_role: str,
     seed: int,
     drop_remainder: bool,
     min_n_demos: int,
     max_n_demos: int,
+    include_oracle: bool = False,
 ):
     return FOLLayerTask(
         distance_range=(2, 2),
@@ -179,8 +240,8 @@ def _make_layer_task(
         worker_count=0,
         drop_remainder=drop_remainder,
         prediction_objective="autoregressive",
-        predicates_per_layer=PREDICATES_PER_LAYER,
-        rules_per_transition=RULES_PER_TRANSITION,
+        predicates_per_layer=task_shape["predicates_per_layer"],
+        rules_per_transition=task_shape["rules_per_transition"],
         fresh_icl_base_bank_seed=int(BASE_BANK_SEED),
         arity_max=int(ARITY_MAX),
         vars_per_rule_max=int(VARS_PER_RULE_MAX),
@@ -190,19 +251,21 @@ def _make_layer_task(
         initial_ant_max=int(INITIAL_ANT_MAX),
         min_n_demos=int(min_n_demos),
         max_n_demos=int(max_n_demos),
+        include_oracle=bool(include_oracle),
         sample_max_attempts=int(SAMPLE_MAX_ATTEMPTS),
         max_unify_solutions=int(MAX_UNIFY_SOLUTIONS),
         fixed_length_mode=str(FIXED_LENGTH_MODE),
         fixed_length_n_seq=int(N_SEQ_AR),
+        predicate_name_len=int(PREDICATE_NAME_LEN),
     )
 
 
 # <codecell>
-base_bank, fol_tokenizer = _build_base_bank_and_tokenizer()
+base_bank, fol_tokenizer = _build_base_bank_and_tokenizer(task_shape=TASK_SHAPE)
 
 from task.layer_fol.common import _fresh_predicate_sentinels
 
-sentinels = _fresh_predicate_sentinels()
+sentinels = _fresh_predicate_sentinels(name_len=int(PREDICATE_NAME_LEN))
 extra_arities = {s: int(base_bank.arity_max) for s in sentinels}
 
 dims = compute_fol_dims(
@@ -236,13 +299,16 @@ print(f"[Rank {accelerator.process_index}] data seed = {rank_seed}")
 
 if accelerator.is_main_process:
     preview_train_task = _make_layer_task(
+        task_shape=TASK_SHAPE,
         split_role="train",
         seed=rank_seed,
         drop_remainder=True,
         min_n_demos=int(TRAIN_MIN_N_DEMOS),
         max_n_demos=int(TRAIN_MAX_N_DEMOS),
+        include_oracle=bool(TRAIN_INCLUDE_ORACLE),
     )
     preview_eval_task = _make_layer_task(
+        task_shape=TASK_SHAPE,
         split_role="eval",
         seed=rank_seed + 500_000,
         drop_remainder=False,
@@ -267,14 +333,17 @@ if accelerator.is_main_process:
                 close()
 
 train_task = _make_layer_task(
+    task_shape=TASK_SHAPE,
     split_role="train",
     seed=rank_seed,
     drop_remainder=True,
     min_n_demos=int(TRAIN_MIN_N_DEMOS),
     max_n_demos=int(TRAIN_MAX_N_DEMOS),
+    include_oracle=bool(TRAIN_INCLUDE_ORACLE),
 )
 
 eval_task = _make_layer_task(
+    task_shape=TASK_SHAPE,
     split_role="eval",
     seed=rank_seed + 500_000,
     drop_remainder=False,
@@ -307,30 +376,19 @@ wandb_cfg = make_experiment_wandb_config(
     enabled=USE_WANDB,
     project=WANDB_PROJECT,
     run_id=RUN_ID,
-    run_name=f"{WANDB_PROJECT}-{model_cfg['name']}-{RUN_ID}",
+    run_name=f"{WANDB_PROJECT}-{model_cfg['name']}-{_task_shape_tag(TASK_SHAPE)}-{RUN_ID}",
     api_key_path=WANDB_API_KEY_PATH,
     model_config=hf_config,
     extra_config={
         "model_variant": model_cfg["name"],
+        "task_shape_idx": int(task_shape_idx),
+        "task_shape_tag": _task_shape_tag(TASK_SHAPE),
         "dims": dims,
         "batch_size": int(BATCH_SIZE),
         "n_vocab": int(N_VOCAB),
         "n_seq_ar": int(N_SEQ_AR),
         "n_gpus": int(accelerator.num_processes),
-        "fresh_icl_config": {
-            "base_bank_seed": BASE_BANK_SEED,
-            "predicates_per_layer": PREDICATES_PER_LAYER,
-            "rules_per_transition": RULES_PER_TRANSITION,
-            "n_layers": N_LAYERS,
-            "arity_max": ARITY_MAX,
-            "vars_per_rule_max": VARS_PER_RULE_MAX,
-            "k_in_max": K_IN_MAX,
-            "k_out_max": K_OUT_MAX,
-            "initial_ant_max": INITIAL_ANT_MAX,
-            "constants": list(CONSTANTS),
-            "train_max_n_demos": TRAIN_MAX_N_DEMOS,
-            "eval_max_n_demos": EVAL_MAX_N_DEMOS,
-        },
+        "fresh_icl_config": _fresh_icl_config(TASK_SHAPE),
     },
 )
 
@@ -359,6 +417,11 @@ if accelerator.is_main_process:
 
     row = {
         "run_id": RUN_ID,
+        "run_split": int(RUN_SPLIT),
+        "combo_idx": int(combo_idx),
+        "task_shape_idx": int(task_shape_idx),
+        "task_shape_tag": _task_shape_tag(TASK_SHAPE),
+        "mid_pred": int(TASK_SHAPE["predicates_per_layer"][1]),
         "model_config_name": model_cfg["name"],
         "model_name": MODEL_NAME,
         "from_scratch": FROM_SCRATCH,
@@ -376,23 +439,10 @@ if accelerator.is_main_process:
         "dims": dims,
         "hist": hist,
         "train_wall_s": float(train_wall_s),
-        "fresh_icl_config": {
-            "base_bank_seed": BASE_BANK_SEED,
-            "predicates_per_layer": PREDICATES_PER_LAYER,
-            "rules_per_transition": RULES_PER_TRANSITION,
-            "n_layers": N_LAYERS,
-            "arity_max": ARITY_MAX,
-            "vars_per_rule_max": VARS_PER_RULE_MAX,
-            "k_in_max": K_IN_MAX,
-            "k_out_max": K_OUT_MAX,
-            "initial_ant_max": INITIAL_ANT_MAX,
-            "constants": list(CONSTANTS),
-            "train_max_n_demos": TRAIN_MAX_N_DEMOS,
-            "eval_max_n_demos": EVAL_MAX_N_DEMOS,
-        },
+        "fresh_icl_config": _fresh_icl_config(TASK_SHAPE),
     }
 
-    out_path = save_dir / f"res.{model_cfg['name']}.{RUN_ID}.pkl"
+    out_path = save_dir / f"res.{model_cfg['name']}.{_task_shape_tag(TASK_SHAPE)}.{RUN_ID}.pkl"
     pd.DataFrame([row]).to_pickle(out_path)
     print(f"Results saved to {out_path}")
 

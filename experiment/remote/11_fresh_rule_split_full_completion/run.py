@@ -74,8 +74,6 @@ EVAL_ITERS_PER_ROLE = 2
 ROLLOUT_EXAMPLES_PER_ROLE = 64
 PREVIEW_EXAMPLES_PER_SPLIT = 3
 
-RUN_SPLIT = 6
-
 PREDICATES_PER_LAYER = 8
 RULES_PER_TRANSITION = 16
 N_LAYERS = 3
@@ -89,6 +87,8 @@ SAMPLE_MAX_ATTEMPTS = 4096
 MAX_UNIFY_SOLUTIONS = 128
 BASE_BANK_SEED = 2042
 COMPLETION_STEPS_MAX = 2
+PREDICATE_NAME_LEN = 4
+TRAIN_INCLUDE_ORACLE = True
 
 TRAIN_FIXED_LENGTH_MODE = "next_pow2"
 EVAL_FIXED_LENGTH_MODE = "next_pow2"
@@ -107,30 +107,57 @@ MAMBA2_BONSAI_SCAN_CHUNK_LEN = [64]
 MAMBA2_BONSAI_LRS = [5e-5]
 
 ### START TEST CONFIGS
-BATCH_SIZE = 2
-GRAD_ACCUM_STEPS = 2
-TRAIN_ITERS_SWEEP = [20]
-TEST_EVERY = 10
-TEST_ITERS = 1
-EVAL_ITERS_PER_ROLE = 1
-ROLLOUT_EXAMPLES_PER_ROLE = 4
-RUN_SPLIT = 1
-TRAIN_MAX_N_DEMOS = 4
-EVAL_MAX_N_DEMOS_SWEEP = [4]
-SELECTION_EVAL_MAX_N_DEMOS = 4
-PREDICATES_PER_LAYER = 10
-RULES_PER_TRANSITION = 18
-TRANSFORMER_LAYERS = [2]
-TRANSFORMER_WIDTH_HEADS = [(128, 4)]
-TRANSFORMER_LRS = [3e-4]
-MAMBA2_BONSAI_LAYERS = [2]
-MAMBA2_BONSAI_WIDTH_HEADS = [(128, 4)]
-MAMBA2_BONSAI_D_STATE = [8]
-MAMBA2_BONSAI_D_CONV = [4]
-MAMBA2_BONSAI_SCAN_CHUNK_LEN = [16]
-MAMBA2_BONSAI_LRS = [3e-4]
-USE_WANDB = False
+# BATCH_SIZE = 2
+# GRAD_ACCUM_STEPS = 2
+# TRAIN_ITERS_SWEEP = [20]
+# TEST_EVERY = 10
+# TEST_ITERS = 1
+# EVAL_ITERS_PER_ROLE = 1
+# ROLLOUT_EXAMPLES_PER_ROLE = 4
+# RUN_SPLIT = 1
+# TRAIN_MAX_N_DEMOS = 4
+# EVAL_MAX_N_DEMOS_SWEEP = [4]
+# SELECTION_EVAL_MAX_N_DEMOS = 4
+# PREDICATES_PER_LAYER = 10
+# RULES_PER_TRANSITION = 18
+# TRANSFORMER_LAYERS = [2]
+# TRANSFORMER_WIDTH_HEADS = [(128, 4)]
+# TRANSFORMER_LRS = [3e-4]
+# MAMBA2_BONSAI_LAYERS = [2]
+# MAMBA2_BONSAI_WIDTH_HEADS = [(128, 4)]
+# MAMBA2_BONSAI_D_STATE = [8]
+# MAMBA2_BONSAI_D_CONV = [4]
+# MAMBA2_BONSAI_SCAN_CHUNK_LEN = [16]
+# MAMBA2_BONSAI_LRS = [3e-4]
+# USE_WANDB = False
 ### END TEST CONFIGS
+
+BASE_NUM_PRED = 16
+SWEEP_MID_PRED = [64, 128, 256]
+
+SWEEP_TASK_SHAPES = [
+    {
+        "predicates_per_layer": (1, p1, BASE_NUM_PRED),
+        "rules_per_transition": (BASE_NUM_PRED, BASE_NUM_PRED**2),
+    }
+    for p1 in SWEEP_MID_PRED
+]
+
+RUN_SPLIT = len(SWEEP_TASK_SHAPES) * (
+    len(TRANSFORMER_LAYERS)
+    * len(TRANSFORMER_WIDTH_HEADS)
+    * len(TRANSFORMER_LRS)
+    * len(TRANSFORMER_POS)
+    * len(TRANSFORMER_SWIGLU)
+    * len(TRAIN_ITERS_SWEEP)
+    + len(MAMBA2_BONSAI_LAYERS)
+    * len(MAMBA2_BONSAI_WIDTH_HEADS)
+    * len(MAMBA2_BONSAI_D_STATE)
+    * len(MAMBA2_BONSAI_D_CONV)
+    * len(MAMBA2_BONSAI_SCAN_CHUNK_LEN)
+    * len(MAMBA2_BONSAI_LRS)
+    * len(TRAIN_ITERS_SWEEP)
+)
 
 
 def _make_case_wandb_cfg(*, case_name, model_config, train_args, info):
@@ -176,11 +203,54 @@ def _mean_metrics(metrics_list):
     return out
 
 
-def _build_base_bank_and_tokenizer():
+def _normalize_task_shape(task_shape: dict) -> dict:
+    return {
+        "predicates_per_layer": tuple(int(v) for v in task_shape["predicates_per_layer"]),
+        "rules_per_transition": tuple(int(v) for v in task_shape["rules_per_transition"]),
+    }
+
+
+def _task_shape_mid_pred(task_shape: dict) -> int:
+    predicates = tuple(int(v) for v in task_shape["predicates_per_layer"])
+    if len(predicates) < 2:
+        raise ValueError(f"expected at least 2 predicate-layer entries, got {predicates}")
+    return int(predicates[1])
+
+
+def _task_shape_tag(task_shape: dict) -> str:
+    return f"mid{_task_shape_mid_pred(task_shape)}"
+
+
+def _fresh_icl_config(task_shape: dict) -> dict:
+    task_shape = _normalize_task_shape(task_shape)
+    return {
+        "base_bank_seed": BASE_BANK_SEED,
+        "predicates_per_layer": task_shape["predicates_per_layer"],
+        "rules_per_transition": task_shape["rules_per_transition"],
+        "mid_pred": int(_task_shape_mid_pred(task_shape)),
+        "n_layers": N_LAYERS,
+        "arity_max": ARITY_MAX,
+        "vars_per_rule_max": VARS_PER_RULE_MAX,
+        "k_in_max": K_IN_MAX,
+        "k_out_max": K_OUT_MAX,
+        "initial_ant_max": INITIAL_ANT_MAX,
+        "constants": list(CONSTANTS),
+        "train_max_n_demos": int(TRAIN_MAX_N_DEMOS),
+        "eval_max_n_demos_sweep": [int(v) for v in EVAL_MAX_N_DEMOS_SWEEP],
+        "completion_steps_max": int(COMPLETION_STEPS_MAX),
+        "predicate_name_len": int(PREDICATE_NAME_LEN),
+        "train_include_oracle": bool(TRAIN_INCLUDE_ORACLE),
+        "sample_max_attempts": SAMPLE_MAX_ATTEMPTS,
+        "max_unify_solutions": MAX_UNIFY_SOLUTIONS,
+    }
+
+
+def _build_base_bank_and_tokenizer(*, task_shape: dict):
+    task_shape = _normalize_task_shape(task_shape)
     base_bank = build_random_fol_rule_bank(
         n_layers=int(N_LAYERS),
-        predicates_per_layer=PREDICATES_PER_LAYER,
-        rules_per_transition=RULES_PER_TRANSITION,
+        predicates_per_layer=task_shape["predicates_per_layer"],
+        rules_per_transition=task_shape["rules_per_transition"],
         arity_max=int(ARITY_MAX),
         vars_per_rule_max=int(VARS_PER_RULE_MAX),
         k_in_max=int(K_IN_MAX),
@@ -188,7 +258,10 @@ def _build_base_bank_and_tokenizer():
         constants=tuple(str(c) for c in CONSTANTS),
         rng=np.random.default_rng(int(BASE_BANK_SEED)),
     )
-    tokenizer = _build_tokenizer_for_fresh_icl(base_bank=base_bank)
+    tokenizer = _build_tokenizer_for_fresh_icl(
+        base_bank=base_bank,
+        predicate_name_len=int(PREDICATE_NAME_LEN),
+    )
     return base_bank, tokenizer
 
 
@@ -198,7 +271,7 @@ def _compute_dims(
     *,
     max_n_demos_for_shapes: int,
 ):
-    sentinels = _fresh_predicate_sentinels()
+    sentinels = _fresh_predicate_sentinels(name_len=int(PREDICATE_NAME_LEN))
     extra_arities = {s: int(base_bank.arity_max) for s in sentinels}
     return compute_fol_dims(
         rule_banks=[base_bank],
@@ -215,6 +288,7 @@ def _compute_dims(
 
 def _make_layer_task(
     *,
+    task_shape: dict,
     split_role: str,
     seed: int,
     drop_remainder: bool,
@@ -223,7 +297,9 @@ def _make_layer_task(
     max_n_demos: int,
     fixed_length_mode: str,
     fixed_length_n_seq: int,
+    include_oracle: bool = False,
 ):
+    task_shape = _normalize_task_shape(task_shape)
     return FOLLayerTask(
         distance_range=(2, 2),
         batch_size=int(BATCH_SIZE),
@@ -236,8 +312,8 @@ def _make_layer_task(
         drop_remainder=drop_remainder,
         prediction_objective="autoregressive",
         completion_format="full",
-        predicates_per_layer=PREDICATES_PER_LAYER,
-        rules_per_transition=RULES_PER_TRANSITION,
+        predicates_per_layer=task_shape["predicates_per_layer"],
+        rules_per_transition=task_shape["rules_per_transition"],
         fresh_icl_base_bank_seed=int(BASE_BANK_SEED),
         arity_max=int(ARITY_MAX),
         vars_per_rule_max=int(VARS_PER_RULE_MAX),
@@ -247,11 +323,51 @@ def _make_layer_task(
         initial_ant_max=int(INITIAL_ANT_MAX),
         min_n_demos=int(min_n_demos),
         max_n_demos=int(max_n_demos),
+        include_oracle=bool(include_oracle),
         sample_max_attempts=int(SAMPLE_MAX_ATTEMPTS),
         max_unify_solutions=int(MAX_UNIFY_SOLUTIONS),
         fixed_length_mode=str(fixed_length_mode),
         fixed_length_n_seq=int(fixed_length_n_seq),
+        predicate_name_len=int(PREDICATE_NAME_LEN),
     )
+
+
+def _make_task_shape_bundle(*, task_shape: dict, task_shape_idx: int) -> dict:
+    task_shape = _normalize_task_shape(task_shape)
+    base_bank, tokenizer = _build_base_bank_and_tokenizer(task_shape=task_shape)
+    dims_train = _compute_dims(
+        base_bank,
+        tokenizer,
+        max_n_demos_for_shapes=TRAIN_MAX_N_DEMOS,
+    )
+    dims_eval = _compute_dims(
+        base_bank,
+        tokenizer,
+        max_n_demos_for_shapes=max(EVAL_MAX_N_DEMOS_SWEEP),
+    )
+    max_completion_len = max(
+        int(dims_train["max_completion_len"]),
+        int(dims_eval["max_completion_len"]),
+    )
+    train_n_seq_raw = int(dims_train["n_seq_ar"])
+    eval_n_seq_raw = int(dims_eval["n_seq_ar"])
+    model_n_seq = int(max(2, _ceil_pow2_int(eval_n_seq_raw)))
+    return {
+        "task_shape_idx": int(task_shape_idx),
+        "task_shape": task_shape,
+        "task_shape_tag": _task_shape_tag(task_shape),
+        "mid_pred": int(_task_shape_mid_pred(task_shape)),
+        "base_bank": base_bank,
+        "tokenizer": tokenizer,
+        "dims": {"train": dims_train, "eval": dims_eval},
+        "train_n_seq_raw": train_n_seq_raw,
+        "eval_n_seq_raw": eval_n_seq_raw,
+        "train_n_seq": int(model_n_seq),
+        "eval_n_seq": int(model_n_seq),
+        "model_n_seq": int(model_n_seq),
+        "n_vocab": max(int(dims_train["n_vocab"]), int(dims_eval["n_vocab"])),
+        "max_completion_len": int(max_completion_len),
+    }
 
 
 def make_ar_light_metrics_fn():
@@ -373,6 +489,7 @@ def _prompt_from_rollout_example(example, tokenizer):
 def _evaluate_role_for_demo(
     optimizer,
     *,
+    task_shape: dict,
     role: str,
     tokenizer,
     rule_bank,
@@ -397,6 +514,7 @@ def _evaluate_role_for_demo(
     n_eval_batches = 0
 
     eval_task = _make_layer_task(
+        task_shape=task_shape,
         split_role=str(role),
         seed=new_seed(),
         drop_remainder=False,
@@ -447,6 +565,7 @@ def _evaluate_role_for_demo(
         fresh_preds = generate_fresh_predicate_names(
             len(rule_bank.predicates_for_layer(0)),
             rollout_rng,
+            name_len=int(PREDICATE_NAME_LEN),
         )
         temp_bank = build_fresh_layer0_bank(
             base_bank=rule_bank,
@@ -556,92 +675,13 @@ def _metric_by_role_demo(
 save_dir = Path("set")
 save_dir.mkdir(parents=True, exist_ok=True)
 
-BASE_BANK, SHARED_TOKENIZER = _build_base_bank_and_tokenizer()
-
-DIMS_TRAIN = _compute_dims(
-    BASE_BANK,
-    SHARED_TOKENIZER,
-    max_n_demos_for_shapes=TRAIN_MAX_N_DEMOS,
-)
-DIMS_EVAL = _compute_dims(
-    BASE_BANK,
-    SHARED_TOKENIZER,
-    max_n_demos_for_shapes=max(EVAL_MAX_N_DEMOS_SWEEP),
-)
-N_VOCAB = max(int(DIMS_TRAIN["n_vocab"]), int(DIMS_EVAL["n_vocab"]))
-MAX_COMPLETION_LEN = max(
-    int(DIMS_TRAIN["max_completion_len"]),
-    int(DIMS_EVAL["max_completion_len"]),
-)
-TRAIN_N_SEQ_AR_RAW = int(DIMS_TRAIN["n_seq_ar"])
-EVAL_N_SEQ_AR_RAW = int(DIMS_EVAL["n_seq_ar"])
-MODEL_N_SEQ_AR = int(max(2, _ceil_pow2_int(EVAL_N_SEQ_AR_RAW)))
-TRAIN_N_SEQ_AR = int(MODEL_N_SEQ_AR)
-N_SEQ_AR = int(MODEL_N_SEQ_AR)
-DIMS = {"train": DIMS_TRAIN, "eval": DIMS_EVAL}
-
-print("TRAIN DIMS", DIMS["train"])
-print("EVAL DIMS", DIMS["eval"])
-print(
-    "SEQUENCE SHAPE POLICY",
-    {
-        "train_fixed_length_mode": TRAIN_FIXED_LENGTH_MODE,
-        "train_fixed_length_n_seq": TRAIN_N_SEQ_AR,
-        "eval_fixed_length_mode": EVAL_FIXED_LENGTH_MODE,
-        "eval_fixed_length_n_seq": N_SEQ_AR,
-        "train_raw_n_seq_ar": TRAIN_N_SEQ_AR_RAW,
-        "eval_raw_n_seq_ar": EVAL_N_SEQ_AR_RAW,
-        "model_n_seq": N_SEQ_AR,
-        "causal_mask_tokens": int(N_SEQ_AR) * int(N_SEQ_AR),
-    },
-)
-print(
-    "FRESH ICL CONFIG",
-    {
-        "base_bank_seed": BASE_BANK_SEED,
-        "predicates_per_layer": PREDICATES_PER_LAYER,
-        "rules_per_transition": RULES_PER_TRANSITION,
-        "n_layers": N_LAYERS,
-        "completion_steps_max": COMPLETION_STEPS_MAX,
-    },
-)
-
-preview_train_task = _make_layer_task(
-    split_role="train",
-    seed=101,
-    drop_remainder=True,
-    shuffle=True,
-    min_n_demos=int(TRAIN_MIN_N_DEMOS),
-    max_n_demos=int(TRAIN_MAX_N_DEMOS),
-    fixed_length_mode=TRAIN_FIXED_LENGTH_MODE,
-    fixed_length_n_seq=TRAIN_N_SEQ_AR,
-)
-preview_eval_task = _make_layer_task(
-    split_role="eval",
-    seed=202,
-    drop_remainder=False,
-    shuffle=True,
-    min_n_demos=int(TRAIN_MIN_N_DEMOS),
-    max_n_demos=int(TRAIN_MAX_N_DEMOS),
-    fixed_length_mode=EVAL_FIXED_LENGTH_MODE,
-    fixed_length_n_seq=N_SEQ_AR,
-)
-try:
-    print_task_preview(
-        preview_train_task,
-        role="train",
-        n_examples=PREVIEW_EXAMPLES_PER_SPLIT,
-    )
-    print_task_preview(
-        preview_eval_task,
-        role="eval",
-        n_examples=PREVIEW_EXAMPLES_PER_SPLIT,
-    )
-finally:
-    for task in (preview_train_task, preview_eval_task):
-        close = getattr(task, "close", None)
-        if callable(close):
-            close()
+TASK_SHAPE_BUNDLES = [
+    _make_task_shape_bundle(task_shape=task_shape, task_shape_idx=idx)
+    for idx, task_shape in enumerate(SWEEP_TASK_SHAPES)
+]
+TASK_SHAPE_BUNDLES_BY_IDX = {
+    int(bundle["task_shape_idx"]): bundle for bundle in TASK_SHAPE_BUNDLES
+}
 
 
 # <codecell>
@@ -649,232 +689,323 @@ all_cases = []
 
 ar_light_metrics_fn = make_ar_light_metrics_fn()
 
-for n_layers, (n_hidden, n_heads), lr, pos_encoding, use_swiglu, train_iters in itertools.product(
-    TRANSFORMER_LAYERS,
-    TRANSFORMER_WIDTH_HEADS,
-    TRANSFORMER_LRS,
-    TRANSFORMER_POS,
-    TRANSFORMER_SWIGLU,
-    TRAIN_ITERS_SWEEP,
-):
-    config = TransformerConfig(
-        n_vocab=N_VOCAB,
-        n_seq=N_SEQ_AR,
-        n_layers=n_layers,
-        n_hidden=n_hidden,
-        n_heads=n_heads,
-        n_out=N_VOCAB,
-        n_pred_tokens=1,
-        pos_encoding=pos_encoding,
-        layer_norm=True,
-        use_swiglu=use_swiglu,
-        use_bias=True,
-        dropout_rate=0.0,
-        output_mode="full_sequence",
-        pad_token_id=0,
-    )
+for bundle in TASK_SHAPE_BUNDLES:
+    task_shape = bundle["task_shape"]
+    train_n_seq = int(bundle["train_n_seq"])
+    eval_n_seq = int(bundle["eval_n_seq"])
+    n_vocab = int(bundle["n_vocab"])
 
-    train_task = _make_layer_task(
-        split_role="train",
-        seed=new_seed(),
-        drop_remainder=True,
-        shuffle=True,
-        min_n_demos=int(TRAIN_MIN_N_DEMOS),
-        max_n_demos=int(TRAIN_MAX_N_DEMOS),
-        fixed_length_mode=TRAIN_FIXED_LENGTH_MODE,
-        fixed_length_n_seq=TRAIN_N_SEQ_AR,
-    )
-    test_task = _make_layer_task(
-        split_role="eval",
-        seed=new_seed(),
-        drop_remainder=False,
-        shuffle=True,
-        min_n_demos=int(TRAIN_MIN_N_DEMOS),
-        max_n_demos=int(TRAIN_MAX_N_DEMOS),
-        fixed_length_mode=EVAL_FIXED_LENGTH_MODE,
-        fixed_length_n_seq=N_SEQ_AR,
-    )
+    for n_layers, (n_hidden, n_heads), lr, pos_encoding, use_swiglu, train_iters in itertools.product(
+        TRANSFORMER_LAYERS,
+        TRANSFORMER_WIDTH_HEADS,
+        TRANSFORMER_LRS,
+        TRANSFORMER_POS,
+        TRANSFORMER_SWIGLU,
+        TRAIN_ITERS_SWEEP,
+    ):
+        config = TransformerConfig(
+            n_vocab=n_vocab,
+            n_seq=eval_n_seq,
+            n_layers=n_layers,
+            n_hidden=n_hidden,
+            n_heads=n_heads,
+            n_out=n_vocab,
+            n_pred_tokens=1,
+            pos_encoding=pos_encoding,
+            layer_norm=True,
+            use_swiglu=use_swiglu,
+            use_bias=True,
+            dropout_rate=0.0,
+            output_mode="full_sequence",
+            pad_token_id=0,
+        )
 
-    train_args = {
-        "loss": "ce_mask",
-        "eval_fns": [ar_light_metrics_fn],
-        "print_fn": make_print_fn("final_token_acc"),
-        "train_iters": int(train_iters),
-        "test_iters": TEST_ITERS,
-        "test_every": TEST_EVERY,
-        "grad_accum_steps": int(GRAD_ACCUM_STEPS),
-        "lr": warmup_cosine_schedule(lr, int(train_iters)),
-    }
+        train_task = _make_layer_task(
+            task_shape=task_shape,
+            split_role="train",
+            seed=new_seed(),
+            drop_remainder=True,
+            shuffle=True,
+            min_n_demos=int(TRAIN_MIN_N_DEMOS),
+            max_n_demos=int(TRAIN_MAX_N_DEMOS),
+            fixed_length_mode=TRAIN_FIXED_LENGTH_MODE,
+            fixed_length_n_seq=train_n_seq,
+            include_oracle=bool(TRAIN_INCLUDE_ORACLE),
+        )
+        test_task = _make_layer_task(
+            task_shape=task_shape,
+            split_role="eval",
+            seed=new_seed(),
+            drop_remainder=False,
+            shuffle=True,
+            min_n_demos=int(TRAIN_MIN_N_DEMOS),
+            max_n_demos=int(TRAIN_MAX_N_DEMOS),
+            fixed_length_mode=EVAL_FIXED_LENGTH_MODE,
+            fixed_length_n_seq=eval_n_seq,
+        )
 
-    info = {
-        "model_family": "transformer",
-        "target_format": "next_token_full_completion_path",
-        "task_split": "depth3_fresh_icl",
-        "completion_format": "full",
-        "eval_roles": list(EVAL_ROLES),
-        "distance_range": [2],
-        "train_max_n_demos": int(TRAIN_MAX_N_DEMOS),
-        "eval_max_n_demos_sweep": [int(v) for v in EVAL_MAX_N_DEMOS_SWEEP],
-        "n_layers": n_layers,
-        "n_hidden": n_hidden,
-        "n_heads": n_heads,
-        "pos_encoding": pos_encoding,
-        "use_swiglu": use_swiglu,
-        "lr": lr,
-        "n_vocab": N_VOCAB,
-        "n_seq": N_SEQ_AR,
-        "train_fixed_length_mode": TRAIN_FIXED_LENGTH_MODE,
-        "train_fixed_length_n_seq": TRAIN_N_SEQ_AR,
-        "eval_fixed_length_mode": EVAL_FIXED_LENGTH_MODE,
-        "eval_fixed_length_n_seq": N_SEQ_AR,
-        "train_eval_profile": "light",
-        "train_iters": int(train_iters),
-        "grad_accum_steps": int(GRAD_ACCUM_STEPS),
-        "microbatch_size": int(BATCH_SIZE),
-        "effective_batch_size": int(EFFECTIVE_BATCH_SIZE),
-    }
-    case_name = (
-        "11_fresh_rule_split_full_completion_transformer_"
-        f"l{int(n_layers)}_h{int(n_hidden)}_heads{int(n_heads)}_"
-        f"lr{_lr_tag(lr)}_ga{int(GRAD_ACCUM_STEPS)}_ti{int(train_iters)}"
-    )
-    train_args["wandb_cfg"] = _make_case_wandb_cfg(
-        case_name=case_name,
-        model_config=config,
-        train_args=train_args,
-        info=info,
-    )
+        train_args = {
+            "loss": "ce_mask",
+            "eval_fns": [ar_light_metrics_fn],
+            "print_fn": make_print_fn("final_token_acc"),
+            "train_iters": int(train_iters),
+            "test_iters": TEST_ITERS,
+            "test_every": TEST_EVERY,
+            "grad_accum_steps": int(GRAD_ACCUM_STEPS),
+            "lr": warmup_cosine_schedule(lr, int(train_iters)),
+        }
 
-    case = Case(
-        case_name,
-        config,
-        train_task=train_task,
-        test_task=test_task,
-        train_args=train_args,
-        info=info,
-    )
-    all_cases.append(case)
+        info = {
+            "model_family": "transformer",
+            "target_format": "next_token_full_completion_path",
+            "task_split": "depth3_fresh_icl",
+            "completion_format": "full",
+            "eval_roles": list(EVAL_ROLES),
+            "distance_range": [2],
+            "task_shape_idx": int(bundle["task_shape_idx"]),
+            "task_shape_tag": str(bundle["task_shape_tag"]),
+            "mid_pred": int(bundle["mid_pred"]),
+            "predicates_per_layer": task_shape["predicates_per_layer"],
+            "rules_per_transition": task_shape["rules_per_transition"],
+            "train_max_n_demos": int(TRAIN_MAX_N_DEMOS),
+            "eval_max_n_demos_sweep": [int(v) for v in EVAL_MAX_N_DEMOS_SWEEP],
+            "predicate_name_len": int(PREDICATE_NAME_LEN),
+            "train_include_oracle": bool(TRAIN_INCLUDE_ORACLE),
+            "n_layers": n_layers,
+            "n_hidden": n_hidden,
+            "n_heads": n_heads,
+            "pos_encoding": pos_encoding,
+            "use_swiglu": use_swiglu,
+            "lr": lr,
+            "n_vocab": n_vocab,
+            "n_seq": eval_n_seq,
+            "train_fixed_length_mode": TRAIN_FIXED_LENGTH_MODE,
+            "train_fixed_length_n_seq": train_n_seq,
+            "eval_fixed_length_mode": EVAL_FIXED_LENGTH_MODE,
+            "eval_fixed_length_n_seq": eval_n_seq,
+            "train_eval_profile": "light",
+            "train_iters": int(train_iters),
+            "grad_accum_steps": int(GRAD_ACCUM_STEPS),
+            "microbatch_size": int(BATCH_SIZE),
+            "effective_batch_size": int(EFFECTIVE_BATCH_SIZE),
+        }
+        case_name = (
+            f"11_fresh_rule_split_full_completion_{bundle['task_shape_tag']}_transformer_"
+            f"l{int(n_layers)}_h{int(n_hidden)}_heads{int(n_heads)}_"
+            f"lr{_lr_tag(lr)}_ga{int(GRAD_ACCUM_STEPS)}_ti{int(train_iters)}"
+        )
+        train_args["wandb_cfg"] = _make_case_wandb_cfg(
+            case_name=case_name,
+            model_config=config,
+            train_args=train_args,
+            info=info,
+        )
 
-for n_layers, (n_hidden, n_heads), d_state, d_conv, scan_chunk_len, lr, train_iters in itertools.product(
-    MAMBA2_BONSAI_LAYERS,
-    MAMBA2_BONSAI_WIDTH_HEADS,
-    MAMBA2_BONSAI_D_STATE,
-    MAMBA2_BONSAI_D_CONV,
-    MAMBA2_BONSAI_SCAN_CHUNK_LEN,
-    MAMBA2_BONSAI_LRS,
-    TRAIN_ITERS_SWEEP,
-):
-    config = Mamba2BonsaiConfig(
-        n_vocab=N_VOCAB,
-        n_seq=N_SEQ_AR,
-        n_layers=n_layers,
-        n_hidden=n_hidden,
-        n_heads=n_heads,
-        n_out=N_VOCAB,
-        n_pred_tokens=1,
-        output_mode="full_sequence",
-        pad_token_id=0,
-        layer_norm=True,
-        use_bias=True,
-        dropout_rate=0.0,
-        d_state=d_state,
-        d_conv=d_conv,
-        expand=2,
-        scan_chunk_len=scan_chunk_len,
-    )
+        case = Case(
+            case_name,
+            config,
+            train_task=train_task,
+            test_task=test_task,
+            train_args=train_args,
+            info=info,
+        )
+        all_cases.append(case)
 
-    train_task = _make_layer_task(
-        split_role="train",
-        seed=new_seed(),
-        drop_remainder=True,
-        shuffle=True,
-        min_n_demos=int(TRAIN_MIN_N_DEMOS),
-        max_n_demos=int(TRAIN_MAX_N_DEMOS),
-        fixed_length_mode=TRAIN_FIXED_LENGTH_MODE,
-        fixed_length_n_seq=TRAIN_N_SEQ_AR,
-    )
-    test_task = _make_layer_task(
-        split_role="eval",
-        seed=new_seed(),
-        drop_remainder=False,
-        shuffle=True,
-        min_n_demos=int(TRAIN_MIN_N_DEMOS),
-        max_n_demos=int(TRAIN_MAX_N_DEMOS),
-        fixed_length_mode=EVAL_FIXED_LENGTH_MODE,
-        fixed_length_n_seq=N_SEQ_AR,
-    )
+    for n_layers, (n_hidden, n_heads), d_state, d_conv, scan_chunk_len, lr, train_iters in itertools.product(
+        MAMBA2_BONSAI_LAYERS,
+        MAMBA2_BONSAI_WIDTH_HEADS,
+        MAMBA2_BONSAI_D_STATE,
+        MAMBA2_BONSAI_D_CONV,
+        MAMBA2_BONSAI_SCAN_CHUNK_LEN,
+        MAMBA2_BONSAI_LRS,
+        TRAIN_ITERS_SWEEP,
+    ):
+        config = Mamba2BonsaiConfig(
+            n_vocab=n_vocab,
+            n_seq=eval_n_seq,
+            n_layers=n_layers,
+            n_hidden=n_hidden,
+            n_heads=n_heads,
+            n_out=n_vocab,
+            n_pred_tokens=1,
+            output_mode="full_sequence",
+            pad_token_id=0,
+            layer_norm=True,
+            use_bias=True,
+            dropout_rate=0.0,
+            d_state=d_state,
+            d_conv=d_conv,
+            expand=2,
+            scan_chunk_len=scan_chunk_len,
+        )
 
-    train_args = {
-        "loss": "ce_mask",
-        "eval_fns": [ar_light_metrics_fn],
-        "print_fn": make_print_fn("final_token_acc"),
-        "train_iters": int(train_iters),
-        "test_iters": TEST_ITERS,
-        "test_every": TEST_EVERY,
-        "grad_accum_steps": int(GRAD_ACCUM_STEPS),
-        "lr": warmup_cosine_schedule(lr, int(train_iters)),
-    }
+        train_task = _make_layer_task(
+            task_shape=task_shape,
+            split_role="train",
+            seed=new_seed(),
+            drop_remainder=True,
+            shuffle=True,
+            min_n_demos=int(TRAIN_MIN_N_DEMOS),
+            max_n_demos=int(TRAIN_MAX_N_DEMOS),
+            fixed_length_mode=TRAIN_FIXED_LENGTH_MODE,
+            fixed_length_n_seq=train_n_seq,
+            include_oracle=bool(TRAIN_INCLUDE_ORACLE),
+        )
+        test_task = _make_layer_task(
+            task_shape=task_shape,
+            split_role="eval",
+            seed=new_seed(),
+            drop_remainder=False,
+            shuffle=True,
+            min_n_demos=int(TRAIN_MIN_N_DEMOS),
+            max_n_demos=int(TRAIN_MAX_N_DEMOS),
+            fixed_length_mode=EVAL_FIXED_LENGTH_MODE,
+            fixed_length_n_seq=eval_n_seq,
+        )
 
-    info = {
-        "model_family": "mamba2_bonsai",
-        "target_format": "next_token_full_completion_path",
-        "task_split": "depth3_fresh_icl",
-        "completion_format": "full",
-        "eval_roles": list(EVAL_ROLES),
-        "distance_range": [2],
-        "train_max_n_demos": int(TRAIN_MAX_N_DEMOS),
-        "eval_max_n_demos_sweep": [int(v) for v in EVAL_MAX_N_DEMOS_SWEEP],
-        "n_layers": n_layers,
-        "n_hidden": n_hidden,
-        "n_heads": n_heads,
-        "d_state": d_state,
-        "d_conv": d_conv,
-        "scan_chunk_len": scan_chunk_len,
-        "lr": lr,
-        "n_vocab": N_VOCAB,
-        "n_seq": N_SEQ_AR,
-        "train_fixed_length_mode": TRAIN_FIXED_LENGTH_MODE,
-        "train_fixed_length_n_seq": TRAIN_N_SEQ_AR,
-        "eval_fixed_length_mode": EVAL_FIXED_LENGTH_MODE,
-        "eval_fixed_length_n_seq": N_SEQ_AR,
-        "train_eval_profile": "light",
-        "train_iters": int(train_iters),
-        "grad_accum_steps": int(GRAD_ACCUM_STEPS),
-        "microbatch_size": int(BATCH_SIZE),
-        "effective_batch_size": int(EFFECTIVE_BATCH_SIZE),
-    }
-    case_name = (
-        "11_fresh_rule_split_full_completion_mamba2_bonsai_"
-        f"l{int(n_layers)}_h{int(n_hidden)}_heads{int(n_heads)}_"
-        f"ds{int(d_state)}_lr{_lr_tag(lr)}_ga{int(GRAD_ACCUM_STEPS)}_ti{int(train_iters)}"
-    )
-    train_args["wandb_cfg"] = _make_case_wandb_cfg(
-        case_name=case_name,
-        model_config=config,
-        train_args=train_args,
-        info=info,
-    )
+        train_args = {
+            "loss": "ce_mask",
+            "eval_fns": [ar_light_metrics_fn],
+            "print_fn": make_print_fn("final_token_acc"),
+            "train_iters": int(train_iters),
+            "test_iters": TEST_ITERS,
+            "test_every": TEST_EVERY,
+            "grad_accum_steps": int(GRAD_ACCUM_STEPS),
+            "lr": warmup_cosine_schedule(lr, int(train_iters)),
+        }
 
-    case = Case(
-        case_name,
-        config,
-        train_task=train_task,
-        test_task=test_task,
-        train_args=train_args,
-        info=info,
-    )
-    all_cases.append(case)
+        info = {
+            "model_family": "mamba2_bonsai",
+            "target_format": "next_token_full_completion_path",
+            "task_split": "depth3_fresh_icl",
+            "completion_format": "full",
+            "eval_roles": list(EVAL_ROLES),
+            "distance_range": [2],
+            "task_shape_idx": int(bundle["task_shape_idx"]),
+            "task_shape_tag": str(bundle["task_shape_tag"]),
+            "mid_pred": int(bundle["mid_pred"]),
+            "predicates_per_layer": task_shape["predicates_per_layer"],
+            "rules_per_transition": task_shape["rules_per_transition"],
+            "train_max_n_demos": int(TRAIN_MAX_N_DEMOS),
+            "eval_max_n_demos_sweep": [int(v) for v in EVAL_MAX_N_DEMOS_SWEEP],
+            "predicate_name_len": int(PREDICATE_NAME_LEN),
+            "train_include_oracle": bool(TRAIN_INCLUDE_ORACLE),
+            "n_layers": n_layers,
+            "n_hidden": n_hidden,
+            "n_heads": n_heads,
+            "d_state": d_state,
+            "d_conv": d_conv,
+            "scan_chunk_len": scan_chunk_len,
+            "lr": lr,
+            "n_vocab": n_vocab,
+            "n_seq": eval_n_seq,
+            "train_fixed_length_mode": TRAIN_FIXED_LENGTH_MODE,
+            "train_fixed_length_n_seq": train_n_seq,
+            "eval_fixed_length_mode": EVAL_FIXED_LENGTH_MODE,
+            "eval_fixed_length_n_seq": eval_n_seq,
+            "train_eval_profile": "light",
+            "train_iters": int(train_iters),
+            "grad_accum_steps": int(GRAD_ACCUM_STEPS),
+            "microbatch_size": int(BATCH_SIZE),
+            "effective_batch_size": int(EFFECTIVE_BATCH_SIZE),
+        }
+        case_name = (
+            f"11_fresh_rule_split_full_completion_{bundle['task_shape_tag']}_mamba2_bonsai_"
+            f"l{int(n_layers)}_h{int(n_hidden)}_heads{int(n_heads)}_"
+            f"ds{int(d_state)}_lr{_lr_tag(lr)}_ga{int(GRAD_ACCUM_STEPS)}_ti{int(train_iters)}"
+        )
+        train_args["wandb_cfg"] = _make_case_wandb_cfg(
+            case_name=case_name,
+            model_config=config,
+            train_args=train_args,
+            info=info,
+        )
+
+        case = Case(
+            case_name,
+            config,
+            train_task=train_task,
+            test_task=test_task,
+            train_args=train_args,
+            info=info,
+        )
+        all_cases.append(case)
 
 print("TOTAL CASES:", len(all_cases))
+if len(all_cases) != int(RUN_SPLIT):
+    raise ValueError(f"RUN_SPLIT={RUN_SPLIT} does not match total cases={len(all_cases)}")
 all_cases = split_cases(all_cases, RUN_SPLIT, shuffle_seed=200)
 print("CASES IN THIS RUN:", len(all_cases))
 print("CASE NAMES", [case.name for case in all_cases])
+
+active_task_shape_ids = sorted({int(case.info["task_shape_idx"]) for case in all_cases})
+for task_shape_idx in active_task_shape_ids:
+    bundle = TASK_SHAPE_BUNDLES_BY_IDX[int(task_shape_idx)]
+    dims = bundle["dims"]
+    print("TRAIN DIMS", dims["train"])
+    print("EVAL DIMS", dims["eval"])
+    print(
+        "SEQUENCE SHAPE POLICY",
+        {
+            "task_shape_tag": str(bundle["task_shape_tag"]),
+            "train_fixed_length_mode": TRAIN_FIXED_LENGTH_MODE,
+            "train_fixed_length_n_seq": int(bundle["train_n_seq"]),
+            "eval_fixed_length_mode": EVAL_FIXED_LENGTH_MODE,
+            "eval_fixed_length_n_seq": int(bundle["eval_n_seq"]),
+            "train_raw_n_seq_ar": int(bundle["train_n_seq_raw"]),
+            "eval_raw_n_seq_ar": int(bundle["eval_n_seq_raw"]),
+            "model_n_seq": int(bundle["model_n_seq"]),
+            "causal_mask_tokens": int(bundle["model_n_seq"]) * int(bundle["model_n_seq"]),
+        },
+    )
+    print("FRESH ICL CONFIG", _fresh_icl_config(bundle["task_shape"]))
+
+    preview_train_task = _make_layer_task(
+        task_shape=bundle["task_shape"],
+        split_role="train",
+        seed=101 + int(task_shape_idx),
+        drop_remainder=True,
+        shuffle=True,
+        min_n_demos=int(TRAIN_MIN_N_DEMOS),
+        max_n_demos=int(TRAIN_MAX_N_DEMOS),
+        fixed_length_mode=TRAIN_FIXED_LENGTH_MODE,
+        fixed_length_n_seq=int(bundle["train_n_seq"]),
+        include_oracle=bool(TRAIN_INCLUDE_ORACLE),
+    )
+    preview_eval_task = _make_layer_task(
+        task_shape=bundle["task_shape"],
+        split_role="eval",
+        seed=202 + int(task_shape_idx),
+        drop_remainder=False,
+        shuffle=True,
+        min_n_demos=int(TRAIN_MIN_N_DEMOS),
+        max_n_demos=int(TRAIN_MAX_N_DEMOS),
+        fixed_length_mode=EVAL_FIXED_LENGTH_MODE,
+        fixed_length_n_seq=int(bundle["eval_n_seq"]),
+    )
+    try:
+        print_task_preview(
+            preview_train_task,
+            role=f"train[{bundle['task_shape_tag']}]",
+            n_examples=PREVIEW_EXAMPLES_PER_SPLIT,
+        )
+        print_task_preview(
+            preview_eval_task,
+            role=f"eval[{bundle['task_shape_tag']}]",
+            n_examples=PREVIEW_EXAMPLES_PER_SPLIT,
+        )
+    finally:
+        for task in (preview_train_task, preview_eval_task):
+            close = getattr(task, "close", None)
+            if callable(close):
+                close()
 
 
 # <codecell>
 rows = []
 for case in tqdm(all_cases, desc="cases", leave=True):
     print("RUNNING", case.name, case.info)
+    bundle = TASK_SHAPE_BUNDLES_BY_IDX[int(case.info["task_shape_idx"])]
     train_start = time.perf_counter()
     case.run()
     train_wall_s = time.perf_counter() - train_start
@@ -884,8 +1015,8 @@ for case in tqdm(all_cases, desc="cases", leave=True):
 
     model_fn = make_model_callable(case.optimizer, to_numpy=False)
     shared_adapter = AutoregressiveLogitsAdapter(
-        n_seq=int(N_SEQ_AR),
-        max_completion_len=int(MAX_COMPLETION_LEN),
+        n_seq=int(bundle["eval_n_seq"]),
+        max_completion_len=int(bundle["max_completion_len"]),
         pad_token_id=0,
         jit_step=True,
     )
@@ -904,11 +1035,12 @@ for case in tqdm(all_cases, desc="cases", leave=True):
             )
             role_metrics[int(eval_max_n_demos)] = _evaluate_role_for_demo(
                 case.optimizer,
+                task_shape=bundle["task_shape"],
                 role=str(role),
-                tokenizer=SHARED_TOKENIZER,
-                rule_bank=BASE_BANK,
-                n_seq_ar=N_SEQ_AR,
-                max_completion_len=MAX_COMPLETION_LEN,
+                tokenizer=bundle["tokenizer"],
+                rule_bank=bundle["base_bank"],
+                n_seq_ar=int(bundle["eval_n_seq"]),
+                max_completion_len=int(bundle["max_completion_len"]),
                 n_iters=EVAL_ITERS_PER_ROLE,
                 eval_max_n_demos=int(eval_max_n_demos),
                 model_fn=model_fn,
@@ -932,6 +1064,9 @@ for case in tqdm(all_cases, desc="cases", leave=True):
         "run_id": RUN_ID,
         "name": case.name,
         "model_family": case.info["model_family"],
+        "task_shape_idx": int(case.info["task_shape_idx"]),
+        "task_shape_tag": case.info["task_shape_tag"],
+        "mid_pred": int(case.info["mid_pred"]),
         "info": case.info,
         "train_args": {
             "loss": case.train_args["loss"],
@@ -961,23 +1096,9 @@ for case in tqdm(all_cases, desc="cases", leave=True):
             metric_name="rollout_success_rate",
         ),
         "fresh_icl_config": {
-            "base_bank_seed": BASE_BANK_SEED,
-            "predicates_per_layer": PREDICATES_PER_LAYER,
-            "rules_per_transition": RULES_PER_TRANSITION,
-            "n_layers": N_LAYERS,
-            "arity_max": ARITY_MAX,
-            "vars_per_rule_max": VARS_PER_RULE_MAX,
-            "k_in_max": K_IN_MAX,
-            "k_out_max": K_OUT_MAX,
-            "initial_ant_max": INITIAL_ANT_MAX,
-            "constants": list(CONSTANTS),
-            "train_max_n_demos": int(TRAIN_MAX_N_DEMOS),
-            "eval_max_n_demos_sweep": [int(v) for v in EVAL_MAX_N_DEMOS_SWEEP],
-            "completion_steps_max": int(COMPLETION_STEPS_MAX),
-            "sample_max_attempts": SAMPLE_MAX_ATTEMPTS,
-            "max_unify_solutions": MAX_UNIFY_SOLUTIONS,
+            **_fresh_icl_config(bundle["task_shape"]),
         },
-        "dims": DIMS,
+        "dims": bundle["dims"],
         "train_wall_s": float(train_wall_s),
         "post_eval_wall_s": float(post_eval_wall_s),
         "hist": case.hist,

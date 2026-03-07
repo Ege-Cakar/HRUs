@@ -53,6 +53,7 @@ FRESH_ICL_CFG = {
     "k_in_max": 1,
     "k_out_max": 1,
     "constants": tuple(f"p{i}" for i in range(32)),
+    "predicate_name_len": 4,
 }
 TASK_CFG = {
     "distance_range": (2, 2),
@@ -60,6 +61,7 @@ TASK_CFG = {
     "train_min_n_demos": 4,
     "train_max_n_demos": 8,
     "eval_max_n_demos": 8,
+    "train_include_oracle": True,
 }
 
 
@@ -171,7 +173,9 @@ def compute_dims_fresh_icl(base_bank, tokenizer, *, max_n_demos_for_shapes: int,
 
     # For fresh predicates, estimate max atom length using sentinel predicates
     from task.layer_fol import _fresh_predicate_sentinels
-    sentinels = _fresh_predicate_sentinels()
+    sentinels = _fresh_predicate_sentinels(
+        name_len=int(FRESH_ICL_CFG["predicate_name_len"])
+    )
     merged_predicate_arities = dict(base_bank.predicate_arities)
     for s in sentinels:
         if s not in merged_predicate_arities:
@@ -214,7 +218,10 @@ def compute_dims_fresh_icl(base_bank, tokenizer, *, max_n_demos_for_shapes: int,
     }
 
 
-tokenizer = _build_tokenizer_for_fresh_icl(base_bank=base_bank)
+tokenizer = _build_tokenizer_for_fresh_icl(
+    base_bank=base_bank,
+    predicate_name_len=int(FRESH_ICL_CFG["predicate_name_len"]),
+)
 
 INITIAL_ANT_MAX = int(TASK_CFG["initial_ant_max"])
 dims_train = compute_dims_fresh_icl(
@@ -276,7 +283,8 @@ train_task_ar = FOLLayerTask(
     k_in_max=int(FRESH_ICL_CFG["k_in_max"]),
     k_out_max=int(FRESH_ICL_CFG["k_out_max"]),
     arity_min=0,
-    predicate_name_len=4
+    include_oracle=bool(TASK_CFG["train_include_oracle"]),
+    predicate_name_len=int(FRESH_ICL_CFG["predicate_name_len"]),
 )
 
 eval_task_ar = FOLLayerTask(
@@ -301,7 +309,7 @@ eval_task_ar = FOLLayerTask(
     k_in_max=int(FRESH_ICL_CFG["k_in_max"]),
     k_out_max=int(FRESH_ICL_CFG["k_out_max"]),
     arity_min=0,
-    predicate_name_len=4
+    predicate_name_len=int(FRESH_ICL_CFG["predicate_name_len"]),
 )
 
 # <codecell>
@@ -584,7 +592,9 @@ def preview_rollout(
 ):
     for i in range(n_examples):
         fresh_preds = generate_fresh_predicate_names(
-            len(base_bank.predicates_for_layer(0)), rng, name_len=4,
+            len(base_bank.predicates_for_layer(0)),
+            rng,
+            name_len=int(FRESH_ICL_CFG["predicate_name_len"]),
         )
         temp_bank = build_fresh_layer0_bank(
             base_bank=base_bank,

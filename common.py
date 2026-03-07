@@ -37,6 +37,33 @@ def split_batch(batch_size, max_size):
     return int(batch_size), int(fac)
 
 
+def _cleanup_split_case(case):
+    seen_task_ids = set()
+
+    for attr_name in ("train_task", "test_task"):
+        task = getattr(case, attr_name, None)
+        if task is None:
+            continue
+
+        task_id = id(task)
+        if task_id not in seen_task_ids:
+            close = getattr(task, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception as err:
+                    print(
+                        f"warn: failed to close discarded case {attr_name}: "
+                        f"{type(err).__name__}: {err}"
+                    )
+            seen_task_ids.add(task_id)
+
+        try:
+            setattr(case, attr_name, None)
+        except Exception:
+            pass
+
+
 def split_cases(all_cases, run_split, shuffle_seed=None):
     if run_split == 1 and len(sys.argv) < 2:
         run_idx = 0
@@ -50,13 +77,21 @@ def split_cases(all_cases, run_split, shuffle_seed=None):
 
     print('RUN IDX', run_idx)
 
-    all_cases = np.array(all_cases)
+    all_cases = np.array(all_cases, dtype=object)
     if shuffle_seed is not None:
         rng = np.random.default_rng(shuffle_seed)
         rng.shuffle(all_cases)
 
-    all_cases = np.array_split(all_cases, run_split)[run_idx]
-    return list(all_cases)
+    case_splits = np.array_split(all_cases, run_split)
+    selected_cases = list(case_splits[run_idx])
+
+    for split_idx, dropped_cases in enumerate(case_splits):
+        if split_idx == run_idx:
+            continue
+        for case in dropped_cases.tolist():
+            _cleanup_split_case(case)
+
+    return selected_cases
 
 
 def summon_dir(path: str, clear_if_exists=False):

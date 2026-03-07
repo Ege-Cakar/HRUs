@@ -53,11 +53,13 @@ ROLE_METRIC_PLOT_GROUPS = [
         "filename": "role_demo_metrics_loss.svg",
         "title": "Loss by eval demos",
         "metrics": ["loss"],
+        "sharey": False,
     },
     {
         "filename": "role_demo_metrics_accuracy.svg",
         "title": "Token metrics by eval demos",
         "metrics": ["token_acc", "final_token_acc", "seq_exact_acc"],
+        "sharey": False,
     },
     {
         "filename": "role_demo_metrics_completion_rates.svg",
@@ -68,7 +70,9 @@ ROLE_METRIC_PLOT_GROUPS = [
             "completion_unknown_rule_error_rate",
             "completion_inapplicable_rule_error_rate",
             "completion_goal_not_reached_rate",
+            "completion_avg_steps",
         ],
+        "sharey": False,
     },
     {
         "filename": "role_demo_metrics_rollout_rates.svg",
@@ -79,33 +83,11 @@ ROLE_METRIC_PLOT_GROUPS = [
             "rollout_unknown_rule_error_rate",
             "rollout_inapplicable_rule_error_rate",
             "rollout_goal_not_reached_rate",
+            "rollout_avg_steps",
         ],
+        "sharey": False,
     },
 ]
-
-COMMON_CONFIG_COLS = [
-    "target_format",
-    "task_split",
-    "completion_format",
-    "eval_roles",
-    "distance_range",
-    "train_max_n_demos",
-    "eval_max_n_demos_sweep",
-    "train_iters",
-    "lr",
-    "n_layers",
-    "n_hidden",
-    "n_seq",
-    "n_vocab",
-    "grad_accum_steps",
-    "microbatch_size",
-    "effective_batch_size",
-]
-
-FAMILY_CONFIG_COLS = {
-    "transformer": ["n_heads", "pos_encoding", "use_swiglu"],
-    "mamba2_bonsai": ["n_heads", "d_state", "d_conv", "scan_chunk_len"],
-}
 
 
 def _as_int_list(value) -> list[int]:
@@ -133,6 +115,39 @@ def _extract_train_iters(row, *, info: dict | None = None) -> float:
         return np.nan
 
 
+def _extract_mid_pred(row, *, info: dict | None = None) -> float:
+    info = (row.get("info", {}) or {}) if info is None else info
+    fresh_cfg = row.get("fresh_icl_config", {}) or {}
+    for value in (row.get("mid_pred"), info.get("mid_pred"), fresh_cfg.get("mid_pred")):
+        if value is None:
+            continue
+        try:
+            return float(int(value))
+        except (TypeError, ValueError):
+            continue
+    return np.nan
+
+
+def _extract_task_shape_idx(row, *, info: dict | None = None) -> float:
+    info = (row.get("info", {}) or {}) if info is None else info
+    for value in (row.get("task_shape_idx"), info.get("task_shape_idx")):
+        if value is None:
+            continue
+        try:
+            return float(int(value))
+        except (TypeError, ValueError):
+            continue
+    return np.nan
+
+
+def _extract_task_shape_tag(row, *, info: dict | None = None) -> str | None:
+    info = (row.get("info", {}) or {}) if info is None else info
+    for value in (row.get("task_shape_tag"), info.get("task_shape_tag")):
+        if value is not None:
+            return str(value)
+    return None
+
+
 def _extract_final_row(row):
     info = row.get("info", {}) or {}
     final = row.get("metrics_final", {}) or {}
@@ -142,6 +157,9 @@ def _extract_final_row(row):
             "run_id": row.get("run_id"),
             "name": row.get("name"),
             "model_family": row.get("model_family"),
+            "task_shape_idx": _extract_task_shape_idx(row, info=info),
+            "task_shape_tag": _extract_task_shape_tag(row, info=info),
+            "mid_pred": _extract_mid_pred(row, info=info),
             "train_iters": _extract_train_iters(row, info=info),
             "selection_role": row.get("selection_role"),
             "selection_eval_max_n_demos": row.get("selection_eval_max_n_demos", np.nan),
@@ -154,6 +172,8 @@ def _extract_final_row(row):
             "completion_format": info.get("completion_format"),
             "eval_roles": str(info.get("eval_roles")),
             "distance_range": str(_as_int_list(info.get("distance_range"))),
+            "predicates_per_layer": str(info.get("predicates_per_layer")),
+            "rules_per_transition": str(info.get("rules_per_transition")),
             "train_max_n_demos": info.get("train_max_n_demos", np.nan),
             "eval_max_n_demos_sweep": str(_as_int_list(info.get("eval_max_n_demos_sweep"))),
             "lr": info.get("lr", np.nan),
@@ -184,6 +204,9 @@ def _explode_role_eval_demo_rows(df: pd.DataFrame) -> pd.DataFrame:
         info = row.get("info", {}) or {}
         by_role = row.get("metrics_by_role_eval_demo", {}) or {}
         train_iters = _extract_train_iters(row, info=info)
+        mid_pred = _extract_mid_pred(row, info=info)
+        task_shape_idx = _extract_task_shape_idx(row, info=info)
+        task_shape_tag = _extract_task_shape_tag(row, info=info)
         for role, by_demo in by_role.items():
             for eval_demo, metrics in (by_demo or {}).items():
                 metrics = metrics or {}
@@ -192,62 +215,176 @@ def _explode_role_eval_demo_rows(df: pd.DataFrame) -> pd.DataFrame:
                     "run_id": row.get("run_id"),
                     "name": row.get("name"),
                     "model_family": row.get("model_family"),
-                    "role": role,
+                    "task_shape_idx": task_shape_idx,
+                    "task_shape_tag": task_shape_tag,
+                    "mid_pred": mid_pred,
+                    "eval_role": str(role),
                     "eval_max_n_demos": int(eval_demo),
                     "train_iters": train_iters,
+                    "predicates_per_layer": str(info.get("predicates_per_layer")),
+                    "rules_per_transition": str(info.get("rules_per_transition")),
+                    "lr": info.get("lr", np.nan),
+                    "n_layers": info.get("n_layers", np.nan),
+                    "n_hidden": info.get("n_hidden", np.nan),
                 }
-                for col in COMMON_CONFIG_COLS + FAMILY_CONFIG_COLS.get(str(row.get("model_family")), []):
-                    out[col] = info.get(col)
                 for metric in ROLE_EVAL_DEMO_METRIC_COLS:
                     out[metric] = metrics.get(metric, np.nan)
                 rows.append(out)
     return pd.DataFrame(rows)
 
 
-def _plot_role_metric_group(df_role_demo: pd.DataFrame, *, filename: str, title: str, metrics: list[str]):
-    n_metrics = len(metrics)
-    fig, axes = plt.subplots(1, n_metrics, figsize=(4.5 * n_metrics, 3.5), squeeze=False)
-    axes = axes.ravel()
+def _remove_top_level_figures(out_dir: Path) -> None:
+    for path in out_dir.iterdir():
+        if path.is_file() and path.suffix.lower() in {".svg", ".png", ".pdf"}:
+            path.unlink()
 
-    for ax, metric in zip(axes, metrics):
-        sns.lineplot(
-            data=df_role_demo,
-            x="eval_max_n_demos",
-            y=metric,
-            hue="model_family",
-            style="role",
-            markers=True,
-            dashes=False,
-            estimator="mean",
-            errorbar=None,
-            ax=ax,
+
+def _plot_role_metric_group(
+    *,
+    role_eval_demo_df: pd.DataFrame,
+    eval_role: str,
+    metric_names: list[str],
+    out_path: Path,
+    title: str,
+    sharey: bool = False,
+) -> None:
+    plot_df = role_eval_demo_df.loc[role_eval_demo_df["eval_role"] == str(eval_role)].copy()
+    available = [metric for metric in metric_names if metric in plot_df.columns]
+    if plot_df.empty or not available:
+        return
+
+    long_df = plot_df[
+        ["model_family", "mid_pred", "eval_max_n_demos", *available]
+    ].melt(
+        id_vars=["model_family", "mid_pred", "eval_max_n_demos"],
+        value_vars=available,
+        var_name="metric",
+        value_name="value",
+    )
+    long_df = long_df.dropna(subset=["value", "mid_pred"])
+    if long_df.empty:
+        return
+
+    long_df["mid_pred"] = long_df["mid_pred"].astype(int)
+    long_df["mid_pred_label"] = long_df["mid_pred"].astype(str)
+    hue_order = [str(v) for v in sorted(long_df["mid_pred"].unique())]
+
+    g = sns.relplot(
+        data=long_df,
+        kind="line",
+        x="eval_max_n_demos",
+        y="value",
+        hue="mid_pred_label",
+        style="model_family",
+        markers=True,
+        dashes=True,
+        estimator="mean",
+        errorbar=None,
+        col="metric",
+        col_wrap=min(3, max(1, len(available))),
+        facet_kws={"sharex": True, "sharey": bool(sharey)},
+        height=3.0,
+        aspect=1.15,
+        hue_order=hue_order,
+    )
+    for ax in np.ravel(g.axes):
+        ax.set_xlim(left=0.0)
+    g.set_axis_labels("Eval max_n_demos", "Metric value")
+    g.set_titles("{col_name}")
+    legend = g._legend
+    if legend is not None:
+        legend.set_title("mid_pred / family")
+    g.fig.suptitle(title)
+    g.fig.subplots_adjust(top=0.88)
+    g.savefig(out_path, bbox_inches="tight")
+    plt.close(g.fig)
+
+
+def _save_aggregates_for_train_iters(
+    *,
+    train_iters: int,
+    final_df: pd.DataFrame,
+    role_eval_demo_df: pd.DataFrame,
+    out_root: Path,
+) -> None:
+    out_dir = out_root / f"train_iters_{int(train_iters)}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    final_slice = final_df.loc[final_df["train_iters"] == float(train_iters)].copy()
+    role_slice = role_eval_demo_df.loc[
+        role_eval_demo_df["train_iters"] == float(train_iters)
+    ].copy()
+    if final_slice.empty or role_slice.empty:
+        return
+
+    final_agg_metrics = [
+        "selection_metric_value",
+        "eval_rollout_success_rate",
+        "train_rollout_success_rate",
+        "loss",
+        "token_acc",
+        "final_token_acc",
+        "seq_exact_acc",
+    ]
+    final_agg = (
+        final_slice.groupby(["train_iters", "model_family", "mid_pred"], as_index=False)
+        .agg({metric: "mean" for metric in final_agg_metrics if metric in final_slice.columns})
+        .sort_values(["model_family", "mid_pred"])
+        .reset_index(drop=True)
+    )
+    final_agg.to_csv(out_dir / "summary_final_aggregated_by_family_mid_pred.csv", index=False)
+
+    role_metric_cols = [metric for metric in ROLE_EVAL_DEMO_METRIC_COLS if metric in role_slice.columns]
+    role_agg = (
+        role_slice.groupby(
+            ["train_iters", "model_family", "mid_pred", "eval_role", "eval_max_n_demos"],
+            as_index=False,
         )
-        ax.set_title(metric)
-        ax.set_xlabel("eval_max_n_demos")
-    fig.suptitle(title)
-    fig.tight_layout()
-    fig.savefig(OUT_DIR / filename, bbox_inches="tight")
-    plt.close(fig)
+        .agg({metric: "mean" for metric in role_metric_cols})
+        .sort_values(["eval_role", "model_family", "mid_pred", "eval_max_n_demos"])
+        .reset_index(drop=True)
+    )
+    role_agg.to_csv(out_dir / "summary_by_role_eval_demo_aggregated.csv", index=False)
+
+    for group in ROLE_METRIC_PLOT_GROUPS:
+        for eval_role in ("train", "eval"):
+            _plot_role_metric_group(
+                role_eval_demo_df=role_agg,
+                eval_role=eval_role,
+                metric_names=list(group["metrics"]),
+                out_path=out_dir / f"{eval_role}_{group['filename']}",
+                title=f"{str(eval_role).capitalize()}: {str(group['title'])} (train_iters={int(train_iters)})",
+                sharey=bool(group["sharey"]),
+            )
 
 
 df = collate_dfs("remote/11_fresh_rule_split_full_completion/set", show_progress=True)
 if df.empty:
     raise ValueError("No results found in remote/11_fresh_rule_split_full_completion/set")
 
+_remove_top_level_figures(OUT_DIR)
+
 df = df.reset_index(drop=True)
 df["__row_id"] = np.arange(len(df))
 
-df_final = df.apply(_extract_final_row, axis=1)
-df_final.to_csv(OUT_DIR / "summary_final.csv", index=False)
+final_df = df.apply(_extract_final_row, axis=1).reset_index(drop=True)
+role_eval_demo_df = _explode_role_eval_demo_rows(df)
+selection_df = final_df.sort_values(
+    ["model_family", "mid_pred", "selection_metric_value", "train_iters"],
+    ascending=[True, True, False, True],
+).reset_index(drop=True)
 
-df_role_demo = _explode_role_eval_demo_rows(df)
-df_role_demo.to_csv(OUT_DIR / "summary_role_demo.csv", index=False)
-
-for group in ROLE_METRIC_PLOT_GROUPS:
-    _plot_role_metric_group(df_role_demo, **group)
-
-selection_df = df_final.sort_values(
-    ["model_family", "selection_metric_value", "train_iters"],
-    ascending=[True, False, True],
-)
+final_df.to_csv(OUT_DIR / "summary_final.csv", index=False)
+role_eval_demo_df.to_csv(OUT_DIR / "summary_by_role_eval_demo.csv", index=False)
 selection_df.to_csv(OUT_DIR / "selection_ranked.csv", index=False)
+
+train_iters_values = sorted(int(v) for v in final_df["train_iters"].dropna().astype(int).unique())
+for train_iters in train_iters_values:
+    _save_aggregates_for_train_iters(
+        train_iters=train_iters,
+        final_df=final_df,
+        role_eval_demo_df=role_eval_demo_df,
+        out_root=OUT_DIR,
+    )
+
+print("Saved:", OUT_DIR)

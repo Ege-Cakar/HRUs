@@ -1,5 +1,7 @@
 """Tests for training utilities."""
 
+import sys
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -7,6 +9,7 @@ import optax
 import pytest
 from flax import nnx
 
+from common import split_cases
 from model.mlp import Mixer, MixerConfig
 from train import (
     Case,
@@ -283,6 +286,16 @@ class FakeWandbModule:
         self.finish_calls += 1
 
 
+class CloseTracker:
+    """Closable stub that records how many times close() was invoked."""
+
+    def __init__(self):
+        self.close_calls = 0
+
+    def close(self):
+        self.close_calls += 1
+
+
 class TestTrain:
     """Tests for the main train function."""
 
@@ -550,6 +563,71 @@ class TestTrain:
         assert "test/loss" in fake_wandb.log_calls[0]["payload"]
         assert fake_wandb.log_calls[0]["payload"]["summary/param_count"] == 1
         assert fake_wandb.finish_calls == 1
+
+
+class TestSplitCases:
+    """Tests for shared case splitting and dropped-case cleanup."""
+
+    @staticmethod
+    def _make_case(name):
+        train_task = CloseTracker()
+        test_task = CloseTracker()
+        return Case(
+            name=name,
+            config=None,
+            train_task=train_task,
+            test_task=test_task,
+            info={
+                "train_tracker": train_task,
+                "test_tracker": test_task,
+            },
+        )
+
+    def test_split_cases_closes_dropped_case_tasks(self, monkeypatch):
+        cases = [self._make_case(f"case_{idx}") for idx in range(5)]
+
+        monkeypatch.setattr(sys, "argv", ["pytest", "1"])
+        selected = split_cases(cases, run_split=3)
+
+        assert [case.name for case in selected] == ["case_2", "case_3"]
+
+        selected_names = {case.name for case in selected}
+        for case in cases:
+            if case.name in selected_names:
+                assert case.train_task is not None
+                assert case.test_task is not None
+                assert case.train_task.close_calls == 0
+                assert case.test_task.close_calls == 0
+            else:
+                assert case.info["train_tracker"].close_calls == 1
+                assert case.info["test_tracker"].close_calls == 1
+                assert case.train_task is None
+                assert case.test_task is None
+
+    def test_split_cases_cleanup_respects_shuffle_seed(self, monkeypatch):
+        cases = [self._make_case(f"case_{idx}") for idx in range(6)]
+
+        shuffled = np.array(cases, dtype=object)
+        rng = np.random.default_rng(7)
+        rng.shuffle(shuffled)
+        expected_selected = [case.name for case in np.array_split(shuffled, 2)[0]]
+        expected_dropped = {case.name for case in np.array_split(shuffled, 2)[1]}
+
+        monkeypatch.setattr(sys, "argv", ["pytest", "0"])
+        selected = split_cases(cases, run_split=2, shuffle_seed=7)
+
+        assert [case.name for case in selected] == expected_selected
+        for case in cases:
+            if case.name in expected_dropped:
+                assert case.info["train_tracker"].close_calls == 1
+                assert case.info["test_tracker"].close_calls == 1
+                assert case.train_task is None
+                assert case.test_task is None
+            else:
+                assert case.info["train_tracker"].close_calls == 0
+                assert case.info["test_tracker"].close_calls == 0
+                assert case.train_task is not None
+                assert case.test_task is not None
 
 
 class TestCase:
