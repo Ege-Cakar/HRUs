@@ -126,6 +126,30 @@ def _parse_constants(raw: str) -> tuple[str, ...]:
     return constants
 
 
+def _parse_count_spec(raw: str, *, flag: str) -> int | tuple[int, ...]:
+    text = str(raw).strip()
+    if not text:
+        raise ValueError(f"{flag} must not be empty")
+    parts = [part.strip() for part in text.split(",")]
+    if any(not part for part in parts):
+        raise ValueError(f"{flag} must be a single integer or comma-separated integers")
+    try:
+        values = tuple(int(part) for part in parts)
+    except ValueError as err:
+        raise ValueError(
+            f"{flag} must be a single integer or comma-separated integers"
+        ) from err
+    if len(values) == 1:
+        return int(values[0])
+    return values
+
+
+def _count_spec_to_jsonable(spec: int | tuple[int, ...]) -> int | list[int]:
+    if isinstance(spec, tuple):
+        return [int(value) for value in spec]
+    return int(spec)
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Generate layered first-order datasets.",
@@ -138,8 +162,8 @@ def _parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument("--n-layers", type=int, default=16)
-    parser.add_argument("--predicates-per-layer", type=int, default=8)
-    parser.add_argument("--rules-per-transition", type=int, default=32)
+    parser.add_argument("--predicates-per-layer", type=str, default="8")
+    parser.add_argument("--rules-per-transition", type=str, default="32")
     parser.add_argument("--k-in-max", type=int, default=3)
     parser.add_argument("--k-out-max", type=int, default=3)
     parser.add_argument("--arity-max", type=int, default=3)
@@ -165,7 +189,16 @@ def _parse_args() -> argparse.Namespace:
         default="group_size:1",
         help="ArrayRecord writer options string.",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    args.predicates_per_layer = _parse_count_spec(
+        args.predicates_per_layer,
+        flag="--predicates-per-layer",
+    )
+    args.rules_per_transition = _parse_count_spec(
+        args.rules_per_transition,
+        flag="--rules-per-transition",
+    )
+    return args
 
 
 def _update_autoreg_stats(stats: _AutoregStats, prompt: list[int], completion: list[int]) -> None:
@@ -204,8 +237,8 @@ def _build_or_load_rule_bank(args: argparse.Namespace, rng: np.random.Generator)
     constants = _parse_constants(args.constants)
     return build_random_fol_rule_bank(
         n_layers=int(args.n_layers),
-        predicates_per_layer=int(args.predicates_per_layer),
-        rules_per_transition=int(args.rules_per_transition),
+        predicates_per_layer=args.predicates_per_layer,
+        rules_per_transition=args.rules_per_transition,
         arity_max=int(args.arity_max),
         vars_per_rule_max=int(args.vars_per_rule_max),
         k_in_max=int(args.k_in_max),
@@ -431,8 +464,8 @@ def _server_worker_spec_from_config(config: dict) -> tuple[object, object, tuple
             int(config["seed"]),
             dict(config["base_bank_payload"]),
             dict(config["tokenizer_payload"]),
-            int(config["fresh_icl_n_predicates"]),
-            int(config["rules_per_transition"]),
+            int(config["fresh_layer0_predicates"]),
+            int(config["fresh_rules_per_transition"]),
             int(config["k_in_min"]),
             int(config["k_in_max"]),
             int(config["k_out_min"]),
@@ -646,8 +679,8 @@ def main() -> None:
 
     config = {
         "n_layers": int(bank.n_layers),
-        "predicates_per_layer": int(bank.predicates_per_layer),
-        "rules_per_transition": int(args.rules_per_transition),
+        "predicates_per_layer": _count_spec_to_jsonable(bank.predicates_per_layer),
+        "rules_per_transition": _count_spec_to_jsonable(args.rules_per_transition),
         "k_in_max": int(args.k_in_max),
         "k_out_max": int(args.k_out_max),
         "arity_max": int(bank.arity_max),

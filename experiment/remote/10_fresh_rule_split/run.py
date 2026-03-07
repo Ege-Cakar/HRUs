@@ -75,7 +75,6 @@ RUN_SPLIT = 6
 
 PREDICATES_PER_LAYER = 8
 RULES_PER_TRANSITION = 16
-FRESH_ICL_N_PREDICATES = 8
 N_LAYERS = 3
 # ARITY_MAX = 3
 ARITY_MAX = 1
@@ -119,7 +118,6 @@ MAMBA2_BONSAI_LRS = [7e-5]
 # SELECTION_EVAL_MAX_N_DEMOS = 4
 # PREDICATES_PER_LAYER = 10
 # RULES_PER_TRANSITION = 18
-# FRESH_ICL_N_PREDICATES = 10
 # TRANSFORMER_LAYERS = [2]
 # TRANSFORMER_WIDTH_HEADS = [(128, 4)]
 # TRANSFORMER_LRS = [3e-4]
@@ -180,8 +178,8 @@ def _build_base_bank_and_tokenizer():
     """Build a 3-layer base bank and the fresh-ICL tokenizer."""
     base_bank = build_random_fol_rule_bank(
         n_layers=int(N_LAYERS),
-        predicates_per_layer=int(PREDICATES_PER_LAYER),
-        rules_per_transition=int(RULES_PER_TRANSITION),
+        predicates_per_layer=PREDICATES_PER_LAYER,
+        rules_per_transition=RULES_PER_TRANSITION,
         arity_max=int(ARITY_MAX),
         vars_per_rule_max=int(VARS_PER_RULE_MAX),
         k_in_max=int(K_IN_MAX),
@@ -235,9 +233,8 @@ def _make_layer_task(
         worker_count=0,
         drop_remainder=drop_remainder,
         prediction_objective="autoregressive",
-        predicates_per_layer=int(PREDICATES_PER_LAYER),
-        rules_per_transition=int(RULES_PER_TRANSITION),
-        fresh_icl_n_predicates=int(FRESH_ICL_N_PREDICATES),
+        predicates_per_layer=PREDICATES_PER_LAYER,
+        rules_per_transition=RULES_PER_TRANSITION,
         fresh_icl_base_bank_seed=int(BASE_BANK_SEED),
         arity_max=int(ARITY_MAX),
         vars_per_rule_max=int(VARS_PER_RULE_MAX),
@@ -369,11 +366,14 @@ def _evaluate_role_for_demo(
     rollout_demo_adapter = None
     for _ in range(int(ROLLOUT_EXAMPLES_PER_ROLE)):
         # Build a per-example fresh bank
-        fresh_preds = generate_fresh_predicate_names(int(FRESH_ICL_N_PREDICATES), rollout_rng)
+        fresh_preds = generate_fresh_predicate_names(
+            len(rule_bank.predicates_for_layer(0)),
+            rollout_rng,
+        )
         temp_bank = build_fresh_layer0_bank(
             base_bank=rule_bank,
             fresh_predicates=fresh_preds,
-            rules_per_transition=int(RULES_PER_TRANSITION),
+            rules_per_transition=len(rule_bank.transition_rules(0)),
             k_in_min=1,
             k_in_max=int(K_IN_MAX),
             k_out_min=1,
@@ -524,7 +524,6 @@ print(
         "base_bank_seed": BASE_BANK_SEED,
         "predicates_per_layer": PREDICATES_PER_LAYER,
         "rules_per_transition": RULES_PER_TRANSITION,
-        "fresh_icl_n_predicates": FRESH_ICL_N_PREDICATES,
         "n_layers": N_LAYERS,
     },
 )
@@ -884,7 +883,6 @@ for case in tqdm(all_cases, desc="cases", leave=True):
             "base_bank_seed": BASE_BANK_SEED,
             "predicates_per_layer": PREDICATES_PER_LAYER,
             "rules_per_transition": RULES_PER_TRANSITION,
-            "fresh_icl_n_predicates": FRESH_ICL_N_PREDICATES,
             "n_layers": N_LAYERS,
             "arity_max": ARITY_MAX,
             "vars_per_rule_max": VARS_PER_RULE_MAX,

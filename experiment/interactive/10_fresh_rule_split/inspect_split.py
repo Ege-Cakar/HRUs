@@ -46,9 +46,8 @@ SET_DIR.mkdir(parents=True, exist_ok=True)
 
 FRESH_ICL_CFG = {
     "seed": 2043,
-    "predicates_per_layer": 16,
-    "rules_per_transition": 64,
-    "fresh_icl_n_predicates": 64,
+    "predicates_per_layer": (1, 32, 16),
+    "rules_per_transition": (16, 32),
     "arity_max": 0,
     "vars_per_rule_max": 6,
     "k_in_max": 1,
@@ -135,8 +134,8 @@ def _decode_single_completion_text(tokenizer, completion_tokens) -> str:
 # --- Build base bank and preview fresh-ICL samples ---
 base_bank = build_random_fol_rule_bank(
     n_layers=3,
-    predicates_per_layer=int(FRESH_ICL_CFG["predicates_per_layer"]),
-    rules_per_transition=int(FRESH_ICL_CFG["rules_per_transition"]),
+    predicates_per_layer=FRESH_ICL_CFG["predicates_per_layer"],
+    rules_per_transition=FRESH_ICL_CFG["rules_per_transition"],
     arity_max=int(FRESH_ICL_CFG["arity_max"]),
     vars_per_rule_max=int(FRESH_ICL_CFG["vars_per_rule_max"]),
     constants=tuple(str(c) for c in FRESH_ICL_CFG["constants"]),
@@ -268,9 +267,8 @@ train_task_ar = FOLLayerTask(
     prediction_objective="autoregressive",
     fixed_length_mode="next_pow2",
     fixed_length_n_seq=N_SEQ,
-    predicates_per_layer=int(FRESH_ICL_CFG["predicates_per_layer"]),
-    rules_per_transition=int(FRESH_ICL_CFG["rules_per_transition"]),
-    fresh_icl_n_predicates=int(FRESH_ICL_CFG["fresh_icl_n_predicates"]),
+    predicates_per_layer=FRESH_ICL_CFG["predicates_per_layer"],
+    rules_per_transition=FRESH_ICL_CFG["rules_per_transition"],
     fresh_icl_base_bank_seed=int(FRESH_ICL_CFG["seed"]),
     arity_max=int(FRESH_ICL_CFG["arity_max"]),
     vars_per_rule_max=int(FRESH_ICL_CFG["vars_per_rule_max"]),
@@ -294,9 +292,8 @@ eval_task_ar = FOLLayerTask(
     prediction_objective="autoregressive",
     fixed_length_mode="next_pow2",
     fixed_length_n_seq=N_SEQ,
-    predicates_per_layer=int(FRESH_ICL_CFG["predicates_per_layer"]),
-    rules_per_transition=int(FRESH_ICL_CFG["rules_per_transition"]),
-    fresh_icl_n_predicates=int(FRESH_ICL_CFG["fresh_icl_n_predicates"]),
+    predicates_per_layer=FRESH_ICL_CFG["predicates_per_layer"],
+    rules_per_transition=FRESH_ICL_CFG["rules_per_transition"],
     fresh_icl_base_bank_seed=int(FRESH_ICL_CFG["seed"]),
     arity_max=int(FRESH_ICL_CFG["arity_max"]),
     vars_per_rule_max=int(FRESH_ICL_CFG["vars_per_rule_max"]),
@@ -317,6 +314,9 @@ for i in range(N_PREVIEW):
     record = train_task_ar._sample_online_record()
     preview_record(train_task_ar, record, role=f"train_preview #{i}")
 print()
+
+# # <codecell>
+# [i for i in range(len(train_task_ar._base_bank.transition_rules(1))) if train_task_ar._base_bank.transition_rules(1)[i].rhs[0].predicate == 'r2_5']
 
 # <codecell>
 model_config = TransformerConfig(
@@ -584,12 +584,12 @@ def preview_rollout(
 ):
     for i in range(n_examples):
         fresh_preds = generate_fresh_predicate_names(
-            int(FRESH_ICL_CFG["fresh_icl_n_predicates"]), rng, name_len=4,
+            len(base_bank.predicates_for_layer(0)), rng, name_len=4,
         )
         temp_bank = build_fresh_layer0_bank(
             base_bank=base_bank,
             fresh_predicates=fresh_preds,
-            rules_per_transition=int(FRESH_ICL_CFG["rules_per_transition"]),
+            rules_per_transition=len(base_bank.transition_rules(0)),
             k_in_min=1,
             k_in_max=int(FRESH_ICL_CFG["k_in_max"]),
             k_out_min=1,

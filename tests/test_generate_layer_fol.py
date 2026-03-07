@@ -17,6 +17,8 @@ def _run_generate(
     examples: int = 4,
     workers: int = 1,
     completion_format: str = "single",
+    predicates_per_layer: str = "4",
+    rules_per_transition: str = "6",
 ) -> Path:
     script = Path(__file__).parents[1] / "task" / "layer_gen" / "generate_layer_fol.py"
     out_dir = tmp_path / "layer_fol_out"
@@ -29,9 +31,9 @@ def _run_generate(
         "--n-layers",
         "6",
         "--predicates-per-layer",
-        "4",
+        str(predicates_per_layer),
         "--rules-per-transition",
-        "6",
+        str(rules_per_transition),
         "--arity-max",
         "3",
         "--vars-per-rule-max",
@@ -130,3 +132,17 @@ def test_generate_layer_fol_full_completion_outputs_sequence(tmp_path: Path) -> 
     assert rec["completion_format"] == "full"
     assert rec["statement_texts"] == statements
     assert len(statements) >= 1
+
+
+def test_generate_layer_fol_accepts_comma_separated_count_specs(tmp_path: Path) -> None:
+    out_dir = _run_generate(
+        tmp_path,
+        examples=1,
+        workers=1,
+        predicates_per_layer="4,5,6,7,8,9",
+        rules_per_transition="3,4,5,6,7",
+    )
+    root_meta = json.loads((out_dir / "metadata.json").read_text())
+
+    assert root_meta["config"]["predicates_per_layer"] == [4, 5, 6, 7, 8, 9]
+    assert root_meta["config"]["rules_per_transition"] == [3, 4, 5, 6, 7]

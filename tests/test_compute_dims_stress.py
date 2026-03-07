@@ -30,9 +30,8 @@ from task.layer_gen.util.fol_rule_bank import (
 
 
 # ── Config matching run.py defaults (ARITY_MAX=1) ──────────────────────────
-PREDICATES_PER_LAYER = 10
-RULES_PER_TRANSITION = 18
-FRESH_ICL_N_PREDICATES = 10
+PREDICATES_PER_LAYER = (10, 10, 10)
+RULES_PER_TRANSITION = (18, 18)
 N_LAYERS = 3
 ARITY_MAX = 1
 VARS_PER_RULE_MAX = 6
@@ -111,7 +110,6 @@ def _make_task(*, max_n_demos, n_seq_cap, seed=42):
         prediction_objective="autoregressive",
         predicates_per_layer=PREDICATES_PER_LAYER,
         rules_per_transition=RULES_PER_TRANSITION,
-        fresh_icl_n_predicates=FRESH_ICL_N_PREDICATES,
         arity_max=ARITY_MAX,
         vars_per_rule_max=VARS_PER_RULE_MAX,
         constants=CONSTANTS,
@@ -174,11 +172,15 @@ def test_fresh_clause_tokenization_bounded():
 
     rng = np.random.default_rng(789)
     for _ in range(200):
-        fresh_preds = generate_fresh_predicate_names(FRESH_ICL_N_PREDICATES, rng, name_len=4)
+        fresh_preds = generate_fresh_predicate_names(
+            len(base_bank.predicates_for_layer(0)),
+            rng,
+            name_len=4,
+        )
         temp_bank = build_fresh_layer0_bank(
             base_bank=base_bank,
             fresh_predicates=fresh_preds,
-            rules_per_transition=RULES_PER_TRANSITION,
+            rules_per_transition=len(base_bank.transition_rules(0)),
             k_in_min=1,
             k_in_max=K_IN_MAX,
             k_out_min=1,

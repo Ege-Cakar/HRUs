@@ -27,8 +27,8 @@ class OnlineSampleConfig:
 
 @dataclass(frozen=True)
 class FreshOnlineSampleConfig(OnlineSampleConfig):
-    fresh_icl_n_predicates: int
-    rules_per_transition: int
+    fresh_layer0_predicates: int
+    fresh_rules_per_transition: int
     k_in_min: int
     k_in_max: int
     k_out_min: int
@@ -49,7 +49,6 @@ class FOLTaskSplitStrategy(Protocol):
     tokenizer: FOLLayerTokenizer | None
     split_bundle: FOLDepth3ICLSplitBundle | None
     base_bank: FOLRuleBank | None
-    fresh_icl_n_predicates: int | None
     online_forced_step_idx: int | None
 
     def sample_record(self, *, rng: np.random.Generator) -> dict:

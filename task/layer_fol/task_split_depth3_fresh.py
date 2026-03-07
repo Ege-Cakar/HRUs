@@ -10,6 +10,7 @@ from task.layer_gen.util import tokenize_layer_fol
 from task.layer_gen.util.fol_rule_bank import (
     FOLDepth3ICLSplitBundle,
     FOLRuleBank,
+    _normalize_count_spec,
     build_random_fol_rule_bank,
 )
 from .common import _build_tokenizer_for_fresh_icl
@@ -31,7 +32,6 @@ class Depth3FreshICLSplitStrategy(FOLTaskSplitStrategy):
     tokenizer: tokenize_layer_fol.FOLLayerTokenizer
     sample_config: FreshOnlineSampleConfig
     base_bank: FOLRuleBank | None
-    fresh_icl_n_predicates: int | None
     online_forced_step_idx: int | None
     split_bundle: FOLDepth3ICLSplitBundle | None = None
     task_split: str = "depth3_fresh_icl"
@@ -44,8 +44,8 @@ class Depth3FreshICLSplitStrategy(FOLTaskSplitStrategy):
         split_role: str,
         distances: tuple[int, ...],
         seed: int,
-        predicates_per_layer: int,
-        rules_per_transition: int,
+        predicates_per_layer,
+        rules_per_transition,
         arity_max: int,
         arity_min: int,
         vars_per_rule_max: int,
@@ -61,7 +61,6 @@ class Depth3FreshICLSplitStrategy(FOLTaskSplitStrategy):
         min_n_demos: int,
         include_oracle: bool,
         completion_format: str,
-        fresh_icl_n_predicates,
         fresh_icl_base_bank_seed,
         predicate_name_len: int,
         rule_bank_path,
@@ -85,11 +84,18 @@ class Depth3FreshICLSplitStrategy(FOLTaskSplitStrategy):
             )
         _ = rng
 
-        fresh_n_predicates = (
-            int(fresh_icl_n_predicates)
-            if fresh_icl_n_predicates is not None
-            else int(predicates_per_layer)
+        predicates_per_layer_counts = _normalize_count_spec(
+            predicates_per_layer,
+            expected_len=3,
+            name="predicates_per_layer",
         )
+        rules_per_transition_counts = _normalize_count_spec(
+            rules_per_transition,
+            expected_len=2,
+            name="rules_per_transition",
+        )
+        fresh_layer0_predicates = int(predicates_per_layer_counts[0])
+        fresh_rules_per_transition = int(rules_per_transition_counts[0])
         base_bank_seed = (
             int(seed)
             if fresh_icl_base_bank_seed is None
@@ -97,8 +103,8 @@ class Depth3FreshICLSplitStrategy(FOLTaskSplitStrategy):
         )
         base_bank = build_random_fol_rule_bank(
             n_layers=3,
-            predicates_per_layer=int(predicates_per_layer),
-            rules_per_transition=int(rules_per_transition),
+            predicates_per_layer=predicates_per_layer_counts,
+            rules_per_transition=rules_per_transition_counts,
             arity_max=int(arity_max),
             arity_min=int(arity_min),
             vars_per_rule_max=int(vars_per_rule_max),
@@ -125,8 +131,8 @@ class Depth3FreshICLSplitStrategy(FOLTaskSplitStrategy):
             include_oracle=bool(include_oracle),
             forced_step_idx=online_forced_step_idx,
             completion_format=str(completion_format),
-            fresh_icl_n_predicates=int(fresh_n_predicates),
-            rules_per_transition=int(rules_per_transition),
+            fresh_layer0_predicates=int(fresh_layer0_predicates),
+            fresh_rules_per_transition=int(fresh_rules_per_transition),
             k_in_min=int(k_in_min),
             k_in_max=int(k_in_max),
             k_out_min=int(k_out_min),
@@ -138,7 +144,6 @@ class Depth3FreshICLSplitStrategy(FOLTaskSplitStrategy):
             tokenizer=tokenizer,
             sample_config=sample_config,
             base_bank=base_bank,
-            fresh_icl_n_predicates=int(fresh_n_predicates),
             online_forced_step_idx=online_forced_step_idx,
         )
 
@@ -153,7 +158,7 @@ class Depth3FreshICLSplitStrategy(FOLTaskSplitStrategy):
         )
 
     def make_worker_spec(self) -> OnlineWorkerSpec:
-        if self.base_bank is None or self.fresh_icl_n_predicates is None:
+        if self.base_bank is None:
             raise RuntimeError("Fresh-ICL prefetch requires base bank metadata.")
         return OnlineWorkerSpec(
             init_fn=_init_fol_online_fresh_worker,
@@ -162,8 +167,8 @@ class Depth3FreshICLSplitStrategy(FOLTaskSplitStrategy):
                 int(self.sample_config.seed_base),
                 self.base_bank.to_dict(),
                 self.tokenizer.to_dict(),
-                int(self.fresh_icl_n_predicates),
-                int(self.sample_config.rules_per_transition),
+                int(self.sample_config.fresh_layer0_predicates),
+                int(self.sample_config.fresh_rules_per_transition),
                 int(self.sample_config.k_in_min),
                 int(self.sample_config.k_in_max),
                 int(self.sample_config.k_out_min),
@@ -191,15 +196,15 @@ class Depth3FreshICLSplitStrategy(FOLTaskSplitStrategy):
         buffer_size: int,
         batch_size: int,
     ) -> dict | None:
-        if self.base_bank is None or self.fresh_icl_n_predicates is None:
+        if self.base_bank is None:
             raise RuntimeError("Fresh-ICL server prefetch requires base bank metadata.")
         return {
             "sampler_kind": "fresh_icl",
             "seed": int(self.sample_config.seed_base),
             "base_bank_payload": self.base_bank.to_dict(),
             "tokenizer_payload": self.tokenizer.to_dict(),
-            "fresh_icl_n_predicates": int(self.fresh_icl_n_predicates),
-            "rules_per_transition": int(self.sample_config.rules_per_transition),
+            "fresh_layer0_predicates": int(self.sample_config.fresh_layer0_predicates),
+            "fresh_rules_per_transition": int(self.sample_config.fresh_rules_per_transition),
             "k_in_min": int(self.sample_config.k_in_min),
             "k_in_max": int(self.sample_config.k_in_max),
             "k_out_min": int(self.sample_config.k_out_min),

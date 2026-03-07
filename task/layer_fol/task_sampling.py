@@ -201,14 +201,14 @@ def sample_online_fresh_record(
     config: FreshOnlineSampleConfig,
 ) -> dict:
     fresh_preds = generate_fresh_predicate_names(
-        config.fresh_icl_n_predicates,
+        config.fresh_layer0_predicates,
         rng,
         name_len=config.predicate_name_len,
     )
     temp_bank = build_fresh_layer0_bank(
         base_bank=base_bank,
         fresh_predicates=fresh_preds,
-        rules_per_transition=config.rules_per_transition,
+        rules_per_transition=config.fresh_rules_per_transition,
         k_in_min=config.k_in_min,
         k_in_max=config.k_in_max,
         k_out_min=config.k_out_min,
@@ -314,8 +314,8 @@ def _init_fol_online_fresh_worker(
     seed_base: int,
     base_bank_payload: dict,
     tokenizer_payload: dict,
-    fresh_icl_n_predicates: int,
-    rules_per_transition: int,
+    fresh_layer0_predicates: int,
+    fresh_rules_per_transition: int,
     k_in_min: int,
     k_in_max: int,
     k_out_min: int,
@@ -346,8 +346,8 @@ def _init_fol_online_fresh_worker(
                 None if forced_step_idx is None else int(forced_step_idx)
             ),
             completion_format=str(completion_format),
-            fresh_icl_n_predicates=int(fresh_icl_n_predicates),
-            rules_per_transition=int(rules_per_transition),
+            fresh_layer0_predicates=int(fresh_layer0_predicates),
+            fresh_rules_per_transition=int(fresh_rules_per_transition),
             k_in_min=int(k_in_min),
             k_in_max=int(k_in_max),
             k_out_min=int(k_out_min),

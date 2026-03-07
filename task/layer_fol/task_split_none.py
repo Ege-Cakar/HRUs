@@ -29,7 +29,6 @@ class NoSplitStrategy(FOLTaskSplitStrategy):
     sample_config: OnlineSampleConfig
     split_bundle: FOLDepth3ICLSplitBundle | None = None
     base_bank: FOLRuleBank | None = None
-    fresh_icl_n_predicates: int | None = None
     online_forced_step_idx: int | None = None
     task_split: str = "none"
 
@@ -41,8 +40,8 @@ class NoSplitStrategy(FOLTaskSplitStrategy):
         distances: tuple[int, ...],
         rule_bank_path,
         n_layers: int,
-        predicates_per_layer: int,
-        rules_per_transition: int,
+        predicates_per_layer,
+        rules_per_transition,
         arity_max: int,
         arity_min: int,
         vars_per_rule_max: int,
@@ -65,8 +64,8 @@ class NoSplitStrategy(FOLTaskSplitStrategy):
         else:
             rule_bank = build_random_fol_rule_bank(
                 n_layers=int(n_layers),
-                predicates_per_layer=int(predicates_per_layer),
-                rules_per_transition=int(rules_per_transition),
+                predicates_per_layer=predicates_per_layer,
+                rules_per_transition=rules_per_transition,
                 arity_max=int(arity_max),
                 arity_min=int(arity_min),
                 vars_per_rule_max=int(vars_per_rule_max),

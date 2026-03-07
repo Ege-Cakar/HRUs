@@ -91,6 +91,49 @@ def test_generated_rules_respect_k_in_out_min() -> None:
             assert len(rule.rhs) >= 3
 
 
+def test_build_random_fol_rule_bank_supports_per_layer_and_transition_counts() -> None:
+    bank = build_random_fol_rule_bank(
+        n_layers=3,
+        predicates_per_layer=(2, 3, 4),
+        rules_per_transition=(5, 6),
+        arity_max=3,
+        vars_per_rule_max=4,
+        k_in_max=2,
+        k_out_max=2,
+        constants=("a", "b", "c"),
+        rng=np.random.default_rng(29),
+    )
+
+    assert bank.predicates_for_layer(0) == ("r0_1", "r0_2")
+    assert bank.predicates_for_layer(1) == ("r1_1", "r1_2", "r1_3")
+    assert bank.predicates_for_layer(2) == ("r2_1", "r2_2", "r2_3", "r2_4")
+    assert len(bank.transition_rules(0)) == 5
+    assert len(bank.transition_rules(1)) == 6
+
+    payload = bank.to_dict()
+    assert payload["predicates_per_layer"] == [2, 3, 4]
+    roundtrip = FOLRuleBank.from_dict(payload)
+    assert roundtrip.to_dict() == payload
+
+
+def test_build_random_fol_rule_bank_validates_per_transition_minima() -> None:
+    import pytest
+
+    with pytest.raises(ValueError, match="transition 0->1"):
+        build_random_fol_rule_bank(
+            n_layers=3,
+            predicates_per_layer=(1, 1, 4),
+            rules_per_transition=(4, 4),
+            arity_max=3,
+            vars_per_rule_max=4,
+            k_in_max=2,
+            k_out_max=2,
+            k_out_min=2,
+            constants=("a", "b", "c"),
+            rng=np.random.default_rng(31),
+        )
+
+
 def test_sample_problem_outputs_ground_instantiations() -> None:
     bank = _sample_bank(seed=11)
     rng = np.random.default_rng(11)

@@ -86,7 +86,6 @@ class FOLLayerTask:
         online_prefetch_backend="server",
         online_prefetch_workers=None,
         online_prefetch_buffer_size=None,
-        fresh_icl_n_predicates=None,
         fresh_icl_base_bank_seed=None,
         arity_min=1,
         predicate_name_len=1,
@@ -161,8 +160,10 @@ class FOLLayerTask:
         self.reader_options = reader_options
         self.drop_remainder = drop_remainder
 
+        self.n_layers = int(n_layers)
+        self.predicates_per_layer = predicates_per_layer
         self.initial_ant_max = int(initial_ant_max)
-        self.rules_per_transition = int(rules_per_transition)
+        self.rules_per_transition = rules_per_transition
         self._k_in_min = int(k_in_min)
         self._k_in_max = int(k_in_max)
         self._k_out_min = int(k_out_min)
@@ -230,7 +231,6 @@ class FOLLayerTask:
         self._split_bundle: FOLDepth3ICLSplitBundle | None = None
         self._online_forced_step_idx: int | None = None
         self._base_bank: FOLRuleBank | None = None
-        self._fresh_icl_n_predicates: int | None = None
         self._strategy: FOLTaskSplitStrategy | None = None
 
         resolved_rule_bank_path = rule_bank_path
@@ -249,9 +249,9 @@ class FOLLayerTask:
             self._strategy = self._build_strategy(
                 rule_bank_path=resolved_rule_bank_path,
                 split_rule_bundle_path=self.split_rule_bundle_path,
-                n_layers=int(n_layers),
-                predicates_per_layer=int(predicates_per_layer),
-                rules_per_transition=int(rules_per_transition),
+                n_layers=int(self.n_layers),
+                predicates_per_layer=self.predicates_per_layer,
+                rules_per_transition=self.rules_per_transition,
                 arity_max=int(arity_max),
                 arity_min=int(arity_min),
                 vars_per_rule_max=int(vars_per_rule_max),
@@ -260,7 +260,6 @@ class FOLLayerTask:
                 k_in_max=int(k_in_max),
                 k_out_min=int(k_out_min),
                 k_out_max=int(k_out_max),
-                fresh_icl_n_predicates=fresh_icl_n_predicates,
             )
             self._adopt_strategy_state(self._strategy)
 
@@ -353,7 +352,6 @@ class FOLLayerTask:
             min_n_demos=int(self.min_n_demos),
             include_oracle=bool(self.include_oracle),
             completion_format=str(self.completion_format),
-            fresh_icl_n_predicates=kwargs["fresh_icl_n_predicates"],
             fresh_icl_base_bank_seed=self.fresh_icl_base_bank_seed,
             predicate_name_len=int(self._predicate_name_len),
             rule_bank_path=kwargs["rule_bank_path"],
@@ -367,7 +365,6 @@ class FOLLayerTask:
         self._split_bundle = strategy.split_bundle
         self._online_forced_step_idx = strategy.online_forced_step_idx
         self._base_bank = strategy.base_bank
-        self._fresh_icl_n_predicates = strategy.fresh_icl_n_predicates
 
     def __next__(self):
         if self.mode == "offline":

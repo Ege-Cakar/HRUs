@@ -63,7 +63,6 @@ CONFIG = {
     "out_dir": ROOT / "task" / "interactive" / "set" / "layer_stats_fol_fresh_icl",
     "base_bank": {
         "predicates_per_layer": 8,
-        "fresh_icl_n_predicates": 8,
         "rules_per_transition": 16,
         "arity_max": 1,
         "vars_per_rule_max": 6,
@@ -87,7 +86,7 @@ CONFIG = {
     "show_progress": True,
     "sweeps": [
         {"name": "predicates_per_layer", "values": [2, 4, 8, 16, 32]},
-        {"name": "fresh_icl_n_predicates", "values": [2, 4, 8, 16, 32]},
+        {"name": "fresh_layer0_predicates", "values": [2, 4, 8, 16, 32]},
         {"name": "rules_per_transition", "values": [4, 8, 16, 32, 64]},
         # {"name": "constants_count", "values": [32, 64, 128, 512]},
         # {"name": "arity_max", "values": [2, 3, 4]},
@@ -106,7 +105,7 @@ if os.environ.get("LAYER_STATS_FOL_FRESH_ICL_SMOKE", "").strip():
     CONFIG["exact_n_demos_values"] = [1, 4, 8]
     CONFIG["sweeps"] = [
         {"name": "predicates_per_layer", "values": [8, 16]},
-        {"name": "fresh_icl_n_predicates", "values": [8, 16]},
+        {"name": "fresh_layer0_predicates", "values": [8, 16]},
     ]
 
 
@@ -320,6 +319,14 @@ def _apply_sweep_to_bank_config(
     base: dict[str, Any], sweep_name: str, sweep_value: int
 ) -> dict[str, Any]:
     out = dict(base)
+    if str(sweep_name) == "fresh_layer0_predicates":
+        base_counts = out["predicates_per_layer"]
+        if isinstance(base_counts, (list, tuple)):
+            tail = tuple(int(value) for value in tuple(base_counts)[1:])
+        else:
+            tail = (int(base_counts), int(base_counts))
+        out["predicates_per_layer"] = (int(sweep_value),) + tail
+        return out
     out[str(sweep_name)] = int(sweep_value)
     return out
 
@@ -328,8 +335,8 @@ def _build_base_bank_from_cfg(bank_cfg: dict[str, Any], seed: int) -> FOLRuleBan
     """Build a 3-layer base rule bank from ``bank_cfg``."""
     return build_random_fol_rule_bank(
         n_layers=3,
-        predicates_per_layer=int(bank_cfg["predicates_per_layer"]),
-        rules_per_transition=int(bank_cfg["rules_per_transition"]),
+        predicates_per_layer=bank_cfg["predicates_per_layer"],
+        rules_per_transition=bank_cfg["rules_per_transition"],
         arity_max=int(bank_cfg["arity_max"]),
         vars_per_rule_max=int(bank_cfg["vars_per_rule_max"]),
         k_in_min=int(bank_cfg["k_in_min"]),
@@ -358,12 +365,12 @@ def _sample_prompt_state_fresh(
     The ``temp_bank`` is a per-prompt bank whose layer-0 predicates are freshly
     generated, which is necessary for reachability checking at step_idx=0.
     """
-    n_fresh = int(bank_cfg["fresh_icl_n_predicates"])
+    n_fresh = len(base_bank.predicates_for_layer(0))
     fresh_preds = generate_fresh_predicate_names(n_fresh, rng)
     temp_bank = build_fresh_layer0_bank(
         base_bank=base_bank,
         fresh_predicates=fresh_preds,
-        rules_per_transition=int(bank_cfg["rules_per_transition"]),
+        rules_per_transition=len(base_bank.transition_rules(0)),
         k_in_min=int(bank_cfg["k_in_min"]),
         k_in_max=int(bank_cfg["k_in_max"]),
         k_out_min=int(bank_cfg["k_out_min"]),

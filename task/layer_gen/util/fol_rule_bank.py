@@ -6,12 +6,66 @@ from dataclasses import dataclass
 import json
 from pathlib import Path
 import re
-from typing import Iterable
+from typing import Iterable, Sequence
 
 import numpy as np
 
 _IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _LAYERED_PREDICATE_RE = re.compile(r"r(\d+)_(\d+)$")
+
+
+def _count_spec_error(name: str, message: str) -> ValueError:
+    return ValueError(f"{name} {message}")
+
+
+def _normalize_count_spec(
+    spec: int | Sequence[int],
+    *,
+    expected_len: int,
+    name: str,
+) -> tuple[int, ...]:
+    expected_len = int(expected_len)
+    if expected_len < 1:
+        raise _count_spec_error(name, f"expected_len must be >= 1, got {expected_len}")
+
+    if isinstance(spec, (int, np.integer)) and not isinstance(spec, bool):
+        values = (int(spec),) * expected_len
+    else:
+        if isinstance(spec, (str, bytes)):
+            raise _count_spec_error(name, f"must be an int or sequence of ints, got {spec!r}")
+        try:
+            values = tuple(int(value) for value in spec)
+        except TypeError as err:
+            raise _count_spec_error(
+                name,
+                f"must be an int or sequence of ints, got {type(spec).__name__!r}",
+            ) from err
+        if len(values) != expected_len:
+            raise _count_spec_error(
+                name,
+                f"must have length {expected_len}, got {len(values)}",
+            )
+
+    for value in values:
+        if int(value) < 1:
+            raise _count_spec_error(name, f"must contain only values >= 1, got {values}")
+    return tuple(int(value) for value in values)
+
+
+def _scalarize_count_spec(values: Sequence[int]) -> int | tuple[int, ...]:
+    resolved = tuple(int(value) for value in values)
+    if not resolved:
+        raise ValueError("count specs must not be empty")
+    if all(value == resolved[0] for value in resolved):
+        return int(resolved[0])
+    return resolved
+
+
+def _count_spec_to_payload(values: Sequence[int]) -> int | list[int]:
+    scalarized = _scalarize_count_spec(values)
+    if isinstance(scalarized, tuple):
+        return [int(value) for value in scalarized]
+    return int(scalarized)
 
 
 def _is_identifier(token: str) -> bool:
@@ -198,7 +252,7 @@ class FOLLayerRule:
 @dataclass(frozen=True)
 class FOLRuleBank:
     n_layers: int
-    predicates_per_layer: int
+    predicates_per_layer: int | tuple[int, ...]
     arity_max: int
     constants: tuple[str, ...]
     vars_per_rule_max: int
@@ -213,10 +267,18 @@ class FOLRuleBank:
     def statement_set(self, src_layer: int) -> set[str]:
         return {rule.statement_text for rule in self.transition_rules(src_layer)}
 
+    def predicates_per_layer_counts(self) -> tuple[int, ...]:
+        return _normalize_count_spec(
+            self.predicates_per_layer,
+            expected_len=int(self.n_layers),
+            name="predicates_per_layer",
+        )
+
     def predicates_for_layer(self, layer: int) -> tuple[str, ...]:
         if self.layer_predicates is not None and int(layer) in self.layer_predicates:
             return tuple(self.layer_predicates[int(layer)])
-        return tuple(f"r{int(layer)}_{idx}" for idx in range(1, int(self.predicates_per_layer) + 1))
+        count = self.predicates_per_layer_counts()[int(layer)]
+        return tuple(f"r{int(layer)}_{idx}" for idx in range(1, int(count) + 1))
 
     def to_dict(self) -> dict:
         transitions = {
@@ -225,7 +287,7 @@ class FOLRuleBank:
         }
         return {
             "n_layers": int(self.n_layers),
-            "predicates_per_layer": int(self.predicates_per_layer),
+            "predicates_per_layer": _count_spec_to_payload(self.predicates_per_layer_counts()),
             "arity_max": int(self.arity_max),
             "arity_min": int(self.arity_min),
             "constants": list(self.constants),
@@ -269,7 +331,13 @@ class FOLRuleBank:
 
         return cls(
             n_layers=int(payload["n_layers"]),
-            predicates_per_layer=int(payload["predicates_per_layer"]),
+            predicates_per_layer=_scalarize_count_spec(
+                _normalize_count_spec(
+                    payload["predicates_per_layer"],
+                    expected_len=int(payload["n_layers"]),
+                    name="predicates_per_layer",
+                )
+            ),
             arity_max=int(payload["arity_max"]),
             arity_min=int(payload.get("arity_min", 1)),
             constants=tuple(str(tok) for tok in payload["constants"]),
@@ -648,8 +716,8 @@ def _sample_transition_rules(
 def build_random_fol_rule_bank(
     *,
     n_layers: int,
-    predicates_per_layer: int,
-    rules_per_transition: int,
+    predicates_per_layer: int | Sequence[int],
+    rules_per_transition: int | Sequence[int],
     arity_max: int,
     vars_per_rule_max: int,
     k_in_max: int,
@@ -662,14 +730,16 @@ def build_random_fol_rule_bank(
 ) -> FOLRuleBank:
     if n_layers < 2:
         raise ValueError(f"n_layers must be >= 2, got {n_layers}")
-    if predicates_per_layer < 1:
-        raise ValueError(
-            f"predicates_per_layer must be >= 1, got {predicates_per_layer}"
-        )
-    if rules_per_transition < 1:
-        raise ValueError(
-            f"rules_per_transition must be >= 1, got {rules_per_transition}"
-        )
+    predicates_per_layer_counts = _normalize_count_spec(
+        predicates_per_layer,
+        expected_len=int(n_layers),
+        name="predicates_per_layer",
+    )
+    rules_per_transition_counts = _normalize_count_spec(
+        rules_per_transition,
+        expected_len=int(n_layers) - 1,
+        name="rules_per_transition",
+    )
     if arity_max < 0:
         raise ValueError(f"arity_max must be >= 0, got {arity_max}")
     if arity_min < 0:
@@ -692,13 +762,6 @@ def build_random_fol_rule_bank(
         raise ValueError(
             f"k_out_min must be <= k_out_max, got k_out_min={k_out_min}, k_out_max={k_out_max}"
         )
-    if k_in_min > int(predicates_per_layer) or k_out_min > int(predicates_per_layer):
-        raise ValueError(
-            "k_in_min and k_out_min cannot exceed predicates_per_layer for random bank "
-            f"generation; got predicates_per_layer={predicates_per_layer}, "
-            f"k_in_min={k_in_min}, k_out_min={k_out_min}."
-        )
-
     constants = tuple(str(tok) for tok in constants)
     if not constants:
         raise ValueError("constants must contain at least one symbol")
@@ -709,7 +772,7 @@ def build_random_fol_rule_bank(
     predicate_arities: dict[str, int] = {}
     transitions: dict[int, tuple[FOLLayerRule, ...]] = {}
     layer_predicates = {
-        int(layer): _layer_predicates(layer, int(predicates_per_layer))
+        int(layer): _layer_predicates(layer, int(predicates_per_layer_counts[layer]))
         for layer in range(int(n_layers))
     }
     var_pool = tuple(f"x{idx}" for idx in range(1, vars_per_rule_max + 1))
@@ -719,11 +782,20 @@ def build_random_fol_rule_bank(
             predicate_arities[predicate] = int(rng.integers(int(arity_min), arity_max + 1))
 
     for src_layer in range(n_layers - 1):
+        src_width = int(predicates_per_layer_counts[src_layer])
+        dst_width = int(predicates_per_layer_counts[src_layer + 1])
+        if int(k_in_min) > src_width or int(k_out_min) > dst_width:
+            raise ValueError(
+                "k_in_min and k_out_min cannot exceed the source/destination predicate "
+                f"counts for transition {src_layer}->{src_layer + 1}; "
+                f"got src_width={src_width}, dst_width={dst_width}, "
+                f"k_in_min={k_in_min}, k_out_min={k_out_min}."
+            )
         transitions[src_layer] = _sample_transition_rules(
             src_layer=int(src_layer),
             lhs_predicates=tuple(layer_predicates[int(src_layer)]),
             rhs_predicates=tuple(layer_predicates[int(src_layer) + 1]),
-            rules_per_transition=int(rules_per_transition),
+            rules_per_transition=int(rules_per_transition_counts[src_layer]),
             k_in_min=int(k_in_min),
             k_in_max=int(k_in_max),
             k_out_min=int(k_out_min),
@@ -735,7 +807,7 @@ def build_random_fol_rule_bank(
 
     return FOLRuleBank(
         n_layers=int(n_layers),
-        predicates_per_layer=int(predicates_per_layer),
+        predicates_per_layer=_scalarize_count_spec(predicates_per_layer_counts),
         arity_max=int(arity_max),
         arity_min=int(arity_min),
         constants=constants,
@@ -825,7 +897,13 @@ def build_fresh_layer0_bank(
 
     return FOLRuleBank(
         n_layers=3,
-        predicates_per_layer=int(base_bank.predicates_per_layer),
+        predicates_per_layer=_scalarize_count_spec(
+            (
+                len(tuple(fresh_predicates)),
+                len(tuple(base_l1)),
+                len(tuple(base_l2)),
+            )
+        ),
         arity_max=int(base_bank.arity_max),
         arity_min=int(base_bank.arity_min),
         constants=tuple(base_bank.constants),

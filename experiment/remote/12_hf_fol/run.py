@@ -96,7 +96,6 @@ MIXED_PRECISION = "no"   # models loaded in bf16 via torch_dtype; Accelerate aut
 
 PREDICATES_PER_LAYER = 8
 RULES_PER_TRANSITION = 16
-FRESH_ICL_N_PREDICATES = 8
 N_LAYERS = 3
 ARITY_MAX = 1
 VARS_PER_RULE_MAX = 6
@@ -124,7 +123,6 @@ BASE_SEED = 1000
 # GRAD_ACCUM_STEPS = 1
 # PREDICATES_PER_LAYER = 10
 # RULES_PER_TRANSITION = 18
-# FRESH_ICL_N_PREDICATES = 10
 # TRAIN_MAX_N_DEMOS = 4
 # EVAL_MAX_N_DEMOS = 4
 # MIXED_PRECISION = "no"
@@ -142,8 +140,8 @@ BASE_SEED = 1000
 def _build_base_bank_and_tokenizer():
     base_bank = build_random_fol_rule_bank(
         n_layers=int(N_LAYERS),
-        predicates_per_layer=int(PREDICATES_PER_LAYER),
-        rules_per_transition=int(RULES_PER_TRANSITION),
+        predicates_per_layer=PREDICATES_PER_LAYER,
+        rules_per_transition=RULES_PER_TRANSITION,
         arity_max=int(ARITY_MAX),
         vars_per_rule_max=int(VARS_PER_RULE_MAX),
         k_in_max=int(K_IN_MAX),
@@ -181,9 +179,8 @@ def _make_layer_task(
         worker_count=0,
         drop_remainder=drop_remainder,
         prediction_objective="autoregressive",
-        predicates_per_layer=int(PREDICATES_PER_LAYER),
-        rules_per_transition=int(RULES_PER_TRANSITION),
-        fresh_icl_n_predicates=int(FRESH_ICL_N_PREDICATES),
+        predicates_per_layer=PREDICATES_PER_LAYER,
+        rules_per_transition=RULES_PER_TRANSITION,
         fresh_icl_base_bank_seed=int(BASE_BANK_SEED),
         arity_max=int(ARITY_MAX),
         vars_per_rule_max=int(VARS_PER_RULE_MAX),
@@ -324,7 +321,6 @@ wandb_cfg = make_experiment_wandb_config(
             "base_bank_seed": BASE_BANK_SEED,
             "predicates_per_layer": PREDICATES_PER_LAYER,
             "rules_per_transition": RULES_PER_TRANSITION,
-            "fresh_icl_n_predicates": FRESH_ICL_N_PREDICATES,
             "n_layers": N_LAYERS,
             "arity_max": ARITY_MAX,
             "vars_per_rule_max": VARS_PER_RULE_MAX,
@@ -384,7 +380,6 @@ if accelerator.is_main_process:
             "base_bank_seed": BASE_BANK_SEED,
             "predicates_per_layer": PREDICATES_PER_LAYER,
             "rules_per_transition": RULES_PER_TRANSITION,
-            "fresh_icl_n_predicates": FRESH_ICL_N_PREDICATES,
             "n_layers": N_LAYERS,
             "arity_max": ARITY_MAX,
             "vars_per_rule_max": VARS_PER_RULE_MAX,

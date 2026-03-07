@@ -30,7 +30,6 @@ class Depth3ICLTransferSplitStrategy(FOLTaskSplitStrategy):
     split_bundle: FOLDepth3ICLSplitBundle | None
     online_forced_step_idx: int | None
     base_bank: FOLRuleBank | None = None
-    fresh_icl_n_predicates: int | None = None
     task_split: str = "depth3_icl_transfer"
 
     @classmethod

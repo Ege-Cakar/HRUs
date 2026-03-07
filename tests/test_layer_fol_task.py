@@ -307,7 +307,6 @@ def test_layer_fol_preview_formats_single_completion() -> None:
         split_role="train",
         predicates_per_layer=4,
         rules_per_transition=8,
-        fresh_icl_n_predicates=4,
         arity_max=1,
         vars_per_rule_max=4,
         constants=("a", "b"),
@@ -338,7 +337,6 @@ def test_layer_fol_preview_formats_full_completion() -> None:
         split_role="train",
         predicates_per_layer=4,
         rules_per_transition=8,
-        fresh_icl_n_predicates=4,
         arity_max=1,
         vars_per_rule_max=4,
         constants=("a", "b"),
@@ -369,7 +367,6 @@ def test_layer_fol_print_task_preview_prints_requested_example_count(capsys) -> 
         split_role="train",
         predicates_per_layer=4,
         rules_per_transition=8,
-        fresh_icl_n_predicates=4,
         arity_max=1,
         vars_per_rule_max=4,
         constants=("a", "b"),
@@ -1653,15 +1650,15 @@ def test_layer_fol_task_fresh_icl_prefetch_server_fallback(monkeypatch, capsys) 
         task.close()
 
 
-def test_layer_fol_task_fresh_icl_respects_fresh_icl_n_predicates() -> None:
+def test_layer_fol_task_fresh_icl_uses_list_counts_for_layer0_and_transition0() -> None:
     task = FOLLayerTask(
         mode="online",
         task_split="depth3_fresh_icl",
         distance_range=(2, 2),
         batch_size=1,
         seed=307,
-        predicates_per_layer=4,
-        rules_per_transition=8,
+        predicates_per_layer=(6, 4, 4),
+        rules_per_transition=(9, 8),
         arity_max=3,
         vars_per_rule_max=4,
         constants=("a", "b", "c"),
@@ -1669,10 +1666,13 @@ def test_layer_fol_task_fresh_icl_respects_fresh_icl_n_predicates() -> None:
         k_out_max=2,
         initial_ant_max=3,
         max_n_demos=0,
-        fresh_icl_n_predicates=6,
         online_prefetch_backend="sync",
     )
-    assert task._fresh_icl_n_predicates == 6
+    assert task._base_bank is not None
+    assert len(task._base_bank.predicates_for_layer(0)) == 6
+    assert len(task._base_bank.predicates_for_layer(1)) == 4
+    assert len(task._base_bank.transition_rules(0)) == 9
+    assert len(task._base_bank.transition_rules(1)) == 8
     xs, ys = next(task)
     assert xs.shape[0] == 1
 
