@@ -20,6 +20,7 @@ class OnlineSampleConfig:
     max_unify_solutions: int
     max_n_demos: int
     min_n_demos: int
+    include_oracle: bool
     forced_step_idx: int | None
     completion_format: str
 

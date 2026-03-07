@@ -1112,6 +1112,16 @@ def _adapter_last_demo_rules(
     return out
 
 
+def _adapter_set_oracle_rule(
+    adapter: FOLLayerPredictionAdapter,
+    oracle_rule: FOLLayerRule | None,
+) -> None:
+    setter = getattr(adapter, "set_oracle_rule", None)
+    if not callable(setter):
+        return
+    setter(oracle_rule)
+
+
 def run_layer_rollout_fol(
     *,
     rule_bank: FOLRuleBank,
@@ -1134,6 +1144,16 @@ def run_layer_rollout_fol(
 
     for step_idx in range(int(example.max_steps)):
         src_layer = int(example.start_layer) + step_idx
+        oracle_rule = None
+        if step_idx < len(example.oracle_rule_statements):
+            lhs, rhs = parse_clause_text(str(example.oracle_rule_statements[step_idx]))
+            oracle_rule = FOLLayerRule(
+                src_layer=src_layer,
+                dst_layer=src_layer + 1,
+                lhs=lhs,
+                rhs=rhs,
+            )
+        _adapter_set_oracle_rule(adapter, oracle_rule)
         prompt = tokenizer.tokenize_prompt(
             FOLSequent(
                 ants=_sorted_fol_atoms(facts),

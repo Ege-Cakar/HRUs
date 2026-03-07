@@ -78,6 +78,7 @@ class FOLLayerTask:
         initial_ant_max=3,
         max_n_demos=0,
         min_n_demos=None,
+        include_oracle=False,
         sample_max_attempts=4096,
         max_unify_solutions=128,
         online_prefetch=True,
@@ -167,6 +168,11 @@ class FOLLayerTask:
                 "min_n_demos must be <= max_n_demos, "
                 f"got min_n_demos={self.min_n_demos}, max_n_demos={self.max_n_demos}"
             )
+        self.include_oracle = bool(include_oracle)
+        if self.mode == "online" and self.include_oracle and self.max_n_demos < 1:
+            raise ValueError("include_oracle=True requires max_n_demos >= 1.")
+        if self.mode == "online" and self.include_oracle and self.min_n_demos < 1:
+            raise ValueError("include_oracle=True requires min_n_demos >= 1.")
         self.sample_max_attempts = int(sample_max_attempts)
         if self.sample_max_attempts < 1:
             raise ValueError(
@@ -290,6 +296,7 @@ class FOLLayerTask:
                 max_unify_solutions=int(self.max_unify_solutions),
                 max_n_demos=int(self.max_n_demos),
                 min_n_demos=int(self.min_n_demos),
+                include_oracle=bool(self.include_oracle),
                 completion_format=str(self.completion_format),
                 rng=self._rng,
             )
@@ -306,6 +313,7 @@ class FOLLayerTask:
                 max_unify_solutions=int(self.max_unify_solutions),
                 max_n_demos=int(self.max_n_demos),
                 min_n_demos=int(self.min_n_demos),
+                include_oracle=bool(self.include_oracle),
                 completion_format=str(self.completion_format),
             )
         return Depth3FreshICLSplitStrategy.build(
@@ -328,6 +336,7 @@ class FOLLayerTask:
             max_unify_solutions=int(self.max_unify_solutions),
             max_n_demos=int(self.max_n_demos),
             min_n_demos=int(self.min_n_demos),
+            include_oracle=bool(self.include_oracle),
             completion_format=str(self.completion_format),
             fresh_icl_n_predicates=kwargs["fresh_icl_n_predicates"],
             predicate_name_len=int(self._predicate_name_len),

@@ -294,6 +294,7 @@ def _make_layer_task(
     shuffle: bool,
     min_n_demos: int,
     max_n_demos: int,
+    include_oracle: bool = False,
     fixed_length_mode: str = "batch_max",
     fixed_length_n_seq: int | None = None,
 ):
@@ -314,6 +315,7 @@ def _make_layer_task(
         initial_ant_max=INITIAL_ANT_MAX,
         min_n_demos=int(min_n_demos),
         max_n_demos=int(max_n_demos),
+        include_oracle=bool(include_oracle),
         completion_format=str(COMPLETION_FORMAT),
         sample_max_attempts=SAMPLE_MAX_ATTEMPTS,
         max_unify_solutions=MAX_UNIFY_SOLUTIONS,
@@ -557,6 +559,7 @@ def _evaluate_by_distance_for_demo(
         min_n_demos=int(eval_max_n_demos),
         max_n_demos=int(eval_max_n_demos),
         max_unify_solutions=int(MAX_UNIFY_SOLUTIONS),
+        include_oracle=False,
     )
 
     eval_fetch_s = 0.0
@@ -581,6 +584,7 @@ def _evaluate_by_distance_for_demo(
             shuffle=True,
             min_n_demos=int(eval_max_n_demos),
             max_n_demos=int(eval_max_n_demos),
+            include_oracle=False,
             fixed_length_mode=EVAL_FIXED_LENGTH_MODE,
             fixed_length_n_seq=int(n_seq_ar),
         )
@@ -775,6 +779,7 @@ for train_max_distance in TRAIN_MAX_DISTANCES:
                 shuffle=True,
                 min_n_demos=int(TRAIN_MIN_N_DEMOS),
                 max_n_demos=int(TRAIN_MAX_N_DEMOS),
+                include_oracle=True,
                 fixed_length_mode=TRAIN_FIXED_LENGTH_MODE,
                 fixed_length_n_seq=TRAIN_N_SEQ_AR,
             ),
@@ -790,6 +795,7 @@ for train_max_distance in TRAIN_MAX_DISTANCES:
                 shuffle=True,
                 min_n_demos=int(TRAIN_MIN_N_DEMOS),
                 max_n_demos=int(TRAIN_MAX_N_DEMOS),
+                include_oracle=False,
                 fixed_length_mode=EVAL_FIXED_LENGTH_MODE,
                 fixed_length_n_seq=N_SEQ_AR,
             ),
@@ -890,6 +896,7 @@ for train_max_distance in TRAIN_MAX_DISTANCES:
                 shuffle=True,
                 min_n_demos=int(TRAIN_MIN_N_DEMOS),
                 max_n_demos=int(TRAIN_MAX_N_DEMOS),
+                include_oracle=True,
                 fixed_length_mode=TRAIN_FIXED_LENGTH_MODE,
                 fixed_length_n_seq=TRAIN_N_SEQ_AR,
             ),
@@ -905,6 +912,7 @@ for train_max_distance in TRAIN_MAX_DISTANCES:
                 shuffle=True,
                 min_n_demos=int(TRAIN_MIN_N_DEMOS),
                 max_n_demos=int(TRAIN_MAX_N_DEMOS),
+                include_oracle=False,
                 fixed_length_mode=EVAL_FIXED_LENGTH_MODE,
                 fixed_length_n_seq=N_SEQ_AR,
             ),

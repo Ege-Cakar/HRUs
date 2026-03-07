@@ -9,6 +9,7 @@ from task.layer_fol import (
     AutoregressiveLogitsAdapter,
     CompletionLogitsAdapter,
     FAILURE_WRONG_RULE_ERROR,
+    FOLDemoAugmentedAdapter,
     FOLLayerRolloutExample,
     _find_instantiation_for_rule,
     evaluate_completion_paths_fol,
@@ -996,6 +997,107 @@ def test_rollout_uses_adapter_demo_rules() -> None:
     )
     assert with_demo_result.success
     assert with_demo_result.failure_reason is None
+
+
+def test_demo_augmented_adapter_include_oracle_records_oracle_rule() -> None:
+    bank, tokenizer, rng = _sampled_bank(seed=76)
+    sampled = sample_fol_problem(bank=bank, distance=1, initial_ant_max=3, rng=rng)
+    prompt = tokenizer.tokenize_prompt(
+        FOLSequent(ants=sampled.step_ants[0], cons=sampled.goal_atom)
+    )
+    adapter = FOLDemoAugmentedAdapter(
+        base_adapter=_ScriptedAdapter([_enc1(tokenizer, sampled.step_rules[0].statement_text)]),
+        rule_bank=bank,
+        tokenizer=tokenizer,
+        min_n_demos=2,
+        max_n_demos=2,
+        max_unify_solutions=64,
+        include_oracle=True,
+    )
+    adapter.set_oracle_rule(sampled.step_rules[0])
+    _ = adapter.predict_completion(
+        model=lambda x: x,
+        prompt_tokens=prompt,
+        tokenizer=tokenizer,
+        rng=np.random.default_rng(0),
+    )
+    demo_rules = adapter.get_last_demo_rules()
+    assert len(demo_rules) == 2
+    assert any(
+        _find_instantiation_for_rule(
+            template=demo_rule,
+            lhs_ground=sampled.step_rules[0].lhs,
+            rhs_ground=sampled.step_rules[0].rhs,
+        )
+        is not None
+        for demo_rule in demo_rules
+    )
+
+
+def test_demo_augmented_adapter_include_oracle_requires_oracle_rule() -> None:
+    bank, tokenizer, rng = _sampled_bank(seed=77)
+    sampled = sample_fol_problem(bank=bank, distance=1, initial_ant_max=3, rng=rng)
+    prompt = tokenizer.tokenize_prompt(
+        FOLSequent(ants=sampled.step_ants[0], cons=sampled.goal_atom)
+    )
+    adapter = FOLDemoAugmentedAdapter(
+        base_adapter=_ScriptedAdapter([_enc1(tokenizer, sampled.step_rules[0].statement_text)]),
+        rule_bank=bank,
+        tokenizer=tokenizer,
+        min_n_demos=1,
+        max_n_demos=1,
+        max_unify_solutions=64,
+        include_oracle=True,
+    )
+    with pytest.raises(ValueError, match="oracle_rule"):
+        adapter.predict_completion(
+            model=lambda x: x,
+            prompt_tokens=prompt,
+            tokenizer=tokenizer,
+            rng=np.random.default_rng(0),
+        )
+
+
+def test_rollout_sets_adapter_oracle_rule_for_demo_augmentation() -> None:
+    bank, tokenizer, rng = _sampled_bank(seed=78)
+    sampled = sample_fol_problem(bank=bank, distance=1, initial_ant_max=3, rng=rng)
+    example = FOLLayerRolloutExample(
+        distance=sampled.distance,
+        start_layer=sampled.start_layer,
+        goal_atom=sampled.goal_atom.text,
+        initial_ants=tuple(atom.text for atom in sampled.step_ants[0]),
+        max_steps=sampled.distance,
+        oracle_rule_statements=(str(sampled.step_rules[0].statement_text),),
+    )
+    adapter = FOLDemoAugmentedAdapter(
+        base_adapter=_ScriptedAdapter([_enc1(tokenizer, sampled.step_rules[0].statement_text)]),
+        rule_bank=bank,
+        tokenizer=tokenizer,
+        min_n_demos=1,
+        max_n_demos=1,
+        max_unify_solutions=64,
+        include_oracle=True,
+    )
+
+    result = run_layer_rollout_fol(
+        rule_bank=bank,
+        example=example,
+        model=lambda x: x,
+        adapter=adapter,
+        tokenizer=tokenizer,
+    )
+
+    assert result.success
+    demo_rules = adapter.get_last_demo_rules()
+    assert len(demo_rules) == 1
+    assert (
+        _find_instantiation_for_rule(
+            template=demo_rules[0],
+            lhs_ground=sampled.step_rules[0].lhs,
+            rhs_ground=sampled.step_rules[0].rhs,
+        )
+        is not None
+    )
 
 
 # ── Demo-rule exact matching tests ─────────────────────────────────────────────

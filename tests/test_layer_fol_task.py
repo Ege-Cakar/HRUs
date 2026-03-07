@@ -124,6 +124,58 @@ def _write_depth3_split_bundle(tmp_path: Path, seed: int = 0) -> Path:
     return path
 
 
+def _record_target_rule(rec: dict) -> FOLLayerRule:
+    src_layer = int(rec["src_layer"])
+    statement_texts = list(rec["statement_texts"])
+    if len(statement_texts) != 1:
+        raise ValueError("Expected a single target statement for oracle matching.")
+    lhs, rhs = parse_clause_text(str(statement_texts[0]))
+    return FOLLayerRule(
+        src_layer=src_layer,
+        dst_layer=src_layer + 1,
+        lhs=lhs,
+        rhs=rhs,
+    )
+
+
+def _record_oracle_schema(task: FOLLayerTask, rec: dict) -> FOLLayerRule:
+    prompt = np.asarray(rec["prompt"], dtype=np.int32)
+    segments = _split_prompt_segments(prompt, task.tokenizer.sep_token_id)
+    main_prompt = list(segments[-1])
+    sequent = task.tokenizer.decode_prompt(main_prompt)
+    applicable = _collect_applicable_demo_schemas(
+        rule_bank=task.rule_bank,
+        src_layer=int(rec["src_layer"]),
+        ants=sequent.ants,
+        max_unify_solutions=task.max_unify_solutions,
+    )
+    target_rule = _record_target_rule(rec)
+    for schema in applicable:
+        if _find_instantiation_for_rule(
+            template=schema,
+            lhs_ground=target_rule.lhs,
+            rhs_ground=target_rule.rhs,
+        ) is not None:
+            return schema
+    raise AssertionError("Could not resolve oracle schema for sampled record.")
+
+
+def _record_has_demo_for_schema(task: FOLLayerTask, rec: dict, schema: FOLLayerRule) -> bool:
+    prompt = np.asarray(rec["prompt"], dtype=np.int32)
+    segments = _split_prompt_segments(prompt, task.tokenizer.sep_token_id)
+    for demo in segments[:-1]:
+        lhs_atoms, rhs_atoms = task.tokenizer.decode_completion_clause(
+            list(demo) + [int(task.tokenizer.eot_token_id)]
+        )
+        if _find_instantiation_for_rule(
+            template=schema,
+            lhs_ground=lhs_atoms,
+            rhs_ground=rhs_atoms,
+        ) is not None:
+            return True
+    return False
+
+
 def test_layer_fol_task_offline_autoreg(tmp_path: Path) -> None:
     distance_dir = tmp_path / "distance_001"
     distance_dir.mkdir(parents=True)
@@ -564,6 +616,13 @@ def test_layer_fol_task_rejects_min_n_demos_greater_than_max_n_demos() -> None:
         FOLLayerTask(mode="online", max_n_demos=1, min_n_demos=2)
 
 
+def test_layer_fol_task_include_oracle_requires_positive_demo_bounds() -> None:
+    with pytest.raises(ValueError, match="max_n_demos"):
+        FOLLayerTask(mode="online", max_n_demos=0, include_oracle=True)
+    with pytest.raises(ValueError, match="min_n_demos"):
+        FOLLayerTask(mode="online", max_n_demos=1, min_n_demos=0, include_oracle=True)
+
+
 def test_layer_fol_task_online_sampling_prepends_demos_when_enabled() -> None:
     task = FOLLayerTask(
         distance_range=(1, 2),
@@ -820,6 +879,33 @@ def test_layer_fol_task_online_sampling_demo_schemas_are_applicable() -> None:
             assert is_from_applicable_schema
 
 
+def test_layer_fol_task_online_sampling_include_oracle_guarantees_oracle_demo() -> None:
+    task = FOLLayerTask(
+        distance_range=(1, 2),
+        batch_size=1,
+        mode="online",
+        seed=183,
+        n_layers=6,
+        predicates_per_layer=4,
+        rules_per_transition=8,
+        arity_max=3,
+        vars_per_rule_max=4,
+        constants=("a", "b", "c", "d"),
+        k_in_max=2,
+        k_out_max=2,
+        initial_ant_max=3,
+        min_n_demos=3,
+        max_n_demos=3,
+        include_oracle=True,
+        online_prefetch_backend="sync",
+    )
+
+    for _ in range(30):
+        rec = task._sample_online_record()
+        oracle_schema = _record_oracle_schema(task, rec)
+        assert _record_has_demo_for_schema(task, rec, oracle_schema)
+
+
 def test_layer_fol_task_online_prefetch_enabled_by_default() -> None:
     task = FOLLayerTask(
         distance_range=(1, 2),
@@ -848,6 +934,37 @@ def test_layer_fol_task_online_prefetch_enabled_by_default() -> None:
         assert ys.shape[0] == 4
     finally:
         task.close()
+
+
+def test_layer_fol_task_online_prefetch_thread_include_oracle_samples() -> None:
+    with FOLLayerTask(
+        distance_range=(1, 2),
+        batch_size=2,
+        mode="online",
+        seed=142,
+        n_layers=6,
+        predicates_per_layer=4,
+        rules_per_transition=8,
+        arity_max=3,
+        vars_per_rule_max=4,
+        constants=("a", "b", "c"),
+        k_in_max=2,
+        k_out_max=2,
+        initial_ant_max=3,
+        min_n_demos=2,
+        max_n_demos=2,
+        include_oracle=True,
+        online_prefetch_backend="thread",
+        online_prefetch_workers=1,
+        online_prefetch_buffer_size=4,
+    ) as task:
+        assert task.online_prefetch_enabled
+        assert task._online_prefetch_buffer is not None
+        records = task._online_prefetch_buffer.take(4)
+        assert records
+        for rec in records:
+            oracle_schema = _record_oracle_schema(task, rec)
+            assert _record_has_demo_for_schema(task, rec, oracle_schema)
 
 
 def test_layer_fol_task_online_prefetch_server_backend_samples() -> None:
@@ -1196,6 +1313,29 @@ def test_layer_fol_task_split_eval_demo_schemas_are_applicable(tmp_path: Path) -
             )
             assert is_from_applicable_schema
     assert saw_demo
+
+
+def test_layer_fol_task_split_eval_include_oracle_guarantees_oracle_demo(tmp_path: Path) -> None:
+    split_path = _write_depth3_split_bundle(tmp_path, seed=2061)
+    task = FOLLayerTask(
+        mode="online",
+        task_split="depth3_icl_transfer",
+        split_role="eval",
+        split_rule_bundle_path=split_path,
+        distance_range=(2, 2),
+        batch_size=1,
+        seed=2061,
+        initial_ant_max=3,
+        min_n_demos=2,
+        max_n_demos=2,
+        include_oracle=True,
+        online_prefetch_backend="sync",
+    )
+
+    for _ in range(20):
+        rec = task._sample_online_record()
+        oracle_schema = _record_oracle_schema(task, rec)
+        assert _record_has_demo_for_schema(task, rec, oracle_schema)
 
 
 def test_layer_fol_task_split_eval_prefetch_thread_forces_src_layer_0(tmp_path: Path) -> None:

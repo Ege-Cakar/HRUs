@@ -56,6 +56,7 @@ class NoSplitStrategy(FOLTaskSplitStrategy):
         max_unify_solutions: int,
         max_n_demos: int,
         min_n_demos: int,
+        include_oracle: bool,
         completion_format: str,
         rng: np.random.Generator,
     ) -> "NoSplitStrategy":
@@ -85,6 +86,7 @@ class NoSplitStrategy(FOLTaskSplitStrategy):
             max_unify_solutions=int(max_unify_solutions),
             max_n_demos=int(max_n_demos),
             min_n_demos=int(min_n_demos),
+            include_oracle=bool(include_oracle),
             forced_step_idx=None,
             completion_format=str(completion_format),
         )
@@ -116,6 +118,7 @@ class NoSplitStrategy(FOLTaskSplitStrategy):
                 int(self.sample_config.max_unify_solutions),
                 int(self.sample_config.max_n_demos),
                 int(self.sample_config.min_n_demos),
+                bool(self.sample_config.include_oracle),
                 None,
                 str(self.sample_config.completion_format),
             ),
@@ -138,6 +141,7 @@ class NoSplitStrategy(FOLTaskSplitStrategy):
             "max_unify_solutions": int(self.sample_config.max_unify_solutions),
             "max_n_demos": int(self.sample_config.max_n_demos),
             "min_n_demos": int(self.sample_config.min_n_demos),
+            "include_oracle": bool(self.sample_config.include_oracle),
             "forced_step_idx": None,
             "completion_format": str(self.sample_config.completion_format),
             "workers": int(workers),

@@ -132,6 +132,8 @@ def _base_record(
         max_n_demos=int(config.max_n_demos),
         min_n_demos=int(config.min_n_demos),
         max_unify_solutions=int(config.max_unify_solutions),
+        include_oracle=bool(config.include_oracle),
+        oracle_rule=sampled.step_rules[step_idx],
     )
     record = {
         "distance": int(distance),
@@ -259,6 +261,7 @@ def _init_fol_online_worker(
     max_unify_solutions: int,
     max_n_demos: int,
     min_n_demos: int,
+    include_oracle: bool,
     forced_step_idx: int | None,
     completion_format: str = "single",
 ) -> None:
@@ -278,6 +281,7 @@ def _init_fol_online_worker(
             max_unify_solutions=int(max_unify_solutions),
             max_n_demos=int(max_n_demos),
             min_n_demos=int(min_n_demos),
+            include_oracle=bool(include_oracle),
             forced_step_idx=(
                 None if forced_step_idx is None else int(forced_step_idx)
             ),
@@ -321,6 +325,7 @@ def _init_fol_online_fresh_worker(
     max_unify_solutions: int,
     max_n_demos: int,
     min_n_demos: int,
+    include_oracle: bool,
     forced_step_idx: int | None,
     completion_format: str,
     predicate_name_len: int = 1,
@@ -336,6 +341,7 @@ def _init_fol_online_fresh_worker(
             max_unify_solutions=int(max_unify_solutions),
             max_n_demos=int(max_n_demos),
             min_n_demos=int(min_n_demos),
+            include_oracle=bool(include_oracle),
             forced_step_idx=(
                 None if forced_step_idx is None else int(forced_step_idx)
             ),

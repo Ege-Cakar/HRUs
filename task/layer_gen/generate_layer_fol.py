@@ -442,6 +442,7 @@ def _server_worker_spec_from_config(config: dict) -> tuple[object, object, tuple
             int(config["max_unify_solutions"]),
             int(config["max_n_demos"]),
             int(config.get("min_n_demos", 0)),
+            bool(config.get("include_oracle", False)),
             (
                 None
                 if config.get("forced_step_idx", None) is None
@@ -468,6 +469,7 @@ def _server_worker_spec_from_config(config: dict) -> tuple[object, object, tuple
             int(config["max_unify_solutions"]),
             max_n_demos,
             min_n_demos,
+            bool(config.get("include_oracle", False)),
             (
                 None
                 if config.get("forced_step_idx", None) is None

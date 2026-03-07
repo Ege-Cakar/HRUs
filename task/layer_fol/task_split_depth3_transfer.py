@@ -48,6 +48,7 @@ class Depth3ICLTransferSplitStrategy(FOLTaskSplitStrategy):
         max_unify_solutions: int,
         max_n_demos: int,
         min_n_demos: int,
+        include_oracle: bool,
         completion_format: str,
     ) -> "Depth3ICLTransferSplitStrategy":
         if str(mode) != "online":
@@ -83,6 +84,7 @@ class Depth3ICLTransferSplitStrategy(FOLTaskSplitStrategy):
             max_unify_solutions=int(max_unify_solutions),
             max_n_demos=int(max_n_demos),
             min_n_demos=int(min_n_demos),
+            include_oracle=bool(include_oracle),
             forced_step_idx=online_forced_step_idx,
             completion_format=str(completion_format),
         )
@@ -116,6 +118,7 @@ class Depth3ICLTransferSplitStrategy(FOLTaskSplitStrategy):
                 int(self.sample_config.max_unify_solutions),
                 int(self.sample_config.max_n_demos),
                 int(self.sample_config.min_n_demos),
+                bool(self.sample_config.include_oracle),
                 (
                     None
                     if self.online_forced_step_idx is None
@@ -142,6 +145,7 @@ class Depth3ICLTransferSplitStrategy(FOLTaskSplitStrategy):
             "max_unify_solutions": int(self.sample_config.max_unify_solutions),
             "max_n_demos": int(self.sample_config.max_n_demos),
             "min_n_demos": int(self.sample_config.min_n_demos),
+            "include_oracle": bool(self.sample_config.include_oracle),
             "forced_step_idx": (
                 None
                 if self.online_forced_step_idx is None

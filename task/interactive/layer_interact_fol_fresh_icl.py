@@ -34,8 +34,8 @@ TASK_CFG = {
     "k_in_max": 3,
     "k_out_max": 3,
     "constants": ("a", "b", "c", "d"),
-    "initial_ant_max": 10,
-    "max_n_demos": 10,
+    "initial_ant_max": 1,
+    "max_n_demos": 1,
 }
 ENABLE_PLOT = True
 
@@ -111,8 +111,9 @@ train_task = FOLLayerTask(
     constants=tuple(str(c) for c in TASK_CFG["constants"]),
     initial_ant_max=int(TASK_CFG["initial_ant_max"]),
     max_n_demos=int(TASK_CFG["max_n_demos"]),
+    include_oracle=True,
     online_prefetch_backend="sync",
-    min_n_demos=4,
+    min_n_demos=1,
 )
 
 eval_task = FOLLayerTask(
@@ -132,6 +133,7 @@ eval_task = FOLLayerTask(
     constants=tuple(str(c) for c in TASK_CFG["constants"]),
     initial_ant_max=int(TASK_CFG["initial_ant_max"]),
     max_n_demos=int(TASK_CFG["max_n_demos"]),
+    include_oracle=False,
     online_prefetch_backend="sync",
 )
 

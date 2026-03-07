@@ -57,13 +57,20 @@ def augment_prompt_with_demos(
     max_n_demos: int,
     min_n_demos: int,
     max_unify_solutions: int,
+    include_oracle: bool = False,
+    oracle_rule: FOLLayerRule | None = None,
 ) -> FOLDemoAugmentationResult:
     max_n_demos = int(max_n_demos)
     min_n_demos = int(min_n_demos)
+    include_oracle = bool(include_oracle)
     if min_n_demos > max_n_demos:
         raise ValueError(
             f"min_n_demos must be <= max_n_demos, got {min_n_demos} > {max_n_demos}"
         )
+    if include_oracle and max_n_demos < 1:
+        raise ValueError("include_oracle=True requires max_n_demos >= 1.")
+    if include_oracle and oracle_rule is None:
+        raise ValueError("include_oracle=True requires oracle_rule.")
     if max_n_demos <= 0:
         return FOLDemoAugmentationResult(
             prompt_tokens=list(int(tok) for tok in prompt_tokens),
@@ -72,6 +79,8 @@ def augment_prompt_with_demos(
         )
 
     n_demos = int(rng.integers(min_n_demos, max_n_demos + 1))
+    if include_oracle and n_demos < 1:
+        raise ValueError("include_oracle=True requires sampling at least one demo.")
     if n_demos <= 0:
         return FOLDemoAugmentationResult(
             prompt_tokens=list(int(tok) for tok in prompt_tokens),
@@ -95,6 +104,8 @@ def augment_prompt_with_demos(
         rng=rng,
         schemas=schemas,
         n_demos=n_demos,
+        include_oracle=include_oracle,
+        oracle_rule=oracle_rule,
     )
     if not sampled_schemas:
         return FOLDemoAugmentationResult(
@@ -135,6 +146,8 @@ def _augment_prompt_with_demos(
     max_n_demos: int,
     min_n_demos: int,
     max_unify_solutions: int,
+    include_oracle: bool = False,
+    oracle_rule: FOLLayerRule | None = None,
 ) -> list[int]:
     return augment_prompt_with_demos(
         prompt_tokens=prompt_tokens,
@@ -146,6 +159,8 @@ def _augment_prompt_with_demos(
         max_n_demos=max_n_demos,
         min_n_demos=min_n_demos,
         max_unify_solutions=max_unify_solutions,
+        include_oracle=include_oracle,
+        oracle_rule=oracle_rule,
     ).prompt_tokens
 
 
@@ -219,12 +234,74 @@ def _sample_demo_schemas_with_replacement(
     rng: np.random.Generator,
     schemas: list[FOLLayerRule],
     n_demos: int,
+    include_oracle: bool = False,
+    oracle_rule: FOLLayerRule | None = None,
 ) -> list[FOLLayerRule]:
     if n_demos < 1 or not schemas:
         return []
 
-    picks = rng.integers(0, len(schemas), size=int(n_demos))
-    return [schemas[int(idx)] for idx in picks]
+    if not include_oracle:
+        picks = rng.integers(0, len(schemas), size=int(n_demos))
+        return [schemas[int(idx)] for idx in picks]
+
+    if oracle_rule is None:
+        raise ValueError("include_oracle=True requires oracle_rule.")
+
+    oracle_schema = _find_matching_demo_schema_for_rule(
+        schemas=schemas,
+        oracle_rule=oracle_rule,
+    )
+    if oracle_schema is None:
+        raise RuntimeError("Oracle rule schema was not found among applicable demo schemas.")
+
+    sampled = [oracle_schema]
+    if int(n_demos) > 1:
+        picks = rng.integers(0, len(schemas), size=int(n_demos) - 1)
+        sampled.extend(schemas[int(idx)] for idx in picks)
+    order = rng.permutation(len(sampled))
+    return [sampled[int(idx)] for idx in order]
+
+
+def _find_matching_demo_schema_for_rule(
+    *,
+    schemas: list[FOLLayerRule],
+    oracle_rule: FOLLayerRule,
+) -> FOLLayerRule | None:
+    for schema in schemas:
+        if _find_demo_schema_instantiation(
+            schema=schema,
+            ground_rule=oracle_rule,
+        ) is not None:
+            return schema
+    return None
+
+
+def _find_demo_schema_instantiation(
+    *,
+    schema: FOLLayerRule,
+    ground_rule: FOLLayerRule,
+) -> dict[str, str] | None:
+    if int(schema.src_layer) != int(ground_rule.src_layer):
+        return None
+    if int(schema.dst_layer) != int(ground_rule.dst_layer):
+        return None
+    if len(schema.lhs) != len(ground_rule.lhs):
+        return None
+    if len(schema.rhs) != len(ground_rule.rhs):
+        return None
+
+    subst: dict[str, str] = {}
+    for templ_atom, ground_atom in zip(schema.lhs, ground_rule.lhs):
+        maybe = _unify_template_atom_with_ground(templ_atom, ground_atom, subst)
+        if maybe is None:
+            return None
+        subst = maybe
+    for templ_atom, ground_atom in zip(schema.rhs, ground_rule.rhs):
+        maybe = _unify_template_atom_with_ground(templ_atom, ground_atom, subst)
+        if maybe is None:
+            return None
+        subst = maybe
+    return subst
 
 
 def _instantiate_demo_schema_with_random_constants(
@@ -274,6 +351,7 @@ class FOLDemoAugmentedAdapter:
         min_n_demos: int,
         max_n_demos: int,
         max_unify_solutions: int,
+        include_oracle: bool = False,
     ) -> None:
         self.base_adapter = base_adapter
         self.rule_bank = rule_bank
@@ -281,10 +359,15 @@ class FOLDemoAugmentedAdapter:
         self.min_n_demos = int(min_n_demos)
         self.max_n_demos = int(max_n_demos)
         self.max_unify_solutions = int(max_unify_solutions)
+        self.include_oracle = bool(include_oracle)
         self._last_demo_rules: list[FOLLayerRule] = []
+        self._oracle_rule: FOLLayerRule | None = None
 
     def get_last_demo_rules(self) -> list[FOLLayerRule]:
         return list(self._last_demo_rules)
+
+    def set_oracle_rule(self, oracle_rule: FOLLayerRule | None) -> None:
+        self._oracle_rule = oracle_rule
 
     def predict_completion(
         self,
@@ -309,11 +392,16 @@ class FOLDemoAugmentedAdapter:
             rng = np.random.default_rng()
 
         prompt = np.asarray(prompt_tokens, dtype=np.int32).tolist()
+        oracle_rule = self._oracle_rule
+        self._oracle_rule = None
         try:
             _, sequent, src_layer, _ = extract_prompt_info_from_row_tokens(
                 np.asarray(prompt, dtype=np.int32),
                 tokenizer=self.tokenizer,
             )
+        except ValueError:
+            self._last_demo_rules = []
+        else:
             augmented = augment_prompt_with_demos(
                 prompt_tokens=prompt,
                 rule_bank=self.rule_bank,
@@ -324,11 +412,11 @@ class FOLDemoAugmentedAdapter:
                 min_n_demos=self.min_n_demos,
                 max_n_demos=self.max_n_demos,
                 max_unify_solutions=self.max_unify_solutions,
+                include_oracle=self.include_oracle,
+                oracle_rule=oracle_rule,
             )
             prompt = augmented.prompt_tokens
             self._last_demo_rules = list(augmented.demo_schemas)
-        except ValueError:
-            self._last_demo_rules = []
 
         return self.base_adapter.predict_completion(
             model=model,

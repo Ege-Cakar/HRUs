@@ -789,6 +789,12 @@ all_cases = split_cases(all_cases, RUN_SPLIT, shuffle_seed=200)
 print("CASES IN THIS RUN:", len(all_cases))
 print("CASE NAMES", [case.name for case in all_cases])
 
+# <codecell>
+c = all_cases[0]
+print(c.train_task._base_bank.transition_rules(1))
+print(c.test_task._base_bank.transition_rules(1))
+
+
 
 # <codecell>
 rows = []
