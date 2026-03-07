@@ -5,11 +5,33 @@ from __future__ import annotations
 from collections import deque
 from concurrent.futures import FIRST_COMPLETED, Executor, Future, wait
 import os
+import sys
 from typing import Callable
 
 
 DEFAULT_PREFETCH_BACKEND = "process"
 VALID_PREFETCH_BACKENDS = ("process", "thread", "sync")
+
+
+def warn_backend_change(
+    *,
+    requested_backend: str,
+    resolved_backend: str,
+    context: str,
+    detail: str | None = None,
+) -> None:
+    requested_backend = str(requested_backend)
+    resolved_backend = str(resolved_backend)
+    if requested_backend == resolved_backend:
+        return
+
+    message = (
+        f"warn: {context} backend changed from "
+        f"{requested_backend!r} to {resolved_backend!r}"
+    )
+    if detail:
+        message += f" ({detail})"
+    print(message, file=sys.stderr)
 
 
 def resolve_online_prefetch_config(
@@ -63,14 +85,32 @@ def create_executor_with_fallback(
         try:
             return "thread", make_thread_executor()
         except Exception:
+            warn_backend_change(
+                requested_backend="thread",
+                resolved_backend="sync",
+                context="online prefetch",
+                detail="thread executor initialization failed",
+            )
             return "sync", None
     if backend == "process":
         try:
             return "process", make_process_executor()
         except Exception:
             try:
+                warn_backend_change(
+                    requested_backend="process",
+                    resolved_backend="thread",
+                    context="online prefetch",
+                    detail="process executor initialization failed",
+                )
                 return "thread", make_thread_executor()
             except Exception:
+                warn_backend_change(
+                    requested_backend="process",
+                    resolved_backend="sync",
+                    context="online prefetch",
+                    detail="process and thread executor initialization failed",
+                )
                 return "sync", None
 
     raise ValueError(

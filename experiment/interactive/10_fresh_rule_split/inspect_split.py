@@ -46,9 +46,9 @@ SET_DIR.mkdir(parents=True, exist_ok=True)
 
 FRESH_ICL_CFG = {
     "seed": 2043,
-    "predicates_per_layer": 8,
-    "rules_per_transition": 16,
-    "fresh_icl_n_predicates": 8,
+    "predicates_per_layer": 16,
+    "rules_per_transition": 64,
+    "fresh_icl_n_predicates": 64,
     "arity_max": 0,
     "vars_per_rule_max": 6,
     "k_in_max": 1,
@@ -238,13 +238,13 @@ print("dims_eval:", dims_eval)
 print(f"N_VOCAB={N_VOCAB}  N_SEQ={N_SEQ}  MAX_COMPLETION_LEN={MAX_COMPLETION_LEN}")
 
 TRAIN_CFG = {
-    "n_layers": 2,
-    "n_hidden": 4096,
-    "n_heads": 64,
+    "n_layers": 4,
+    "n_hidden": 256,
+    "n_heads": 4,
     # "lr": 5e-4,
-    "lr": warmup_cosine_schedule(1e-4, 100_000, warmup_frac=0.05),
-    "train_iters": 100_000,
-    "test_every": 1000,
+    "lr": warmup_cosine_schedule(1e-4, 1000, warmup_frac=0.05),
+    "train_iters": 1000,
+    "test_every": 10,
     "test_iters": 1,
     "batch_size": 32,
     "train_max_n_demos": int(TASK_CFG["train_max_n_demos"]),
@@ -277,7 +277,8 @@ train_task_ar = FOLLayerTask(
     constants=tuple(str(c) for c in FRESH_ICL_CFG["constants"]),
     k_in_max=int(FRESH_ICL_CFG["k_in_max"]),
     k_out_max=int(FRESH_ICL_CFG["k_out_max"]),
-    arity_min=0
+    arity_min=0,
+    predicate_name_len=4
 )
 
 eval_task_ar = FOLLayerTask(
@@ -302,7 +303,8 @@ eval_task_ar = FOLLayerTask(
     constants=tuple(str(c) for c in FRESH_ICL_CFG["constants"]),
     k_in_max=int(FRESH_ICL_CFG["k_in_max"]),
     k_out_max=int(FRESH_ICL_CFG["k_out_max"]),
-    arity_min=0
+    arity_min=0,
+    predicate_name_len=4
 )
 
 # <codecell>
@@ -582,7 +584,7 @@ def preview_rollout(
 ):
     for i in range(n_examples):
         fresh_preds = generate_fresh_predicate_names(
-            int(FRESH_ICL_CFG["fresh_icl_n_predicates"]), rng
+            int(FRESH_ICL_CFG["fresh_icl_n_predicates"]), rng, name_len=4,
         )
         temp_bank = build_fresh_layer0_bank(
             base_bank=base_bank,

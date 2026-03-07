@@ -244,6 +244,11 @@ def init_server_prefetch(
     repo_root: Path,
 ) -> PrefetchSetup:
     client = _FOLOnlineSamplerServerClient(config=server_config, cwd=repo_root)
+    online_prefetch_util.warn_backend_change(
+        requested_backend="process",
+        resolved_backend=str(client.resolved_backend),
+        context="sampler server prefetch",
+    )
     return PrefetchSetup(
         server_client=client,
         enabled=True,

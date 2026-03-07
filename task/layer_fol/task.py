@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sys
 from typing import Iterable
 
 import numpy as np
@@ -484,11 +485,19 @@ class FOLLayerTask:
                         raise RuntimeError("Server config unexpectedly unavailable.")
                     setup = init_server_prefetch(
                         server_config=server_config,
-                        repo_root=Path(__file__).resolve().parents[1],
+                        # The server is launched as `python -m task.layer_gen.generate_layer_fol`,
+                        # so the cwd must be the repository root (the parent of `task/`).
+                        repo_root=Path(__file__).resolve().parents[2],
                     )
                     self._apply_prefetch_setup(setup)
                     return
-                except Exception:
+                except Exception as err:
+                    print(
+                        "warn: online prefetch backend changed from 'server' to "
+                        "'thread' because sampler server initialization failed "
+                        f"({type(err).__name__}: {err})",
+                        file=sys.stderr,
+                    )
                     setup = init_executor_prefetch(
                         worker_spec=self._strategy.make_worker_spec(),
                         backend="thread",

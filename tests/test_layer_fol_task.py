@@ -1055,7 +1055,7 @@ def test_layer_fol_task_online_prefetch_rejects_invalid_config() -> None:
         FOLLayerTask(mode="online", online_prefetch_buffer_size=0)
 
 
-def test_layer_fol_task_online_prefetch_process_fallback(monkeypatch) -> None:
+def test_layer_fol_task_online_prefetch_process_fallback(monkeypatch, capsys) -> None:
     def _raise_process(*args, **kwargs):
         raise OSError("process pool unavailable")
 
@@ -1079,6 +1079,8 @@ def test_layer_fol_task_online_prefetch_process_fallback(monkeypatch) -> None:
     )
     try:
         assert task.online_prefetch_backend_resolved in {"thread", "sync"}
+        stderr = capsys.readouterr().err
+        assert "backend changed from 'process'" in stderr
         if task.online_prefetch_backend_resolved == "thread":
             assert task.online_prefetch_enabled
             xs, ys = next(task)
@@ -1088,7 +1090,7 @@ def test_layer_fol_task_online_prefetch_process_fallback(monkeypatch) -> None:
         task.close()
 
 
-def test_layer_fol_task_online_prefetch_server_fallback(monkeypatch) -> None:
+def test_layer_fol_task_online_prefetch_server_fallback(monkeypatch, capsys) -> None:
     class _FailServerClient:
         def __init__(self, **kwargs):
             raise RuntimeError("server unavailable")
@@ -1116,9 +1118,51 @@ def test_layer_fol_task_online_prefetch_server_fallback(monkeypatch) -> None:
     )
     try:
         assert task.online_prefetch_backend_resolved in {"thread", "sync"}
+        stderr = capsys.readouterr().err
+        assert "backend changed from 'server' to 'thread'" in stderr
         xs, ys = next(task)
         assert xs.shape[0] == 2
         assert ys.shape[0] == 2
+    finally:
+        task.close()
+
+
+def test_layer_fol_task_online_prefetch_server_internal_fallback_warns(monkeypatch, capsys) -> None:
+    class _ServerClientWithThreadFallback:
+        def __init__(self, **kwargs):
+            self.resolved_backend = "thread"
+
+        def take(self, n_records):
+            raise AssertionError("take should not be called in this test")
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(
+        "task.layer_fol.task_prefetch._FOLOnlineSamplerServerClient",
+        _ServerClientWithThreadFallback,
+    )
+    task = FOLLayerTask(
+        distance_range=(1, 2),
+        batch_size=2,
+        mode="online",
+        seed=167,
+        n_layers=6,
+        predicates_per_layer=4,
+        rules_per_transition=8,
+        arity_max=3,
+        vars_per_rule_max=4,
+        constants=("a", "b", "c"),
+        k_in_max=2,
+        k_out_max=2,
+        initial_ant_max=3,
+        online_prefetch_backend="server",
+        online_prefetch_workers=1,
+    )
+    try:
+        assert task.online_prefetch_backend_resolved == "server"
+        stderr = capsys.readouterr().err
+        assert "sampler server prefetch backend changed from 'process' to 'thread'" in stderr
     finally:
         task.close()
 
@@ -1570,7 +1614,7 @@ def test_layer_fol_task_fresh_icl_prefetch_server_backend_samples() -> None:
         task.close()
 
 
-def test_layer_fol_task_fresh_icl_prefetch_server_fallback(monkeypatch) -> None:
+def test_layer_fol_task_fresh_icl_prefetch_server_fallback(monkeypatch, capsys) -> None:
     class _FailServerClient:
         def __init__(self, **kwargs):
             raise RuntimeError("server unavailable")
@@ -1600,6 +1644,8 @@ def test_layer_fol_task_fresh_icl_prefetch_server_fallback(monkeypatch) -> None:
     )
     try:
         assert task.online_prefetch_backend_resolved in {"thread", "sync"}
+        stderr = capsys.readouterr().err
+        assert "backend changed from 'server' to 'thread'" in stderr
         xs, ys = next(task)
         assert xs.shape[0] == 2
         assert ys.shape[0] == 2

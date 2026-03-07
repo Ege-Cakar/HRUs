@@ -512,6 +512,11 @@ class _FOLSamplerServerState:
             make_thread_executor=_make_thread_executor,
         )
         self.resolved_backend = str(resolved_backend)
+        online_prefetch_util.warn_backend_change(
+            requested_backend="process",
+            resolved_backend=self.resolved_backend,
+            context="sampler server prefetch",
+        )
         if executor is None:
             init_worker_fn(*initargs)
             return
