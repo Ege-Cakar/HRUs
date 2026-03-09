@@ -137,7 +137,7 @@ g.set_axis_labels("Hidden dim", "Best joint acc")
 g.set_titles(col_template="{col_name} layers", row_template="train ≤ {row_name}")
 sns.move_legend(g, "upper left", bbox_to_anchor=(1.0, 1.0), frameon=True)
 g.figure.subplots_adjust(right=0.82)
-plt.savefig(OUT_DIR / "best_over_lr.svg", bbox_inches="tight")
+plt.savefig(OUT_DIR / "best_over_lr.png", bbox_inches="tight")
 
 # <codecell>
 # --- Supplementary: n_layers effect line plot ---
@@ -161,7 +161,7 @@ g2.set_axis_labels("Number of layers", "Mean best joint acc")
 g2.set_titles(col_template="train ≤ {col_name}")
 sns.move_legend(g2, "upper left", bbox_to_anchor=(1.0, 1.0), frameon=True)
 g2.figure.subplots_adjust(right=0.85)
-plt.savefig(OUT_DIR / "layers_effect.svg", bbox_inches="tight")
+plt.savefig(OUT_DIR / "layers_effect.png", bbox_inches="tight")
 
 # <codecell>
 baseline = plot_df[(plot_df["n_layers"] == 2) & (plot_df["n_heads"] == 8)].copy()
@@ -187,7 +187,7 @@ else:
         ax.set_xscale("log")
     sns.move_legend(g, "upper left", bbox_to_anchor=(1.0, 1.0), frameon=True)
     g.figure.subplots_adjust(right=0.82)
-    plt.savefig(OUT_DIR / "lr_sweep.svg", bbox_inches="tight")
+    plt.savefig(OUT_DIR / "lr_sweep.png", bbox_inches="tight")
 
 # <codecell>
 # --- Best model accuracy through time (per train_max) ---
@@ -241,4 +241,4 @@ else:
         g3.set_titles(col_template="train ≤ {col_name}")
         sns.move_legend(g3, "upper left", bbox_to_anchor=(1.0, 1.0), frameon=True)
         g3.figure.subplots_adjust(right=0.85)
-        plt.savefig(OUT_DIR / "best_through_time.svg", bbox_inches="tight")
+        plt.savefig(OUT_DIR / "best_through_time.png", bbox_inches="tight")

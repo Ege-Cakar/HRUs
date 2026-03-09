@@ -72,19 +72,19 @@ SWEEP_METRICS = [
 
 ROLE_METRIC_PLOT_GROUPS = [
     {
-        "filename": "role_demo_metrics_loss.svg",
+        "filename": "role_demo_metrics_loss.png",
         "title": "Loss by eval demos",
         "metrics": ["loss"],
         "sharey": False,
     },
     {
-        "filename": "role_demo_metrics_accuracy.svg",
+        "filename": "role_demo_metrics_accuracy.png",
         "title": "Accuracy metrics by eval demos",
         "metrics": ["token_acc", "final_token_acc", "seq_exact_acc"],
         "sharey": False,
     },
     {
-        "filename": "role_demo_metrics_rule_match_rates.svg",
+        "filename": "role_demo_metrics_rule_match_rates.png",
         "title": "Rule-match rates by eval demos",
         "metrics": [
             "valid_rule_rate",
@@ -98,7 +98,7 @@ ROLE_METRIC_PLOT_GROUPS = [
         "sharey": False,
     },
     {
-        "filename": "role_demo_metrics_first_transition_rates.svg",
+        "filename": "role_demo_metrics_first_transition_rates.png",
         "title": "First-transition rates by eval demos",
         "metrics": [
             "first_transition_rule_valid_rate",
@@ -112,7 +112,7 @@ ROLE_METRIC_PLOT_GROUPS = [
         "sharey": False,
     },
     {
-        "filename": "role_demo_metrics_rollout_rates.svg",
+        "filename": "role_demo_metrics_rollout_rates.png",
         "title": "Rollout rates and steps by eval demos",
         "metrics": [
             "rollout_success_rate",
@@ -125,7 +125,7 @@ ROLE_METRIC_PLOT_GROUPS = [
         "sharey": False,
     },
     {
-        "filename": "role_demo_metrics_rule_match_counts.svg",
+        "filename": "role_demo_metrics_rule_match_counts.png",
         "title": "Rule-match counts by eval demos",
         "metrics": [
             "n_rule_examples",
@@ -139,7 +139,7 @@ ROLE_METRIC_PLOT_GROUPS = [
         "sharey": False,
     },
     {
-        "filename": "role_demo_metrics_first_transition_counts.svg",
+        "filename": "role_demo_metrics_first_transition_counts.png",
         "title": "First-transition counts by eval demos",
         "metrics": [
             "first_transition_n_examples",
@@ -154,7 +154,7 @@ ROLE_METRIC_PLOT_GROUPS = [
         "sharey": False,
     },
     {
-        "filename": "role_demo_metrics_rollout_counts.svg",
+        "filename": "role_demo_metrics_rollout_counts.png",
         "title": "Rollout counts by eval demos",
         "metrics": ["rollout_n_examples"],
         "sharey": False,
@@ -604,27 +604,27 @@ def _save_aggregates_for_train_iters(
             _plot_role_demo_lines(
                 best_role_eval_demo_df=role_agg,
                 metric=metric,
-                out_path=out_dir / f"{role}_{metric}_vs_demo.svg",
+                out_path=out_dir / f"{role}_{metric}_vs_demo.png",
                 eval_role=role,
             )
         _plot_transfer_gap(
             best_role_eval_demo_df=role_agg,
             metric=metric,
-            out_path=out_dir / f"gap_{metric}_eval_minus_train.svg",
+            out_path=out_dir / f"gap_{metric}_eval_minus_train.png",
         )
 
     for role in ("train", "eval"):
         _plot_role_heatmap(
             best_role_eval_demo_df=role_agg,
             metric="first_transition_rule_reachable_rate",
-            out_path=out_dir / f"{role}_reachable_rate_heatmap.svg",
+            out_path=out_dir / f"{role}_reachable_rate_heatmap.png",
             eval_role=role,
         )
 
     _plot_role_heatmap(
         best_role_eval_demo_df=role_agg,
         metric="rollout_success_rate",
-        out_path=out_dir / "eval_rollout_success_heatmap.svg",
+        out_path=out_dir / "eval_rollout_success_heatmap.png",
         eval_role="eval",
     )
 
@@ -664,27 +664,27 @@ for metric in SWEEP_METRICS:
         _plot_role_demo_lines(
             best_role_eval_demo_df=best_role_eval_demo_df,
             metric=metric,
-            out_path=OUT_DIR / f"{role}_{metric}_vs_demo.svg",
+            out_path=OUT_DIR / f"{role}_{metric}_vs_demo.png",
             eval_role=role,
         )
     _plot_transfer_gap(
         best_role_eval_demo_df=best_role_eval_demo_df,
         metric=metric,
-        out_path=OUT_DIR / f"gap_{metric}_eval_minus_train.svg",
+        out_path=OUT_DIR / f"gap_{metric}_eval_minus_train.png",
     )
 
 for role in ("train", "eval"):
     _plot_role_heatmap(
         best_role_eval_demo_df=best_role_eval_demo_df,
         metric="first_transition_rule_reachable_rate",
-        out_path=OUT_DIR / f"{role}_reachable_rate_heatmap.svg",
+        out_path=OUT_DIR / f"{role}_reachable_rate_heatmap.png",
         eval_role=role,
     )
 
 _plot_role_heatmap(
     best_role_eval_demo_df=best_role_eval_demo_df,
     metric="rollout_success_rate",
-    out_path=OUT_DIR / "eval_rollout_success_heatmap.svg",
+    out_path=OUT_DIR / "eval_rollout_success_heatmap.png",
     eval_role="eval",
 )
 

@@ -50,19 +50,19 @@ ROLE_EVAL_DEMO_METRIC_COLS = [
 
 ROLE_METRIC_PLOT_GROUPS = [
     {
-        "filename": "role_demo_metrics_loss.svg",
+        "filename": "role_demo_metrics_loss.png",
         "title": "Loss by eval demos",
         "metrics": ["loss"],
         "sharey": False,
     },
     {
-        "filename": "role_demo_metrics_accuracy.svg",
+        "filename": "role_demo_metrics_accuracy.png",
         "title": "Token metrics by eval demos",
         "metrics": ["token_acc", "final_token_acc", "seq_exact_acc"],
         "sharey": False,
     },
     {
-        "filename": "role_demo_metrics_completion_rates.svg",
+        "filename": "role_demo_metrics_completion_rates.png",
         "title": "Completion-path rates by eval demos",
         "metrics": [
             "completion_success_rate",
@@ -75,7 +75,7 @@ ROLE_METRIC_PLOT_GROUPS = [
         "sharey": False,
     },
     {
-        "filename": "role_demo_metrics_rollout_rates.svg",
+        "filename": "role_demo_metrics_rollout_rates.png",
         "title": "Rollout rates by eval demos",
         "metrics": [
             "rollout_success_rate",
@@ -235,7 +235,7 @@ def _explode_role_eval_demo_rows(df: pd.DataFrame) -> pd.DataFrame:
 
 def _remove_top_level_figures(out_dir: Path) -> None:
     for path in out_dir.iterdir():
-        if path.is_file() and path.suffix.lower() in {".svg", ".png", ".pdf"}:
+        if path.is_file() and path.suffix.lower() in {".png", ".png", ".pdf"}:
             path.unlink()
 
 

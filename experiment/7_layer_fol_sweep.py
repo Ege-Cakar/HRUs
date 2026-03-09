@@ -82,13 +82,13 @@ DISTANCE_METRIC_COLS = [
 
 METRIC_PLOT_GROUPS = [
     {
-        "filename": "distance_metrics_loss.svg",
+        "filename": "distance_metrics_loss.png",
         "title": "Loss by distance",
         "metrics": ["loss"],
         "sharey": False,
     },
     {
-        "filename": "distance_metrics_accuracy.svg",
+        "filename": "distance_metrics_accuracy.png",
         "title": "Accuracy metrics by distance",
         "metrics": [
             "token_acc",
@@ -102,7 +102,7 @@ METRIC_PLOT_GROUPS = [
         "sharey": False,
     },
     {
-        "filename": "distance_metrics_rule_match_rates.svg",
+        "filename": "distance_metrics_rule_match_rates.png",
         "title": "Rule-match rates by distance",
         "metrics": [
             "valid_rule_rate",
@@ -116,7 +116,7 @@ METRIC_PLOT_GROUPS = [
         "sharey": False,
     },
     {
-        "filename": "distance_metrics_rollout_rates.svg",
+        "filename": "distance_metrics_rollout_rates.png",
         "title": "Rollout rates and steps by distance",
         "metrics": [
             "rollout_success_rate",
@@ -129,7 +129,7 @@ METRIC_PLOT_GROUPS = [
         "sharey": False,
     },
     {
-        "filename": "distance_metrics_rule_match_counts.svg",
+        "filename": "distance_metrics_rule_match_counts.png",
         "title": "Rule-match counts by distance",
         "metrics": [
             "n_rule_examples",
@@ -143,7 +143,7 @@ METRIC_PLOT_GROUPS = [
         "sharey": False,
     },
     {
-        "filename": "distance_metrics_rollout_counts.svg",
+        "filename": "distance_metrics_rollout_counts.png",
         "title": "Rollout counts by distance",
         "metrics": ["rollout_n_examples"],
         "sharey": False,
@@ -443,7 +443,7 @@ def _save_plots_for_train_max(
 ) -> None:
     out_dir = out_root / f"train_max_{int(train_max_distance):02d}"
     out_dir.mkdir(parents=True, exist_ok=True)
-    legacy_validity_bar = out_dir / "ood_rule_validity_bar.svg"
+    legacy_validity_bar = out_dir / "ood_rule_validity_bar.png"
     if legacy_validity_bar.exists():
         legacy_validity_bar.unlink()
 
@@ -472,7 +472,7 @@ def _save_plots_for_train_max(
     plt.xlabel("Layer distance")
     plt.ylabel("Rollout success")
     plt.title(f"Best per family (train distance <= {int(train_max_distance)})")
-    plt.savefig(out_dir / "rollout_success_best.svg", bbox_inches="tight")
+    plt.savefig(out_dir / "rollout_success_best.png", bbox_inches="tight")
 
     plt.figure(figsize=(6.3, 3.8))
     sns.lineplot(
@@ -486,7 +486,7 @@ def _save_plots_for_train_max(
     plt.xlabel("Layer distance")
     plt.ylabel("Final token accuracy")
     plt.title(f"Best per family token accuracy (train <= {int(train_max_distance)})")
-    plt.savefig(out_dir / "token_final_acc_best.svg", bbox_inches="tight")
+    plt.savefig(out_dir / "token_final_acc_best.png", bbox_inches="tight")
 
     plt.figure(figsize=(6.3, 3.8))
     sns.lineplot(
@@ -500,7 +500,7 @@ def _save_plots_for_train_max(
     plt.xlabel("Layer distance")
     plt.ylabel("Valid-rule rate")
     plt.title(f"Best per family valid-rule rate (train <= {int(train_max_distance)})")
-    plt.savefig(out_dir / "valid_rule_rate_by_distance_best.svg", bbox_inches="tight")
+    plt.savefig(out_dir / "valid_rule_rate_by_distance_best.png", bbox_inches="tight")
 
     best_rows = best_df.loc[best_df["train_max_distance"] == float(train_max_distance)].copy()
     best_rows = best_rows.sort_values("model_family")
@@ -511,7 +511,7 @@ def _save_plots_for_train_max(
     plt.ylabel("OOD rollout success")
     plt.xticks(rotation=15)
     plt.title(f"OOD (> {int(train_max_distance)}) best config per family")
-    plt.savefig(out_dir / "ood_rollout_bar.svg", bbox_inches="tight")
+    plt.savefig(out_dir / "ood_rollout_bar.png", bbox_inches="tight")
 
     error_breakdown = _failed_error_breakdown_by_distance(by_distance_best)
     if not error_breakdown.empty:
@@ -536,7 +536,7 @@ def _save_plots_for_train_max(
         )
         g.fig.subplots_adjust(top=0.8)
         g.savefig(
-            out_dir / "rollout_error_breakdown_failed_only_by_distance_best.svg",
+            out_dir / "rollout_error_breakdown_failed_only_by_distance_best.png",
             bbox_inches="tight",
         )
         plt.close(g.fig)

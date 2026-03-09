@@ -49,3 +49,6 @@ hf = [
     "mamba-ssm[causal-conv1d]>=2.0",
     "flash-attn>=2.5",
 ]
+
+[tool.uv.extra-build-dependencies]
+flash-attn = ["torch"]

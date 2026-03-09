@@ -430,7 +430,7 @@ def _plot_reachable_heatmaps(
         plt.xlabel("Eval max_n_demos")
         plt.ylabel("Distance")
         plt.title(f"{family} reachable-rate heatmap (train <= {int(train_max_distance)})")
-        plt.savefig(out_dir / f"reachable_heatmap_{family}.svg", bbox_inches="tight")
+        plt.savefig(out_dir / f"reachable_heatmap_{family}.png", bbox_inches="tight")
         plt.close()
 
 
@@ -462,13 +462,13 @@ def _save_plots_for_train_max(
         _plot_ood_demo_sweep(
             ood_by_demo=ood_by_demo,
             metric=metric,
-            out_path=out_dir / f"ood_{metric}_vs_eval_demo.svg",
+            out_path=out_dir / f"ood_{metric}_vs_eval_demo.png",
             train_max_distance=train_max_distance,
         )
         _plot_distance_by_demo(
             best_distance_eval_df=best_distance_eval_df,
             metric=metric,
-            out_path=out_dir / f"distance_{metric}_by_eval_demo.svg",
+            out_path=out_dir / f"distance_{metric}_by_eval_demo.png",
             train_max_distance=train_max_distance,
         )
 
@@ -536,7 +536,7 @@ def _plot_sweep_vs_train_distance(
         g.set_titles("{col_name}")
         g.fig.suptitle(f"OOD {metric} vs eval demos across train distances")
         g.fig.subplots_adjust(top=0.84)
-        g.savefig(out_root / f"ood_{metric}_vs_eval_demo_across_train_max.svg", bbox_inches="tight")
+        g.savefig(out_root / f"ood_{metric}_vs_eval_demo_across_train_max.png", bbox_inches="tight")
         plt.close(g.fig)
 
 
@@ -653,7 +653,7 @@ def _save_aggregates_for_train_iters(
                 _plot_ood_demo_sweep(
                     ood_by_demo=ood_by_demo,
                     metric=metric,
-                    out_path=train_max_dir / f"ood_{metric}_vs_eval_demo.svg",
+                    out_path=train_max_dir / f"ood_{metric}_vs_eval_demo.png",
                     train_max_distance=train_max_distance,
                 )
 
@@ -661,7 +661,7 @@ def _save_aggregates_for_train_iters(
             _plot_distance_by_demo(
                 best_distance_eval_df=dist_train_max,
                 metric=metric,
-                out_path=train_max_dir / f"distance_{metric}_by_eval_demo.svg",
+                out_path=train_max_dir / f"distance_{metric}_by_eval_demo.png",
                 train_max_distance=train_max_distance,
             )
         _plot_reachable_heatmaps(
@@ -679,7 +679,7 @@ def _save_aggregates_for_train_iters(
         _plot_ood_demo_sweep_across_train_max(
             ood_by_demo=ood_all,
             metric=metric,
-            out_path=out_dir / f"ood_{metric}_vs_eval_demo_across_train_max.svg",
+            out_path=out_dir / f"ood_{metric}_vs_eval_demo_across_train_max.png",
         )
 
 

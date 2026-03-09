@@ -128,7 +128,7 @@ g.set_axis_labels("Hidden dim", "OOD joint acc")
 g.set_titles(col_template="{col_name}", row_template="train <= {row_name}")
 sns.move_legend(g, "upper left", bbox_to_anchor=(1.0, 1.0), frameon=True)
 g.figure.subplots_adjust(right=0.84)
-plt.savefig(OUT_DIR / "ood_joint_by_family.svg", bbox_inches="tight")
+plt.savefig(OUT_DIR / "ood_joint_by_family.png", bbox_inches="tight")
 
 # <codecell>
 # Calibration and NLL comparison.
@@ -153,7 +153,7 @@ g2.set_axis_labels("", "Value")
 g2.set_titles(col_template="train <= {col_name}")
 for ax in g2.axes.flat:
     ax.tick_params(axis="x", rotation=20)
-plt.savefig(OUT_DIR / "calibration_nll_by_family.svg", bbox_inches="tight")
+plt.savefig(OUT_DIR / "calibration_nll_by_family.png", bbox_inches="tight")
 
 # <codecell>
 # Build predictive dataset: one row per architecture/split with normative + transformer metrics.
@@ -200,7 +200,7 @@ if needed.issubset(set(pivot.columns)):
         ax.set_xlabel("Transformer OOD joint acc (true)")
         ax.set_ylabel("Predicted")
         ax.set_title(f"Ridge predictor: MSE={mse:.4f}, R2={r2:.3f}")
-        plt.savefig(OUT_DIR / "predict_transformer_joint.svg", bbox_inches="tight")
+        plt.savefig(OUT_DIR / "predict_transformer_joint.png", bbox_inches="tight")
         pred_points.to_csv(OUT_DIR / "predictor_holdout_points.csv", index=False)
         print(f"Predictor metrics: MSE={mse:.6f}, R2={r2:.4f}")
     else:

@@ -65,7 +65,8 @@ MODEL_CONFIGS = [
 ]
 
 BASE_NUM_PRED = 16
-SWEEP_MID_PRED = [64, 128, 256]
+# SWEEP_MID_PRED = [64, 128, 256]
+SWEEP_MID_PRED = [256]
 SWEEP_TASK_SHAPES = [
     {
         "predicates_per_layer": (1, p1, BASE_NUM_PRED),

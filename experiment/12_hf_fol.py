@@ -24,7 +24,7 @@ OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 def _remove_top_level_figures(out_dir: Path) -> None:
     for path in out_dir.iterdir():
-        if path.is_file() and path.suffix.lower() in {".svg", ".png", ".pdf"}:
+        if path.is_file() and path.suffix.lower() in {".png", ".png", ".pdf"}:
             path.unlink()
 
 
@@ -276,7 +276,7 @@ def _save_aggregates_for_train_iters(
                 history_df=history_agg,
                 split_name=split_name,
                 metric=metric,
-                out_path=out_dir / f"{split_name}_{metric}_by_step.svg",
+                out_path=out_dir / f"{split_name}_{metric}_by_step.png",
                 title=f"{split_name.capitalize()} {metric} by step (train_iters={int(train_iters)})",
             )
 

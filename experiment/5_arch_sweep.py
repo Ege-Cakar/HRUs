@@ -192,7 +192,7 @@ def _save_plots_for_train_max(
     plt.xlabel("Sequent size")
     plt.ylabel("Comparison accuracy")
     plt.title(f"Best per family (train sizes <= {int(train_max_size)})")
-    plt.savefig(out_dir / "length_generalization_best.svg", bbox_inches="tight")
+    plt.savefig(out_dir / "length_generalization_best.png", bbox_inches="tight")
 
     best_rows = best_df.loc[best_df["train_max_size"] == float(train_max_size)].copy()
     best_rows = best_rows.sort_values("model_family")
@@ -203,7 +203,7 @@ def _save_plots_for_train_max(
     plt.ylabel("OOD comparison accuracy")
     plt.xticks(rotation=15)
     plt.title(f"OOD (> {int(train_max_size)}) best config per family")
-    plt.savefig(out_dir / "ood_best_bar.svg", bbox_inches="tight")
+    plt.savefig(out_dir / "ood_best_bar.png", bbox_inches="tight")
 
 
 df = collate_dfs("remote/5_arch_sweep/set", show_progress=True)
