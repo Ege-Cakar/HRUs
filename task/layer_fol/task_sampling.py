@@ -137,6 +137,8 @@ def _base_record(
         demo_distribution=str(config.demo_distribution),
         demo_distribution_alpha=float(config.demo_distribution_alpha),
         goal_atom=sampled.goal_atom,
+        demo_ranked=bool(config.demo_ranked),
+        demo_all=bool(config.demo_all),
     )
     record = {
         "distance": int(distance),
@@ -272,6 +274,7 @@ def _init_fol_online_worker(
     include_oracle: bool,
     forced_step_idx: int | None,
     completion_format: str = "single",
+    demo_all: bool = False,
 ) -> None:
     bank = FOLRuleBank.from_dict(bank_payload)
     if tokenizer_payload is None:
@@ -296,6 +299,8 @@ def _init_fol_online_worker(
             completion_format=str(completion_format),
             demo_distribution="uniform",
             demo_distribution_alpha=1.0,
+            demo_ranked=True,
+            demo_all=bool(demo_all),
         ),
         "rng": np.random.default_rng(_worker_seed(seed_base)),
     }
@@ -341,6 +346,8 @@ def _init_fol_online_fresh_worker(
     predicate_name_len: int = 4,
     demo_distribution: str = "uniform",
     demo_distribution_alpha: float = 1.0,
+    demo_ranked: bool = True,
+    demo_all: bool = False,
 ) -> None:
     _FOL_ONLINE_WORKER_LOCAL.state = {
         "base_bank": FOLRuleBank.from_dict(base_bank_payload),
@@ -367,6 +374,8 @@ def _init_fol_online_fresh_worker(
             predicate_name_len=int(predicate_name_len),
             demo_distribution=str(demo_distribution),
             demo_distribution_alpha=float(demo_distribution_alpha),
+            demo_ranked=bool(demo_ranked),
+            demo_all=bool(demo_all),
         ),
         "rng": np.random.default_rng(_worker_seed(seed_base)),
     }

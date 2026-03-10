@@ -58,6 +58,7 @@ class NoSplitStrategy(FOLTaskSplitStrategy):
         include_oracle: bool,
         completion_format: str,
         rng: np.random.Generator,
+        demo_all: bool = False,
     ) -> "NoSplitStrategy":
         if rule_bank_path is not None:
             rule_bank = load_fol_rule_bank(Path(rule_bank_path))
@@ -90,6 +91,8 @@ class NoSplitStrategy(FOLTaskSplitStrategy):
             completion_format=str(completion_format),
             demo_distribution="uniform",
             demo_distribution_alpha=1.0,
+            demo_ranked=True,
+            demo_all=bool(demo_all),
         )
         return cls(
             rule_bank=rule_bank,
@@ -122,6 +125,7 @@ class NoSplitStrategy(FOLTaskSplitStrategy):
                 bool(self.sample_config.include_oracle),
                 None,
                 str(self.sample_config.completion_format),
+                bool(self.sample_config.demo_all),
             ),
         )
 
@@ -145,6 +149,7 @@ class NoSplitStrategy(FOLTaskSplitStrategy):
             "include_oracle": bool(self.sample_config.include_oracle),
             "forced_step_idx": None,
             "completion_format": str(self.sample_config.completion_format),
+            "demo_all": bool(self.sample_config.demo_all),
             "workers": int(workers),
             "buffer_size": int(buffer_size),
             "batch_size": int(batch_size),

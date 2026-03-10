@@ -91,6 +91,8 @@ class FOLLayerTask:
         predicate_name_len=4,
         demo_distribution="uniform",
         demo_distribution_alpha=1.0,
+        demo_ranked=True,
+        demo_all=False,
     ) -> None:
         self.mode = str(mode)
         if self.mode not in {"offline", "online"}:
@@ -202,9 +204,9 @@ class FOLLayerTask:
                 f"max_unify_solutions must be >= 1, got {self.max_unify_solutions}"
             )
         self.demo_distribution = str(demo_distribution)
-        if self.demo_distribution not in {"uniform", "zipf"}:
+        if self.demo_distribution not in {"uniform", "zipf", "zipf_headless"}:
             raise ValueError(
-                "demo_distribution must be 'uniform' or 'zipf', "
+                "demo_distribution must be 'uniform', 'zipf', or 'zipf_headless', "
                 f"got {self.demo_distribution!r}"
             )
         self.demo_distribution_alpha = float(demo_distribution_alpha)
@@ -212,6 +214,8 @@ class FOLLayerTask:
             raise ValueError(
                 f"demo_distribution_alpha must be >= 0, got {self.demo_distribution_alpha}"
             )
+        self.demo_ranked = bool(demo_ranked)
+        self.demo_all = bool(demo_all)
         self._online_prefetch_requested = bool(online_prefetch)
         self._online_prefetch_backend_requested = str(online_prefetch_backend)
         self._online_prefetch_workers_requested = (
@@ -326,6 +330,7 @@ class FOLLayerTask:
                 include_oracle=bool(self.include_oracle),
                 completion_format=str(self.completion_format),
                 rng=self._rng,
+                demo_all=bool(self.demo_all),
             )
         if self.task_split == "depth3_icl_transfer":
             return Depth3ICLTransferSplitStrategy.build(
@@ -342,6 +347,7 @@ class FOLLayerTask:
                 min_n_demos=int(self.min_n_demos),
                 include_oracle=bool(self.include_oracle),
                 completion_format=str(self.completion_format),
+                demo_all=bool(self.demo_all),
             )
         return Depth3FreshICLSplitStrategy.build(
             mode=self.mode,
@@ -372,6 +378,8 @@ class FOLLayerTask:
             rng=self._rng,
             demo_distribution=str(self.demo_distribution),
             demo_distribution_alpha=float(self.demo_distribution_alpha),
+            demo_ranked=bool(self.demo_ranked),
+            demo_all=bool(self.demo_all),
         )
 
     def _adopt_strategy_state(self, strategy: FOLTaskSplitStrategy) -> None:

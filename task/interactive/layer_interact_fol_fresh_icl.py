@@ -114,8 +114,9 @@ train_task = FOLLayerTask(
     include_oracle=True,
     online_prefetch_backend="sync",
     min_n_demos=8,
-    demo_distribution='zipf',
-    demo_distribution_alpha=0
+    demo_distribution='zipf_headless',
+    demo_distribution_alpha=0,
+    demo_all=True
 )
 
 eval_task = FOLLayerTask(

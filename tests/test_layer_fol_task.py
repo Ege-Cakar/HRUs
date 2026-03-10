@@ -2190,3 +2190,199 @@ def test_zipf_alpha_0_samples_uniformly_across_ranks() -> None:
     # Each rank should get roughly 1000/4000 = 25%
     for k in [1, 2, 3, 4]:
         assert 700 < counts[k] < 1300, f"Rank {k} count {counts[k]} not near 1000"
+
+
+def test_zipf_headless_excludes_rank_1() -> None:
+    """headless=True, include_oracle=False → no rank-1 in results."""
+    from task.layer_fol.demos import _sample_demo_schemas_zipf
+
+    r1 = FOLLayerRule(src_layer=0, dst_layer=1, lhs=(FOLAtom("A", ()),), rhs=(FOLAtom("M", ()),))
+    r2 = FOLLayerRule(src_layer=0, dst_layer=1, lhs=(FOLAtom("B", ()),), rhs=(FOLAtom("N", ()),))
+    r4 = FOLLayerRule(src_layer=0, dst_layer=1, lhs=(FOLAtom("D", ()),), rhs=(FOLAtom("Q", ()),))
+
+    ranked = {1: [r1], 2: [r2], 3: [], 4: [r4]}
+    rng = np.random.default_rng(42)
+    schemas, ranks = _sample_demo_schemas_zipf(
+        rng=rng,
+        ranked_rules=ranked,
+        n_demos=100,
+        alpha=1.0,
+        include_oracle=False,
+        oracle_rule=None,
+        headless=True,
+    )
+    assert len(schemas) == 100
+    assert len(ranks) == 100
+    assert 1 not in ranks, f"Rank 1 should not appear in headless mode, got ranks={set(ranks)}"
+
+
+def test_zipf_headless_with_oracle_still_includes_oracle() -> None:
+    """headless=True, include_oracle=True → exactly one rank-1 (oracle), rest are ranks 2-4."""
+    from task.layer_fol.demos import _sample_demo_schemas_zipf
+
+    r1 = FOLLayerRule(src_layer=0, dst_layer=1, lhs=(FOLAtom("A", ()),), rhs=(FOLAtom("M", ()),))
+    r2 = FOLLayerRule(src_layer=0, dst_layer=1, lhs=(FOLAtom("B", ()),), rhs=(FOLAtom("N", ()),))
+    r4 = FOLLayerRule(src_layer=0, dst_layer=1, lhs=(FOLAtom("D", ()),), rhs=(FOLAtom("Q", ()),))
+
+    ranked = {1: [r1], 2: [r2], 3: [], 4: [r4]}
+    rng = np.random.default_rng(42)
+    schemas, ranks = _sample_demo_schemas_zipf(
+        rng=rng,
+        ranked_rules=ranked,
+        n_demos=10,
+        alpha=1.0,
+        include_oracle=True,
+        oracle_rule=r1,
+        headless=True,
+    )
+    assert len(schemas) == 10
+    assert len(ranks) == 10
+    rank1_count = sum(1 for r in ranks if r == 1)
+    assert rank1_count == 1, f"Expected exactly 1 oracle (rank 1), got {rank1_count}"
+    non_oracle_ranks = [r for r in ranks if r != 1]
+    for r in non_oracle_ranks:
+        assert r in {2, 4}, f"Non-oracle demo should be rank 2 or 4, got {r}"
+
+
+def test_zipf_headless_empty_when_only_rank_1() -> None:
+    """headless=True, include_oracle=False, only rank-1 rules → returns empty."""
+    from task.layer_fol.demos import _sample_demo_schemas_zipf
+
+    r1 = FOLLayerRule(src_layer=0, dst_layer=1, lhs=(FOLAtom("A", ()),), rhs=(FOLAtom("M", ()),))
+
+    ranked = {1: [r1], 2: [], 3: [], 4: []}
+    rng = np.random.default_rng(42)
+    schemas, ranks = _sample_demo_schemas_zipf(
+        rng=rng,
+        ranked_rules=ranked,
+        n_demos=5,
+        alpha=1.0,
+        include_oracle=False,
+        oracle_rule=None,
+        headless=True,
+    )
+    assert schemas == []
+    assert ranks == []
+
+
+def test_demo_ranked_sorts_descending() -> None:
+    """demo_ranked=True → ranks sorted descending (rank 4 first, rank 1 last)."""
+    from task.layer_fol.demos import _sample_demo_schemas_zipf
+
+    r1 = FOLLayerRule(src_layer=0, dst_layer=1, lhs=(FOLAtom("A", ()),), rhs=(FOLAtom("M", ()),))
+    r2 = FOLLayerRule(src_layer=0, dst_layer=1, lhs=(FOLAtom("B", ()),), rhs=(FOLAtom("N", ()),))
+    r3 = FOLLayerRule(src_layer=0, dst_layer=1, lhs=(FOLAtom("C", ()),), rhs=(FOLAtom("P", ()),))
+    r4 = FOLLayerRule(src_layer=0, dst_layer=1, lhs=(FOLAtom("D", ()),), rhs=(FOLAtom("Q", ()),))
+
+    ranked = {1: [r1], 2: [r2], 3: [r3], 4: [r4]}
+    rng = np.random.default_rng(42)
+    schemas, ranks = _sample_demo_schemas_zipf(
+        rng=rng,
+        ranked_rules=ranked,
+        n_demos=20,
+        alpha=0.0,
+        include_oracle=False,
+        oracle_rule=None,
+        demo_ranked=True,
+    )
+    assert len(ranks) == 20
+    # Ranks should be non-increasing (descending order)
+    for i in range(len(ranks) - 1):
+        assert ranks[i] >= ranks[i + 1], (
+            f"Ranks not descending at index {i}: {ranks[i]} < {ranks[i + 1]}. "
+            f"Full ranks: {ranks}"
+        )
+
+
+def test_demo_ranked_false_preserves_shuffle() -> None:
+    """demo_ranked=False, include_oracle=True → random order (not necessarily sorted)."""
+    from task.layer_fol.demos import _sample_demo_schemas_zipf
+
+    r1 = FOLLayerRule(src_layer=0, dst_layer=1, lhs=(FOLAtom("A", ()),), rhs=(FOLAtom("M", ()),))
+    r2 = FOLLayerRule(src_layer=0, dst_layer=1, lhs=(FOLAtom("B", ()),), rhs=(FOLAtom("N", ()),))
+    r3 = FOLLayerRule(src_layer=0, dst_layer=1, lhs=(FOLAtom("C", ()),), rhs=(FOLAtom("P", ()),))
+    r4 = FOLLayerRule(src_layer=0, dst_layer=1, lhs=(FOLAtom("D", ()),), rhs=(FOLAtom("Q", ()),))
+
+    ranked = {1: [r1], 2: [r2], 3: [r3], 4: [r4]}
+    # Repeat to check that at least some ordering is not sorted
+    found_unsorted = False
+    for seed in range(50):
+        rng = np.random.default_rng(seed)
+        schemas, ranks = _sample_demo_schemas_zipf(
+            rng=rng,
+            ranked_rules=ranked,
+            n_demos=8,
+            alpha=0.0,
+            include_oracle=True,
+            oracle_rule=r1,
+            demo_ranked=False,
+        )
+        assert len(ranks) == 8
+        # Check if this particular draw is NOT sorted descending
+        sorted_desc = sorted(ranks, reverse=True)
+        if ranks != sorted_desc:
+            found_unsorted = True
+            break
+    assert found_unsorted, "demo_ranked=False should produce non-sorted order at least sometimes"
+
+
+def test_layer_fol_task_zipf_headless_samples_without_error() -> None:
+    """FOLLayerTask with demo_distribution='zipf_headless' produces batches."""
+    task = FOLLayerTask(
+        mode="online",
+        task_split="depth3_fresh_icl",
+        distance_range=(2, 2),
+        batch_size=4,
+        seed=600,
+        predicates_per_layer=4,
+        rules_per_transition=8,
+        arity_max=3,
+        vars_per_rule_max=4,
+        constants=("a", "b", "c"),
+        k_in_max=2,
+        k_out_max=2,
+        initial_ant_max=3,
+        max_n_demos=3,
+        demo_distribution="zipf_headless",
+        demo_distribution_alpha=1.0,
+        online_prefetch_backend="sync",
+    )
+    xs, ys = next(task)
+    assert xs.shape[0] == 4
+    assert ys.shape[0] == 4
+
+
+def test_layer_fol_task_demo_ranked_produces_sorted_ranks() -> None:
+    """FOLLayerTask with demo_ranked=True → demo_ranks in rule_context are descending."""
+    task = FOLLayerTask(
+        mode="online",
+        task_split="depth3_fresh_icl",
+        distance_range=(2, 2),
+        batch_size=1,
+        seed=601,
+        predicates_per_layer=4,
+        rules_per_transition=8,
+        arity_max=3,
+        vars_per_rule_max=4,
+        constants=("a", "b", "c"),
+        k_in_max=2,
+        k_out_max=2,
+        initial_ant_max=3,
+        max_n_demos=5,
+        min_n_demos=5,
+        include_oracle=True,
+        demo_distribution="zipf",
+        demo_distribution_alpha=0.0,
+        demo_ranked=True,
+        online_prefetch_backend="sync",
+    )
+    for _ in range(20):
+        rec = task._sample_online_record()
+        ctx = rec.get("rule_context", {})
+        demo_ranks = ctx.get("demo_ranks", [])
+        if not demo_ranks:
+            continue
+        for i in range(len(demo_ranks) - 1):
+            assert demo_ranks[i] >= demo_ranks[i + 1], (
+                f"demo_ranks not descending: {demo_ranks}"
+            )

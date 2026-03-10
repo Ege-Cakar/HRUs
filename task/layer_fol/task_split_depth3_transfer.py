@@ -49,6 +49,7 @@ class Depth3ICLTransferSplitStrategy(FOLTaskSplitStrategy):
         min_n_demos: int,
         include_oracle: bool,
         completion_format: str,
+        demo_all: bool = False,
     ) -> "Depth3ICLTransferSplitStrategy":
         if str(mode) != "online":
             raise ValueError("task_split='depth3_icl_transfer' requires mode='online'.")
@@ -88,6 +89,8 @@ class Depth3ICLTransferSplitStrategy(FOLTaskSplitStrategy):
             completion_format=str(completion_format),
             demo_distribution="uniform",
             demo_distribution_alpha=1.0,
+            demo_ranked=True,
+            demo_all=bool(demo_all),
         )
         return cls(
             rule_bank=rule_bank,
@@ -126,6 +129,7 @@ class Depth3ICLTransferSplitStrategy(FOLTaskSplitStrategy):
                     else int(self.online_forced_step_idx)
                 ),
                 str(self.sample_config.completion_format),
+                bool(self.sample_config.demo_all),
             ),
         )
 
@@ -153,6 +157,7 @@ class Depth3ICLTransferSplitStrategy(FOLTaskSplitStrategy):
                 else int(self.online_forced_step_idx)
             ),
             "completion_format": str(self.sample_config.completion_format),
+            "demo_all": bool(self.sample_config.demo_all),
             "workers": int(workers),
             "buffer_size": int(buffer_size),
             "batch_size": int(batch_size),

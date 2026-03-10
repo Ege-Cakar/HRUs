@@ -25,6 +25,8 @@ class OnlineSampleConfig:
     completion_format: str
     demo_distribution: str
     demo_distribution_alpha: float
+    demo_ranked: bool
+    demo_all: bool
 
 
 @dataclass(frozen=True)

@@ -485,6 +485,8 @@ def _server_worker_spec_from_config(config: dict) -> tuple[object, object, tuple
             int(config.get("predicate_name_len", 4)),
             str(config.get("demo_distribution", "uniform")),
             float(config.get("demo_distribution_alpha", 1.0)),
+            bool(config.get("demo_ranked", True)),
+            bool(config.get("demo_all", False)),
         )
     else:
         max_n_demos = int(config["max_n_demos"])
@@ -511,6 +513,7 @@ def _server_worker_spec_from_config(config: dict) -> tuple[object, object, tuple
                 else int(config["forced_step_idx"])
             ),
             str(config.get("completion_format", "single")),
+            bool(config.get("demo_all", False)),
         )
     init_worker_fn, sample_records_fn = worker_fns[sampler_kind]
     return init_worker_fn, sample_records_fn, initargs

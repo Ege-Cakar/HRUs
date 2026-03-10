@@ -63,18 +63,54 @@ def augment_prompt_with_demos(
     demo_distribution: str = "uniform",
     demo_distribution_alpha: float = 1.0,
     goal_atom: FOLAtom | None = None,
+    demo_ranked: bool = True,
+    demo_all: bool = False,
 ) -> FOLDemoAugmentationResult:
     max_n_demos = int(max_n_demos)
     min_n_demos = int(min_n_demos)
     include_oracle = bool(include_oracle)
     demo_distribution = str(demo_distribution)
     demo_distribution_alpha = float(demo_distribution_alpha)
-    if demo_distribution not in {"uniform", "zipf"}:
-        raise ValueError(
-            f"demo_distribution must be 'uniform' or 'zipf', got {demo_distribution!r}"
+    demo_ranked = bool(demo_ranked)
+    demo_all = bool(demo_all)
+
+    _empty = FOLDemoAugmentationResult(
+        prompt_tokens=list(int(tok) for tok in prompt_tokens),
+        demo_schemas=(),
+        demo_instances=(),
+    )
+
+    if demo_all:
+        all_rules = list(rule_bank.transition_rules(int(src_layer)))
+        if not all_rules:
+            return _empty
+        demo_statements = [
+            _instantiate_demo_schema_with_random_constants(
+                rule=rule,
+                constants=rule_bank.constants,
+                rng=rng,
+            )
+            for rule in all_rules
+        ]
+        augmented_prompt = _prepend_demo_statements_to_prompt(
+            prompt_tokens=prompt_tokens,
+            demo_statements=demo_statements,
+            tokenizer=tokenizer,
         )
-    if demo_distribution == "zipf" and goal_atom is None:
-        raise ValueError("demo_distribution='zipf' requires goal_atom.")
+        return FOLDemoAugmentationResult(
+            prompt_tokens=augmented_prompt,
+            demo_schemas=tuple(all_rules),
+            demo_instances=tuple(str(s) for s in demo_statements),
+            demo_ranks=(),
+        )
+
+    if demo_distribution not in {"uniform", "zipf", "zipf_headless"}:
+        raise ValueError(
+            f"demo_distribution must be 'uniform', 'zipf', or 'zipf_headless', "
+            f"got {demo_distribution!r}"
+        )
+    if demo_distribution in {"zipf", "zipf_headless"} and goal_atom is None:
+        raise ValueError(f"demo_distribution={demo_distribution!r} requires goal_atom.")
     if min_n_demos > max_n_demos:
         raise ValueError(
             f"min_n_demos must be <= max_n_demos, got {min_n_demos} > {max_n_demos}"
@@ -84,11 +120,6 @@ def augment_prompt_with_demos(
     if include_oracle and oracle_rule is None:
         raise ValueError("include_oracle=True requires oracle_rule.")
 
-    _empty = FOLDemoAugmentationResult(
-        prompt_tokens=list(int(tok) for tok in prompt_tokens),
-        demo_schemas=(),
-        demo_instances=(),
-    )
     if max_n_demos <= 0:
         return _empty
 
@@ -121,6 +152,8 @@ def augment_prompt_with_demos(
             oracle_rule=oracle_rule,
             alpha=demo_distribution_alpha,
             goal_atom=goal_atom,
+            headless=(demo_distribution == "zipf_headless"),
+            demo_ranked=demo_ranked,
         )
 
     if not sampled_schemas:
@@ -164,6 +197,8 @@ def _augment_prompt_with_demos(
     demo_distribution: str = "uniform",
     demo_distribution_alpha: float = 1.0,
     goal_atom: FOLAtom | None = None,
+    demo_ranked: bool = True,
+    demo_all: bool = False,
 ) -> list[int]:
     return augment_prompt_with_demos(
         prompt_tokens=prompt_tokens,
@@ -180,6 +215,8 @@ def _augment_prompt_with_demos(
         demo_distribution=demo_distribution,
         demo_distribution_alpha=demo_distribution_alpha,
         goal_atom=goal_atom,
+        demo_ranked=demo_ranked,
+        demo_all=demo_all,
     ).prompt_tokens
 
 
@@ -364,6 +401,8 @@ def _sample_zipf(
     oracle_rule: FOLLayerRule | None,
     alpha: float,
     goal_atom: FOLAtom,
+    headless: bool = False,
+    demo_ranked: bool = True,
 ) -> tuple[list[FOLLayerRule], list[int]]:
     rules = list(rule_bank.transition_rules(int(src_layer)))
     ranked = _classify_rules_by_rank(
@@ -380,6 +419,8 @@ def _sample_zipf(
         alpha=alpha,
         include_oracle=include_oracle,
         oracle_rule=oracle_rule,
+        headless=headless,
+        demo_ranked=demo_ranked,
     )
 
 
@@ -464,24 +505,40 @@ def _sample_demo_schemas_zipf(
     alpha: float,
     include_oracle: bool,
     oracle_rule: FOLLayerRule | None,
+    headless: bool = False,
+    demo_ranked: bool = True,
 ) -> tuple[list[FOLLayerRule], list[int]]:
     non_empty_ranks = sorted(k for k, v in ranked_rules.items() if v)
     if not non_empty_ranks:
         return [], []
 
-    weights = np.array([1.0 / (k ** alpha) for k in non_empty_ranks])
-    weights /= weights.sum()
+    if headless:
+        sampling_ranks = [k for k in non_empty_ranks if k != 1]
+    else:
+        sampling_ranks = list(non_empty_ranks)
 
     if not include_oracle:
+        if not sampling_ranks:
+            return [], []
+        weights = np.array([1.0 / (k ** alpha) for k in sampling_ranks])
+        weights /= weights.sum()
         sampled_schemas: list[FOLLayerRule] = []
         sampled_ranks: list[int] = []
         for _ in range(int(n_demos)):
-            rank_idx = int(rng.choice(len(non_empty_ranks), p=weights))
-            rank = non_empty_ranks[rank_idx]
+            rank_idx = int(rng.choice(len(sampling_ranks), p=weights))
+            rank = sampling_ranks[rank_idx]
             pool = ranked_rules[rank]
             rule = pool[int(rng.integers(0, len(pool)))]
             sampled_schemas.append(rule)
             sampled_ranks.append(rank)
+        if demo_ranked:
+            paired = sorted(
+                zip(sampled_ranks, sampled_schemas),
+                key=lambda x: x[0],
+                reverse=True,
+            )
+            sampled_schemas = [s for _, s in paired]
+            sampled_ranks = [r for r, _ in paired]
         return sampled_schemas, sampled_ranks
 
     if oracle_rule is None:
@@ -504,17 +561,35 @@ def _sample_demo_schemas_zipf(
 
     sampled_schemas = [oracle_schema]
     sampled_ranks = [1]
-    for _ in range(int(n_demos) - 1):
-        rank_idx = int(rng.choice(len(non_empty_ranks), p=weights))
-        rank = non_empty_ranks[rank_idx]
-        pool = ranked_rules[rank]
-        rule = pool[int(rng.integers(0, len(pool)))]
-        sampled_schemas.append(rule)
-        sampled_ranks.append(rank)
 
-    order = rng.permutation(len(sampled_schemas))
-    sampled_schemas = [sampled_schemas[int(i)] for i in order]
-    sampled_ranks = [sampled_ranks[int(i)] for i in order]
+    if int(n_demos) > 1:
+        if not sampling_ranks:
+            extra_ranks = [k for k in non_empty_ranks if k != 1]
+            if not extra_ranks:
+                extra_ranks = list(non_empty_ranks)
+            sampling_ranks = extra_ranks if extra_ranks else list(non_empty_ranks)
+        weights = np.array([1.0 / (k ** alpha) for k in sampling_ranks])
+        weights /= weights.sum()
+        for _ in range(int(n_demos) - 1):
+            rank_idx = int(rng.choice(len(sampling_ranks), p=weights))
+            rank = sampling_ranks[rank_idx]
+            pool = ranked_rules[rank]
+            rule = pool[int(rng.integers(0, len(pool)))]
+            sampled_schemas.append(rule)
+            sampled_ranks.append(rank)
+
+    if demo_ranked:
+        paired = sorted(
+            zip(sampled_ranks, sampled_schemas),
+            key=lambda x: x[0],
+            reverse=True,
+        )
+        sampled_schemas = [s for _, s in paired]
+        sampled_ranks = [r for r, _ in paired]
+    else:
+        order = rng.permutation(len(sampled_schemas))
+        sampled_schemas = [sampled_schemas[int(i)] for i in order]
+        sampled_ranks = [sampled_ranks[int(i)] for i in order]
     return sampled_schemas, sampled_ranks
 
 
@@ -566,6 +641,8 @@ class FOLDemoAugmentedAdapter:
         max_n_demos: int,
         max_unify_solutions: int,
         include_oracle: bool = False,
+        demo_distribution: str = "uniform",
+        demo_distribution_alpha: float = 1.0,
     ) -> None:
         self.base_adapter = base_adapter
         self.rule_bank = rule_bank
@@ -574,6 +651,8 @@ class FOLDemoAugmentedAdapter:
         self.max_n_demos = int(max_n_demos)
         self.max_unify_solutions = int(max_unify_solutions)
         self.include_oracle = bool(include_oracle)
+        self.demo_distribution = str(demo_distribution)
+        self.demo_distribution_alpha = float(demo_distribution_alpha)
         self._last_demo_rules: list[FOLLayerRule] = []
         self._oracle_rule: FOLLayerRule | None = None
 
@@ -628,6 +707,9 @@ class FOLDemoAugmentedAdapter:
                 max_unify_solutions=self.max_unify_solutions,
                 include_oracle=self.include_oracle,
                 oracle_rule=oracle_rule,
+                demo_distribution=self.demo_distribution,
+                demo_distribution_alpha=self.demo_distribution_alpha,
+                goal_atom=sequent.cons,
             )
             prompt = augmented.prompt_tokens
             self._last_demo_rules = list(augmented.demo_schemas)
