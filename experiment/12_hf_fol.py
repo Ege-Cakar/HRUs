@@ -285,6 +285,7 @@ df = collate_dfs("remote/12_hf_fol/set", show_progress=True)
 if df.empty:
     raise ValueError("No results found in remote/12_hf_fol/set")
 
+# <codecell>
 _remove_top_level_figures(OUT_DIR)
 
 df = df.reset_index(drop=True).copy()

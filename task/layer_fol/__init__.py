@@ -11,9 +11,12 @@ from .common import (
 from .demos import (
     FOLDemoAugmentedAdapter,
     _augment_prompt_with_demos,
+    _classify_rules_by_rank,
     _collect_applicable_demo_schemas,
     _find_lhs_substitutions_for_facts,
+    _is_goal_reachable_from_rule_rhs,
     _sample_demo_schemas_with_replacement,
+    _sample_demo_schemas_zipf,
     _subst_binds_rhs_variables,
     augment_prompt_with_demos,
 )

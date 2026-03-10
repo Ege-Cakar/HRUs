@@ -1930,3 +1930,263 @@ def test_layer_fol_task_rejects_fresh_icl_base_bank_seed_for_other_splits() -> N
             fresh_icl_base_bank_seed=42,
             online_prefetch_backend="sync",
         )
+
+
+# ---- Zipfian demo distribution tests ----
+
+
+def test_layer_fol_task_rejects_unknown_demo_distribution() -> None:
+    with pytest.raises(ValueError, match="demo_distribution must be"):
+        FOLLayerTask(
+            mode="online",
+            task_split="depth3_fresh_icl",
+            distance_range=(2, 2),
+            batch_size=1,
+            seed=500,
+            predicates_per_layer=4,
+            rules_per_transition=8,
+            arity_max=3,
+            vars_per_rule_max=4,
+            constants=("a", "b", "c"),
+            k_in_max=2,
+            k_out_max=2,
+            initial_ant_max=3,
+            max_n_demos=3,
+            demo_distribution="bad",
+            online_prefetch_backend="sync",
+        )
+
+
+def test_layer_fol_task_rejects_negative_demo_distribution_alpha() -> None:
+    with pytest.raises(ValueError, match="demo_distribution_alpha must be >= 0"):
+        FOLLayerTask(
+            mode="online",
+            task_split="depth3_fresh_icl",
+            distance_range=(2, 2),
+            batch_size=1,
+            seed=501,
+            predicates_per_layer=4,
+            rules_per_transition=8,
+            arity_max=3,
+            vars_per_rule_max=4,
+            constants=("a", "b", "c"),
+            k_in_max=2,
+            k_out_max=2,
+            initial_ant_max=3,
+            max_n_demos=3,
+            demo_distribution="zipf",
+            demo_distribution_alpha=-1.0,
+            online_prefetch_backend="sync",
+        )
+
+
+def test_layer_fol_task_zipf_samples_without_error() -> None:
+    task = FOLLayerTask(
+        mode="online",
+        task_split="depth3_fresh_icl",
+        distance_range=(2, 2),
+        batch_size=4,
+        seed=502,
+        predicates_per_layer=4,
+        rules_per_transition=8,
+        arity_max=3,
+        vars_per_rule_max=4,
+        constants=("a", "b", "c"),
+        k_in_max=2,
+        k_out_max=2,
+        initial_ant_max=3,
+        max_n_demos=3,
+        demo_distribution="zipf",
+        demo_distribution_alpha=1.0,
+        online_prefetch_backend="sync",
+    )
+    xs, ys = next(task)
+    assert xs.shape[0] == 4
+    assert ys.shape[0] == 4
+
+
+def test_layer_fol_task_zipf_produces_demo_ranks_in_rule_context() -> None:
+    task = FOLLayerTask(
+        mode="online",
+        task_split="depth3_fresh_icl",
+        distance_range=(2, 2),
+        batch_size=1,
+        seed=503,
+        predicates_per_layer=4,
+        rules_per_transition=8,
+        arity_max=3,
+        vars_per_rule_max=4,
+        constants=("a", "b", "c"),
+        k_in_max=2,
+        k_out_max=2,
+        initial_ant_max=3,
+        max_n_demos=5,
+        min_n_demos=3,
+        demo_distribution="zipf",
+        demo_distribution_alpha=1.0,
+        online_prefetch_backend="sync",
+    )
+    saw_ranks = False
+    for _ in range(30):
+        rec = task._sample_online_record()
+        ctx = rec.get("rule_context", {})
+        ranks = ctx.get("demo_ranks")
+        if ranks:
+            saw_ranks = True
+            for r in ranks:
+                assert r in {1, 2, 3, 4}, f"unexpected rank {r}"
+            break
+    assert saw_ranks, "Expected at least one record with demo_ranks"
+
+
+def test_layer_fol_task_uniform_does_not_produce_demo_ranks() -> None:
+    task = FOLLayerTask(
+        mode="online",
+        task_split="depth3_fresh_icl",
+        distance_range=(2, 2),
+        batch_size=1,
+        seed=504,
+        predicates_per_layer=4,
+        rules_per_transition=8,
+        arity_max=3,
+        vars_per_rule_max=4,
+        constants=("a", "b", "c"),
+        k_in_max=2,
+        k_out_max=2,
+        initial_ant_max=3,
+        max_n_demos=3,
+        demo_distribution="uniform",
+        online_prefetch_backend="sync",
+    )
+    for _ in range(10):
+        rec = task._sample_online_record()
+        ctx = rec.get("rule_context", {})
+        assert "demo_ranks" not in ctx
+
+
+def test_classify_rules_by_rank_hand_crafted() -> None:
+    from task.layer_fol.demos import _classify_rules_by_rank
+
+    # Build a minimal 3-layer rule bank: layer 0->1->2
+    # Goal: predicate G at layer 2
+    goal = FOLAtom("G", ())
+    # Facts at layer 0
+    facts = (FOLAtom("A", ()), FOLAtom("B", ()))
+
+    # Rule R1: A -> M (applicable, M leads to G via T1)
+    r1 = FOLLayerRule(src_layer=0, dst_layer=1, lhs=(FOLAtom("A", ()),), rhs=(FOLAtom("M", ()),))
+    # Rule R2: A -> N (applicable, N does NOT lead to G)
+    r2 = FOLLayerRule(src_layer=0, dst_layer=1, lhs=(FOLAtom("A", ()),), rhs=(FOLAtom("N", ()),))
+    # Rule R3: C -> M (NOT applicable, M leads to G via T1)
+    r3 = FOLLayerRule(src_layer=0, dst_layer=1, lhs=(FOLAtom("C", ()),), rhs=(FOLAtom("M", ()),))
+    # Rule R4: C -> N (NOT applicable, N does NOT lead to G)
+    r4 = FOLLayerRule(src_layer=0, dst_layer=1, lhs=(FOLAtom("C", ()),), rhs=(FOLAtom("N", ()),))
+
+    # Transition 1->2: M -> G, N -> X
+    t1 = FOLLayerRule(src_layer=1, dst_layer=2, lhs=(FOLAtom("M", ()),), rhs=(FOLAtom("G", ()),))
+    t2 = FOLLayerRule(src_layer=1, dst_layer=2, lhs=(FOLAtom("N", ()),), rhs=(FOLAtom("X", ()),))
+
+    from task.layer_gen.util.fol_rule_bank import FOLRuleBank
+
+    bank = FOLRuleBank(
+        n_layers=3,
+        predicates_per_layer=(3, 2, 2),
+        arity_max=0,
+        constants=(),
+        vars_per_rule_max=0,
+        predicate_arities={"A": 0, "B": 0, "C": 0, "M": 0, "N": 0, "G": 0, "X": 0},
+        transitions={0: (r1, r2, r3, r4), 1: (t1, t2)},
+    )
+    ranked = _classify_rules_by_rank(
+        rules=[r1, r2, r3, r4],
+        ants=facts,
+        goal_atom=goal,
+        rule_bank=bank,
+        max_unify_solutions=128,
+    )
+    assert r1 in ranked[1]  # applicable + reachable
+    assert r2 in ranked[2]  # applicable + NOT reachable
+    assert r3 in ranked[3]  # NOT applicable + reachable
+    assert r4 in ranked[4]  # NOT applicable + NOT reachable
+
+
+def test_is_goal_reachable_from_rule_rhs() -> None:
+    from task.layer_fol.demos import _is_goal_reachable_from_rule_rhs
+    from task.layer_gen.util.fol_rule_bank import FOLRuleBank
+
+    goal = FOLAtom("G", ())
+
+    r_good = FOLLayerRule(src_layer=0, dst_layer=1, lhs=(FOLAtom("A", ()),), rhs=(FOLAtom("M", ()),))
+    r_bad = FOLLayerRule(src_layer=0, dst_layer=1, lhs=(FOLAtom("A", ()),), rhs=(FOLAtom("N", ()),))
+
+    t1 = FOLLayerRule(src_layer=1, dst_layer=2, lhs=(FOLAtom("M", ()),), rhs=(FOLAtom("G", ()),))
+    t2 = FOLLayerRule(src_layer=1, dst_layer=2, lhs=(FOLAtom("N", ()),), rhs=(FOLAtom("X", ()),))
+
+    bank = FOLRuleBank(
+        n_layers=3,
+        predicates_per_layer=(2, 2, 2),
+        arity_max=0,
+        constants=(),
+        vars_per_rule_max=0,
+        predicate_arities={"A": 0, "M": 0, "N": 0, "G": 0, "X": 0},
+        transitions={0: (r_good, r_bad), 1: (t1, t2)},
+    )
+    assert _is_goal_reachable_from_rule_rhs(r_good, goal, bank) is True
+    assert _is_goal_reachable_from_rule_rhs(r_bad, goal, bank) is False
+
+    # Direct reachability: rule at step 1, goal in RHS
+    r_direct = FOLLayerRule(src_layer=1, dst_layer=2, lhs=(FOLAtom("M", ()),), rhs=(FOLAtom("G", ()),))
+    assert _is_goal_reachable_from_rule_rhs(r_direct, goal, bank) is True
+
+    r_miss = FOLLayerRule(src_layer=1, dst_layer=2, lhs=(FOLAtom("N", ()),), rhs=(FOLAtom("X", ()),))
+    assert _is_goal_reachable_from_rule_rhs(r_miss, goal, bank) is False
+
+
+def test_zipf_high_alpha_favors_rank_1() -> None:
+    """With very high alpha, nearly all samples should come from rank 1."""
+    from task.layer_fol.demos import _sample_demo_schemas_zipf
+
+    r1 = FOLLayerRule(src_layer=0, dst_layer=1, lhs=(FOLAtom("A", ()),), rhs=(FOLAtom("M", ()),))
+    r4 = FOLLayerRule(src_layer=0, dst_layer=1, lhs=(FOLAtom("C", ()),), rhs=(FOLAtom("N", ()),))
+
+    ranked = {1: [r1], 2: [], 3: [], 4: [r4]}
+    rng = np.random.default_rng(42)
+    schemas, ranks = _sample_demo_schemas_zipf(
+        rng=rng,
+        ranked_rules=ranked,
+        n_demos=100,
+        alpha=10.0,
+        include_oracle=False,
+        oracle_rule=None,
+    )
+    assert len(schemas) == 100
+    assert len(ranks) == 100
+    rank1_count = sum(1 for r in ranks if r == 1)
+    # With alpha=10, 1/1^10 vs 1/4^10 => rank 1 should dominate
+    assert rank1_count > 90, f"Expected rank 1 to dominate, got {rank1_count}/100"
+
+
+def test_zipf_alpha_0_samples_uniformly_across_ranks() -> None:
+    """With alpha=0, all non-empty ranks have equal weight."""
+    from task.layer_fol.demos import _sample_demo_schemas_zipf
+
+    r1 = FOLLayerRule(src_layer=0, dst_layer=1, lhs=(FOLAtom("A", ()),), rhs=(FOLAtom("M", ()),))
+    r2 = FOLLayerRule(src_layer=0, dst_layer=1, lhs=(FOLAtom("B", ()),), rhs=(FOLAtom("N", ()),))
+    r3 = FOLLayerRule(src_layer=0, dst_layer=1, lhs=(FOLAtom("C", ()),), rhs=(FOLAtom("P", ()),))
+    r4 = FOLLayerRule(src_layer=0, dst_layer=1, lhs=(FOLAtom("D", ()),), rhs=(FOLAtom("Q", ()),))
+
+    ranked = {1: [r1], 2: [r2], 3: [r3], 4: [r4]}
+    rng = np.random.default_rng(42)
+    schemas, ranks = _sample_demo_schemas_zipf(
+        rng=rng,
+        ranked_rules=ranked,
+        n_demos=4000,
+        alpha=0.0,
+        include_oracle=False,
+        oracle_rule=None,
+    )
+    from collections import Counter
+    counts = Counter(ranks)
+    # Each rank should get roughly 1000/4000 = 25%
+    for k in [1, 2, 3, 4]:
+        assert 700 < counts[k] < 1300, f"Rank {k} count {counts[k]} not near 1000"

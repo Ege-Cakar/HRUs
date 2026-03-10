@@ -44,6 +44,7 @@ class FOLDemoAugmentationResult:
     prompt_tokens: list[int]
     demo_schemas: tuple[FOLLayerRule, ...]
     demo_instances: tuple[str, ...]
+    demo_ranks: tuple[int, ...] = ()
 
 
 def augment_prompt_with_demos(
@@ -59,10 +60,21 @@ def augment_prompt_with_demos(
     max_unify_solutions: int,
     include_oracle: bool = False,
     oracle_rule: FOLLayerRule | None = None,
+    demo_distribution: str = "uniform",
+    demo_distribution_alpha: float = 1.0,
+    goal_atom: FOLAtom | None = None,
 ) -> FOLDemoAugmentationResult:
     max_n_demos = int(max_n_demos)
     min_n_demos = int(min_n_demos)
     include_oracle = bool(include_oracle)
+    demo_distribution = str(demo_distribution)
+    demo_distribution_alpha = float(demo_distribution_alpha)
+    if demo_distribution not in {"uniform", "zipf"}:
+        raise ValueError(
+            f"demo_distribution must be 'uniform' or 'zipf', got {demo_distribution!r}"
+        )
+    if demo_distribution == "zipf" and goal_atom is None:
+        raise ValueError("demo_distribution='zipf' requires goal_atom.")
     if min_n_demos > max_n_demos:
         raise ValueError(
             f"min_n_demos must be <= max_n_demos, got {min_n_demos} > {max_n_demos}"
@@ -71,48 +83,48 @@ def augment_prompt_with_demos(
         raise ValueError("include_oracle=True requires max_n_demos >= 1.")
     if include_oracle and oracle_rule is None:
         raise ValueError("include_oracle=True requires oracle_rule.")
+
+    _empty = FOLDemoAugmentationResult(
+        prompt_tokens=list(int(tok) for tok in prompt_tokens),
+        demo_schemas=(),
+        demo_instances=(),
+    )
     if max_n_demos <= 0:
-        return FOLDemoAugmentationResult(
-            prompt_tokens=list(int(tok) for tok in prompt_tokens),
-            demo_schemas=(),
-            demo_instances=(),
-        )
+        return _empty
 
     n_demos = int(rng.integers(min_n_demos, max_n_demos + 1))
     if include_oracle and n_demos < 1:
         raise ValueError("include_oracle=True requires sampling at least one demo.")
     if n_demos <= 0:
-        return FOLDemoAugmentationResult(
-            prompt_tokens=list(int(tok) for tok in prompt_tokens),
-            demo_schemas=(),
-            demo_instances=(),
+        return _empty
+
+    if demo_distribution == "uniform":
+        sampled_schemas, sampled_ranks = _sample_uniform(
+            rule_bank=rule_bank,
+            src_layer=int(src_layer),
+            ants=ants,
+            max_unify_solutions=int(max_unify_solutions),
+            rng=rng,
+            n_demos=n_demos,
+            include_oracle=include_oracle,
+            oracle_rule=oracle_rule,
         )
-    schemas = _collect_applicable_demo_schemas(
-        rule_bank=rule_bank,
-        src_layer=int(src_layer),
-        ants=ants,
-        max_unify_solutions=int(max_unify_solutions),
-    )
-    if not schemas:
-        return FOLDemoAugmentationResult(
-            prompt_tokens=list(int(tok) for tok in prompt_tokens),
-            demo_schemas=(),
-            demo_instances=(),
+    else:
+        sampled_schemas, sampled_ranks = _sample_zipf(
+            rule_bank=rule_bank,
+            src_layer=int(src_layer),
+            ants=ants,
+            max_unify_solutions=int(max_unify_solutions),
+            rng=rng,
+            n_demos=n_demos,
+            include_oracle=include_oracle,
+            oracle_rule=oracle_rule,
+            alpha=demo_distribution_alpha,
+            goal_atom=goal_atom,
         )
 
-    sampled_schemas = _sample_demo_schemas_with_replacement(
-        rng=rng,
-        schemas=schemas,
-        n_demos=n_demos,
-        include_oracle=include_oracle,
-        oracle_rule=oracle_rule,
-    )
     if not sampled_schemas:
-        return FOLDemoAugmentationResult(
-            prompt_tokens=list(int(tok) for tok in prompt_tokens),
-            demo_schemas=(),
-            demo_instances=(),
-        )
+        return _empty
 
     demo_statements = [
         _instantiate_demo_schema_with_random_constants(
@@ -132,6 +144,7 @@ def augment_prompt_with_demos(
         prompt_tokens=augmented_prompt,
         demo_schemas=tuple(sampled_schemas),
         demo_instances=tuple(str(statement) for statement in demo_statements),
+        demo_ranks=tuple(sampled_ranks),
     )
 
 
@@ -148,6 +161,9 @@ def _augment_prompt_with_demos(
     max_unify_solutions: int,
     include_oracle: bool = False,
     oracle_rule: FOLLayerRule | None = None,
+    demo_distribution: str = "uniform",
+    demo_distribution_alpha: float = 1.0,
+    goal_atom: FOLAtom | None = None,
 ) -> list[int]:
     return augment_prompt_with_demos(
         prompt_tokens=prompt_tokens,
@@ -161,6 +177,9 @@ def _augment_prompt_with_demos(
         max_unify_solutions=max_unify_solutions,
         include_oracle=include_oracle,
         oracle_rule=oracle_rule,
+        demo_distribution=demo_distribution,
+        demo_distribution_alpha=demo_distribution_alpha,
+        goal_atom=goal_atom,
     ).prompt_tokens
 
 
@@ -302,6 +321,201 @@ def _find_demo_schema_instantiation(
             return None
         subst = maybe
     return subst
+
+
+def _sample_uniform(
+    *,
+    rule_bank: FOLRuleBank,
+    src_layer: int,
+    ants: tuple[FOLAtom, ...],
+    max_unify_solutions: int,
+    rng: np.random.Generator,
+    n_demos: int,
+    include_oracle: bool,
+    oracle_rule: FOLLayerRule | None,
+) -> tuple[list[FOLLayerRule], list[int]]:
+    schemas = _collect_applicable_demo_schemas(
+        rule_bank=rule_bank,
+        src_layer=int(src_layer),
+        ants=ants,
+        max_unify_solutions=int(max_unify_solutions),
+    )
+    if not schemas:
+        return [], []
+    sampled = _sample_demo_schemas_with_replacement(
+        rng=rng,
+        schemas=schemas,
+        n_demos=n_demos,
+        include_oracle=include_oracle,
+        oracle_rule=oracle_rule,
+    )
+    return sampled, []
+
+
+def _sample_zipf(
+    *,
+    rule_bank: FOLRuleBank,
+    src_layer: int,
+    ants: tuple[FOLAtom, ...],
+    max_unify_solutions: int,
+    rng: np.random.Generator,
+    n_demos: int,
+    include_oracle: bool,
+    oracle_rule: FOLLayerRule | None,
+    alpha: float,
+    goal_atom: FOLAtom,
+) -> tuple[list[FOLLayerRule], list[int]]:
+    rules = list(rule_bank.transition_rules(int(src_layer)))
+    ranked = _classify_rules_by_rank(
+        rules=rules,
+        ants=ants,
+        goal_atom=goal_atom,
+        rule_bank=rule_bank,
+        max_unify_solutions=int(max_unify_solutions),
+    )
+    return _sample_demo_schemas_zipf(
+        rng=rng,
+        ranked_rules=ranked,
+        n_demos=n_demos,
+        alpha=alpha,
+        include_oracle=include_oracle,
+        oracle_rule=oracle_rule,
+    )
+
+
+def _rhs_predicates(rule: FOLLayerRule) -> set[str]:
+    return {atom.predicate for atom in rule.rhs}
+
+
+def _lhs_predicates(rule: FOLLayerRule) -> set[str]:
+    return {atom.predicate for atom in rule.lhs}
+
+
+def _is_goal_reachable_from_rule_rhs(
+    rule: FOLLayerRule,
+    goal_atom: FOLAtom,
+    rule_bank: FOLRuleBank,
+) -> bool:
+    available_preds = _rhs_predicates(rule)
+    current_src = int(rule.dst_layer)
+
+    while True:
+        if goal_atom.predicate in available_preds:
+            return True
+        next_rules = rule_bank.transition_rules(current_src)
+        if not next_rules:
+            break
+        next_preds: set[str] = set()
+        for t in next_rules:
+            if _lhs_predicates(t).issubset(available_preds):
+                next_preds.update(_rhs_predicates(t))
+        if not next_preds:
+            break
+        available_preds = next_preds
+        current_src += 1
+
+    return goal_atom.predicate in available_preds
+
+
+def _is_applicable(
+    rule: FOLLayerRule,
+    ants: tuple[FOLAtom, ...],
+    max_unify_solutions: int,
+) -> bool:
+    substitutions = _find_lhs_substitutions_for_facts(
+        lhs=rule.lhs,
+        facts=ants,
+        max_solutions=int(max_unify_solutions),
+    )
+    return any(
+        _subst_binds_rhs_variables(rule=rule, subst=subst)
+        for subst in substitutions
+    )
+
+
+def _classify_rules_by_rank(
+    *,
+    rules: list[FOLLayerRule],
+    ants: tuple[FOLAtom, ...],
+    goal_atom: FOLAtom,
+    rule_bank: FOLRuleBank,
+    max_unify_solutions: int,
+) -> dict[int, list[FOLLayerRule]]:
+    ranked: dict[int, list[FOLLayerRule]] = {1: [], 2: [], 3: [], 4: []}
+    for rule in rules:
+        applicable = _is_applicable(rule, ants, max_unify_solutions)
+        reachable = _is_goal_reachable_from_rule_rhs(rule, goal_atom, rule_bank)
+        if applicable and reachable:
+            ranked[1].append(rule)
+        elif applicable and not reachable:
+            ranked[2].append(rule)
+        elif not applicable and reachable:
+            ranked[3].append(rule)
+        else:
+            ranked[4].append(rule)
+    return ranked
+
+
+def _sample_demo_schemas_zipf(
+    *,
+    rng: np.random.Generator,
+    ranked_rules: dict[int, list[FOLLayerRule]],
+    n_demos: int,
+    alpha: float,
+    include_oracle: bool,
+    oracle_rule: FOLLayerRule | None,
+) -> tuple[list[FOLLayerRule], list[int]]:
+    non_empty_ranks = sorted(k for k, v in ranked_rules.items() if v)
+    if not non_empty_ranks:
+        return [], []
+
+    weights = np.array([1.0 / (k ** alpha) for k in non_empty_ranks])
+    weights /= weights.sum()
+
+    if not include_oracle:
+        sampled_schemas: list[FOLLayerRule] = []
+        sampled_ranks: list[int] = []
+        for _ in range(int(n_demos)):
+            rank_idx = int(rng.choice(len(non_empty_ranks), p=weights))
+            rank = non_empty_ranks[rank_idx]
+            pool = ranked_rules[rank]
+            rule = pool[int(rng.integers(0, len(pool)))]
+            sampled_schemas.append(rule)
+            sampled_ranks.append(rank)
+        return sampled_schemas, sampled_ranks
+
+    if oracle_rule is None:
+        raise ValueError("include_oracle=True requires oracle_rule.")
+
+    oracle_schema = _find_matching_demo_schema_for_rule(
+        schemas=ranked_rules.get(1, []),
+        oracle_rule=oracle_rule,
+    )
+    if oracle_schema is None:
+        all_schemas = [r for rules in ranked_rules.values() for r in rules]
+        oracle_schema = _find_matching_demo_schema_for_rule(
+            schemas=all_schemas,
+            oracle_rule=oracle_rule,
+        )
+    if oracle_schema is None:
+        raise RuntimeError(
+            "Oracle rule schema was not found among rules in any rank."
+        )
+
+    sampled_schemas = [oracle_schema]
+    sampled_ranks = [1]
+    for _ in range(int(n_demos) - 1):
+        rank_idx = int(rng.choice(len(non_empty_ranks), p=weights))
+        rank = non_empty_ranks[rank_idx]
+        pool = ranked_rules[rank]
+        rule = pool[int(rng.integers(0, len(pool)))]
+        sampled_schemas.append(rule)
+        sampled_ranks.append(rank)
+
+    order = rng.permutation(len(sampled_schemas))
+    sampled_schemas = [sampled_schemas[int(i)] for i in order]
+    sampled_ranks = [sampled_ranks[int(i)] for i in order]
+    return sampled_schemas, sampled_ranks
 
 
 def _instantiate_demo_schema_with_random_constants(

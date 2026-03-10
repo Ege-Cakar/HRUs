@@ -66,6 +66,8 @@ class Depth3FreshICLSplitStrategy(FOLTaskSplitStrategy):
         rule_bank_path,
         split_rule_bundle_path,
         rng: np.random.Generator,
+        demo_distribution: str = "uniform",
+        demo_distribution_alpha: float = 1.0,
     ) -> "Depth3FreshICLSplitStrategy":
         if str(mode) != "online":
             raise ValueError("task_split='depth3_fresh_icl' requires mode='online'.")
@@ -138,6 +140,8 @@ class Depth3FreshICLSplitStrategy(FOLTaskSplitStrategy):
             k_out_min=int(k_out_min),
             k_out_max=int(k_out_max),
             predicate_name_len=int(predicate_name_len),
+            demo_distribution=str(demo_distribution),
+            demo_distribution_alpha=float(demo_distribution_alpha),
         )
         return cls(
             rule_bank=base_bank,
@@ -186,6 +190,8 @@ class Depth3FreshICLSplitStrategy(FOLTaskSplitStrategy):
                 ),
                 str(self.sample_config.completion_format),
                 int(self.sample_config.predicate_name_len),
+                str(self.sample_config.demo_distribution),
+                float(self.sample_config.demo_distribution_alpha),
             ),
         )
 
@@ -222,6 +228,8 @@ class Depth3FreshICLSplitStrategy(FOLTaskSplitStrategy):
             ),
             "completion_format": str(self.sample_config.completion_format),
             "predicate_name_len": int(self.sample_config.predicate_name_len),
+            "demo_distribution": str(self.sample_config.demo_distribution),
+            "demo_distribution_alpha": float(self.sample_config.demo_distribution_alpha),
             "workers": int(workers),
             "buffer_size": int(buffer_size),
             "batch_size": int(batch_size),

@@ -88,6 +88,8 @@ class NoSplitStrategy(FOLTaskSplitStrategy):
             include_oracle=bool(include_oracle),
             forced_step_idx=None,
             completion_format=str(completion_format),
+            demo_distribution="uniform",
+            demo_distribution_alpha=1.0,
         )
         return cls(
             rule_bank=rule_bank,

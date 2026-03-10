@@ -27,7 +27,7 @@ def _build_tokenizer_for_split_bundle(
     )
 
 
-def _fresh_predicate_sentinels(*, name_len: int = 1) -> list[str]:
+def _fresh_predicate_sentinels(*, name_len: int = 4) -> list[str]:
     """Generate sentinel predicates covering all chars in the fresh predicate charset."""
     from task.layer_gen.util.fol_rule_bank import _FRESH_PREDICATE_CHARSET
 
@@ -42,7 +42,7 @@ def _fresh_predicate_sentinels(*, name_len: int = 1) -> list[str]:
 def _build_tokenizer_for_fresh_icl(
     *,
     base_bank: FOLRuleBank,
-    predicate_name_len: int = 1,
+    predicate_name_len: int = 4,
 ) -> tokenize_layer_fol.FOLLayerTokenizer:
     """Build a tokenizer for fresh-ICL that covers all possible fresh predicate chars."""
     identifiers: set[str] = set(base_bank.constants)

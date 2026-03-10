@@ -23,6 +23,8 @@ class OnlineSampleConfig:
     include_oracle: bool
     forced_step_idx: int | None
     completion_format: str
+    demo_distribution: str
+    demo_distribution_alpha: float
 
 
 @dataclass(frozen=True)

@@ -70,6 +70,7 @@ class FOLLayerTask:
         predicates_per_layer=8,
         rules_per_transition=32,
         arity_max=3,
+        arity_min=1,
         vars_per_rule_max=4,
         constants=("a", "b", "c", "d"),
         k_in_min=1,
@@ -87,8 +88,9 @@ class FOLLayerTask:
         online_prefetch_workers=None,
         online_prefetch_buffer_size=None,
         fresh_icl_base_bank_seed=None,
-        arity_min=1,
-        predicate_name_len=1,
+        predicate_name_len=4,
+        demo_distribution="uniform",
+        demo_distribution_alpha=1.0,
     ) -> None:
         self.mode = str(mode)
         if self.mode not in {"offline", "online"}:
@@ -198,6 +200,17 @@ class FOLLayerTask:
         if self.max_unify_solutions < 1:
             raise ValueError(
                 f"max_unify_solutions must be >= 1, got {self.max_unify_solutions}"
+            )
+        self.demo_distribution = str(demo_distribution)
+        if self.demo_distribution not in {"uniform", "zipf"}:
+            raise ValueError(
+                "demo_distribution must be 'uniform' or 'zipf', "
+                f"got {self.demo_distribution!r}"
+            )
+        self.demo_distribution_alpha = float(demo_distribution_alpha)
+        if self.demo_distribution_alpha < 0:
+            raise ValueError(
+                f"demo_distribution_alpha must be >= 0, got {self.demo_distribution_alpha}"
             )
         self._online_prefetch_requested = bool(online_prefetch)
         self._online_prefetch_backend_requested = str(online_prefetch_backend)
@@ -357,6 +370,8 @@ class FOLLayerTask:
             rule_bank_path=kwargs["rule_bank_path"],
             split_rule_bundle_path=kwargs["split_rule_bundle_path"],
             rng=self._rng,
+            demo_distribution=str(self.demo_distribution),
+            demo_distribution_alpha=float(self.demo_distribution_alpha),
         )
 
     def _adopt_strategy_state(self, strategy: FOLTaskSplitStrategy) -> None:

@@ -106,7 +106,7 @@ def _base_record(
     sampled,
     distance: int,
     config: OnlineSampleConfig,
-) -> tuple[dict, int, tuple]:
+) -> tuple[dict, int, tuple, tuple, tuple]:
     step_idx = pick_sampled_step_index(
         rng=rng,
         n_steps=len(sampled.step_rules),
@@ -134,6 +134,9 @@ def _base_record(
         max_unify_solutions=int(config.max_unify_solutions),
         include_oracle=bool(config.include_oracle),
         oracle_rule=sampled.step_rules[step_idx],
+        demo_distribution=str(config.demo_distribution),
+        demo_distribution_alpha=float(config.demo_distribution_alpha),
+        goal_atom=sampled.goal_atom,
     )
     record = {
         "distance": int(distance),
@@ -143,7 +146,7 @@ def _base_record(
         "completions": [np.asarray(completion, dtype=np.int32)],
         "statement_texts": list(completion_statements),
     }
-    return record, int(src_layer), tuple(augmented.demo_schemas), tuple(augmented.demo_instances)
+    return record, int(src_layer), tuple(augmented.demo_schemas), tuple(augmented.demo_instances), tuple(augmented.demo_ranks)
 
 
 def sample_online_record(
@@ -163,7 +166,7 @@ def sample_online_record(
         max_unify_solutions=config.max_unify_solutions,
         failure_label="online FOLLayerTask record",
     )
-    record, _, _, _ = _base_record(
+    record, _, _, _, _ = _base_record(
         tokenizer=tokenizer,
         rule_bank=bank,
         rng=rng,
@@ -181,16 +184,20 @@ def fresh_rule_context(
     src_layer: int,
     demo_schemas: tuple[FOLLayerRule, ...],
     demo_instances: tuple[str, ...],
+    demo_ranks: tuple[int, ...] = (),
 ) -> dict:
     src_layer = int(src_layer)
     fixed_rules = tuple(base_bank.transition_rules(src_layer)) if src_layer == 1 else ()
-    return {
+    ctx = {
         "src_layer": src_layer,
         "active_rule_texts": _rule_texts(tuple(temp_bank.transition_rules(src_layer))),
         "fixed_rule_texts": _rule_texts(tuple(fixed_rules)),
         "demo_schema_texts": _rule_texts(tuple(demo_schemas)),
         "demo_instance_texts": [str(text) for text in demo_instances],
     }
+    if demo_ranks:
+        ctx["demo_ranks"] = list(int(r) for r in demo_ranks)
+    return ctx
 
 
 def sample_online_fresh_record(
@@ -225,7 +232,7 @@ def sample_online_fresh_record(
         max_unify_solutions=config.max_unify_solutions,
         failure_label="fresh-ICL FOLLayerTask record",
     )
-    record, src_layer, demo_schemas, demo_instances = _base_record(
+    record, src_layer, demo_schemas, demo_instances, demo_ranks = _base_record(
         tokenizer=tokenizer,
         rule_bank=temp_bank,
         rng=rng,
@@ -239,6 +246,7 @@ def sample_online_fresh_record(
         src_layer=int(src_layer),
         demo_schemas=demo_schemas,
         demo_instances=demo_instances,
+        demo_ranks=demo_ranks,
     )
     return record
 
@@ -286,6 +294,8 @@ def _init_fol_online_worker(
                 None if forced_step_idx is None else int(forced_step_idx)
             ),
             completion_format=str(completion_format),
+            demo_distribution="uniform",
+            demo_distribution_alpha=1.0,
         ),
         "rng": np.random.default_rng(_worker_seed(seed_base)),
     }
@@ -328,7 +338,9 @@ def _init_fol_online_fresh_worker(
     include_oracle: bool,
     forced_step_idx: int | None,
     completion_format: str,
-    predicate_name_len: int = 1,
+    predicate_name_len: int = 4,
+    demo_distribution: str = "uniform",
+    demo_distribution_alpha: float = 1.0,
 ) -> None:
     _FOL_ONLINE_WORKER_LOCAL.state = {
         "base_bank": FOLRuleBank.from_dict(base_bank_payload),
@@ -353,6 +365,8 @@ def _init_fol_online_fresh_worker(
             k_out_min=int(k_out_min),
             k_out_max=int(k_out_max),
             predicate_name_len=int(predicate_name_len),
+            demo_distribution=str(demo_distribution),
+            demo_distribution_alpha=float(demo_distribution_alpha),
         ),
         "rng": np.random.default_rng(_worker_seed(seed_base)),
     }

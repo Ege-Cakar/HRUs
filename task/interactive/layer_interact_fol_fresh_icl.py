@@ -29,13 +29,13 @@ TASK_CFG = {
     "base_bank_seed": 2042,
     "predicates_per_layer": 8,
     "rules_per_transition": 32,
-    "arity_max": 3,
+    "arity_max": 1,
     "vars_per_rule_max": 4,
-    "k_in_max": 3,
-    "k_out_max": 3,
+    "k_in_max": 1,
+    "k_out_max": 1,
     "constants": ("a", "b", "c", "d"),
     "initial_ant_max": 1,
-    "max_n_demos": 1,
+    "max_n_demos": 8,
 }
 ENABLE_PLOT = True
 
@@ -113,7 +113,9 @@ train_task = FOLLayerTask(
     max_n_demos=int(TASK_CFG["max_n_demos"]),
     include_oracle=True,
     online_prefetch_backend="sync",
-    min_n_demos=1,
+    min_n_demos=8,
+    demo_distribution='zipf',
+    demo_distribution_alpha=0
 )
 
 eval_task = FOLLayerTask(

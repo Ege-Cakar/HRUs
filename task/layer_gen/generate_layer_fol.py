@@ -482,7 +482,9 @@ def _server_worker_spec_from_config(config: dict) -> tuple[object, object, tuple
                 else int(config["forced_step_idx"])
             ),
             str(config.get("completion_format", "single")),
-            int(config.get("predicate_name_len", 1)),
+            int(config.get("predicate_name_len", 4)),
+            str(config.get("demo_distribution", "uniform")),
+            float(config.get("demo_distribution_alpha", 1.0)),
         )
     else:
         max_n_demos = int(config["max_n_demos"])
