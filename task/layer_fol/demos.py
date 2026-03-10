@@ -643,6 +643,8 @@ class FOLDemoAugmentedAdapter:
         include_oracle: bool = False,
         demo_distribution: str = "uniform",
         demo_distribution_alpha: float = 1.0,
+        demo_ranked: bool = True,
+        demo_all: bool = False,
     ) -> None:
         self.base_adapter = base_adapter
         self.rule_bank = rule_bank
@@ -653,6 +655,8 @@ class FOLDemoAugmentedAdapter:
         self.include_oracle = bool(include_oracle)
         self.demo_distribution = str(demo_distribution)
         self.demo_distribution_alpha = float(demo_distribution_alpha)
+        self.demo_ranked = bool(demo_ranked)
+        self.demo_all = bool(demo_all)
         self._last_demo_rules: list[FOLLayerRule] = []
         self._oracle_rule: FOLLayerRule | None = None
 
@@ -672,7 +676,7 @@ class FOLDemoAugmentedAdapter:
         rng: np.random.Generator | None = None,
     ) -> np.ndarray:
         self._last_demo_rules = []
-        if self.max_n_demos <= 0:
+        if self.max_n_demos <= 0 and not self.demo_all:
             return self.base_adapter.predict_completion(
                 model=model,
                 prompt_tokens=prompt_tokens,
@@ -710,6 +714,8 @@ class FOLDemoAugmentedAdapter:
                 demo_distribution=self.demo_distribution,
                 demo_distribution_alpha=self.demo_distribution_alpha,
                 goal_atom=sequent.cons,
+                demo_ranked=self.demo_ranked,
+                demo_all=self.demo_all,
             )
             prompt = augmented.prompt_tokens
             self._last_demo_rules = list(augmented.demo_schemas)

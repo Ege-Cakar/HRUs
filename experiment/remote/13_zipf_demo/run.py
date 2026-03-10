@@ -61,23 +61,26 @@ EVAL_ROLES = ["train", "eval"]
 SWEEP_TRAIN_ALPHA = [0, 0.5, 1, 10]
 EVAL_ALPHA_SWEEP = [0, 0.5, 1, 10]
 
-TRAIN_MIN_N_DEMOS = 4
+SWEEP_TRAIN_DEMO_RANKED = [True, False]
+EVAL_DEMO_RANKED_SWEEP = [True, False]
+
+TRAIN_MIN_N_DEMOS = 1
 TRAIN_MAX_N_DEMOS = 8
-EVAL_MAX_N_DEMOS_SWEEP = [1, 2, 4, 8, 12, 16, 24, 32]
+EVAL_MAX_N_DEMOS_SWEEP = [1, 2, 4, 8, 12, 16, 24, 32, 40, 48]
 SELECTION_EVAL_MAX_N_DEMOS = 8
 
-BATCH_SIZE = 4
-GRAD_ACCUM_STEPS = 8
+BATCH_SIZE = 32
+GRAD_ACCUM_STEPS = 1
 EFFECTIVE_BATCH_SIZE = int(BATCH_SIZE) * int(GRAD_ACCUM_STEPS)
-TRAIN_ITERS_SWEEP = [400, 6400, 25600]
+TRAIN_ITERS_SWEEP = [25600]
 TEST_EVERY = 100
 TEST_ITERS = 2
-EVAL_ITERS_PER_ROLE = 2
-ROLLOUT_EXAMPLES_PER_ROLE = 64
+ROLLOUT_EXAMPLES_PER_ROLE = BATCH_SIZE
+EVAL_ITERS_PER_ROLE = 128 // BATCH_SIZE
 PREVIEW_EXAMPLES_PER_SPLIT = 3
 
 BASE_NUM_PRED = 16
-SWEEP_MID_PRED = [32, 64, 128, 256]
+SWEEP_MID_PRED = [256]
 
 SWEEP_TASK_SHAPES = [
     {
@@ -88,7 +91,8 @@ SWEEP_TASK_SHAPES = [
 ]
 
 N_LAYERS = 3
-ARITY_MAX = 1
+ARITY_MIN = 0
+ARITY_MAX = 0
 VARS_PER_RULE_MAX = 6
 K_IN_MAX = 1
 K_OUT_MAX = 1
@@ -119,6 +123,8 @@ MAMBA2_BONSAI_LRS = [1e-4]
 ### START TEST CONFIGS
 # SWEEP_TRAIN_ALPHA = [0, 1]
 # EVAL_ALPHA_SWEEP = [0, 1]
+# SWEEP_TRAIN_DEMO_RANKED = [True]
+# EVAL_DEMO_RANKED_SWEEP = [True]
 # SWEEP_MID_PRED = [32]
 # SWEEP_TASK_SHAPES = [
 #     {
@@ -158,6 +164,7 @@ RUN_SPLIT = len(SWEEP_TASK_SHAPES) * (
     * len(TRANSFORMER_SWIGLU)
     * len(TRAIN_ITERS_SWEEP)
     * len(SWEEP_TRAIN_ALPHA)
+    * len(SWEEP_TRAIN_DEMO_RANKED)
     + len(MAMBA2_BONSAI_LAYERS)
     * len(MAMBA2_BONSAI_WIDTH_HEADS)
     * len(MAMBA2_BONSAI_D_STATE)
@@ -166,8 +173,12 @@ RUN_SPLIT = len(SWEEP_TASK_SHAPES) * (
     * len(MAMBA2_BONSAI_LRS)
     * len(TRAIN_ITERS_SWEEP)
     * len(SWEEP_TRAIN_ALPHA)
+    * len(SWEEP_TRAIN_DEMO_RANKED)
 )
 
+RUN_SPLIT
+
+# <codecell>
 
 def _make_case_wandb_cfg(*, case_name, model_config, train_args, info):
     return make_experiment_wandb_config(
@@ -242,6 +253,7 @@ def _fresh_icl_config(task_shape: dict) -> dict:
         "rules_per_transition": task_shape["rules_per_transition"],
         "mid_pred": int(_task_shape_mid_pred(task_shape)),
         "n_layers": N_LAYERS,
+        "arity_min": ARITY_MIN,
         "arity_max": ARITY_MAX,
         "vars_per_rule_max": VARS_PER_RULE_MAX,
         "k_in_max": K_IN_MAX,
@@ -264,6 +276,7 @@ def _build_base_bank_and_tokenizer(*, task_shape: dict):
         n_layers=int(N_LAYERS),
         predicates_per_layer=task_shape["predicates_per_layer"],
         rules_per_transition=task_shape["rules_per_transition"],
+        arity_min=int(ARITY_MIN),
         arity_max=int(ARITY_MAX),
         vars_per_rule_max=int(VARS_PER_RULE_MAX),
         k_in_max=int(K_IN_MAX),
@@ -312,11 +325,14 @@ def _make_layer_task(
     include_oracle: bool = False,
     demo_distribution: str = "uniform",
     demo_distribution_alpha: float = 1.0,
+    demo_ranked: bool = True,
+    demo_all: bool = False,
+    batch_size: int | None = None,
 ):
     task_shape = _normalize_task_shape(task_shape)
     return FOLLayerTask(
         distance_range=(2, 2),
-        batch_size=int(BATCH_SIZE),
+        batch_size=int(batch_size if batch_size is not None else BATCH_SIZE),
         mode="online",
         task_split="depth3_fresh_icl",
         split_role=str(split_role),
@@ -328,6 +344,7 @@ def _make_layer_task(
         predicates_per_layer=task_shape["predicates_per_layer"],
         rules_per_transition=task_shape["rules_per_transition"],
         fresh_icl_base_bank_seed=int(BASE_BANK_SEED),
+        arity_min=int(ARITY_MIN),
         arity_max=int(ARITY_MAX),
         vars_per_rule_max=int(VARS_PER_RULE_MAX),
         constants=tuple(str(tok) for tok in CONSTANTS),
@@ -344,7 +361,41 @@ def _make_layer_task(
         predicate_name_len=int(PREDICATE_NAME_LEN),
         demo_distribution=str(demo_distribution),
         demo_distribution_alpha=float(demo_distribution_alpha),
+        demo_ranked=bool(demo_ranked),
+        demo_all=bool(demo_all),
     )
+
+
+def _estimate_eval_batch_size(
+    *,
+    eval_n_seq: int,
+    base_n_seq: int,
+    base_batch_size: int,
+) -> int:
+    """Scale batch size to keep total token count roughly constant."""
+    if eval_n_seq <= base_n_seq:
+        return base_batch_size
+    return max(1, base_batch_size * base_n_seq // eval_n_seq)
+
+
+def _estimate_eval_batch_and_iters(
+    *,
+    eval_n_seq: int,
+    base_n_seq: int,
+    base_batch_size: int,
+    base_n_iters: int,
+) -> tuple[int, int]:
+    """Scale batch size down and iterations up to keep total samples constant."""
+    batch_size = _estimate_eval_batch_size(
+        eval_n_seq=eval_n_seq,
+        base_n_seq=base_n_seq,
+        base_batch_size=base_batch_size,
+    )
+    if batch_size >= base_batch_size:
+        return base_batch_size, base_n_iters
+    target_samples = base_batch_size * base_n_iters
+    n_iters = max(1, -(-target_samples // batch_size))  # ceil division
+    return batch_size, n_iters
 
 
 def _make_task_shape_bundle(*, task_shape: dict, task_shape_idx: int) -> dict:
@@ -360,13 +411,30 @@ def _make_task_shape_bundle(*, task_shape: dict, task_shape_idx: int) -> dict:
         tokenizer,
         max_n_demos_for_shapes=max(EVAL_MAX_N_DEMOS_SWEEP),
     )
+    # Count max rules across all transitions (for demo_all)
+    max_transition_rules = max(
+        len(base_bank.transition_rules(layer))
+        for layer in range(int(N_LAYERS) - 1)
+    )
+    dims_by_n_demos = {}
+    for n_demos in EVAL_MAX_N_DEMOS_SWEEP:
+        dims_by_n_demos[int(n_demos)] = _compute_dims(
+            base_bank, tokenizer,
+            max_n_demos_for_shapes=int(n_demos),
+        )
+    dims_demo_all = _compute_dims(
+        base_bank,
+        tokenizer,
+        max_n_demos_for_shapes=max_transition_rules,
+    )
     max_completion_len = max(
         int(dims_train["max_completion_len"]),
         int(dims_eval["max_completion_len"]),
     )
     train_n_seq_raw = int(dims_train["n_seq_ar"])
     eval_n_seq_raw = int(dims_eval["n_seq_ar"])
-    model_n_seq = int(max(2, _ceil_pow2_int(eval_n_seq_raw)))
+    demo_all_n_seq_raw = int(dims_demo_all["n_seq_ar"])
+    model_n_seq = int(max(2, _ceil_pow2_int(max(eval_n_seq_raw, demo_all_n_seq_raw))))
     return {
         "task_shape_idx": int(task_shape_idx),
         "task_shape": task_shape,
@@ -374,7 +442,8 @@ def _make_task_shape_bundle(*, task_shape: dict, task_shape_idx: int) -> dict:
         "mid_pred": int(_task_shape_mid_pred(task_shape)),
         "base_bank": base_bank,
         "tokenizer": tokenizer,
-        "dims": {"train": dims_train, "eval": dims_eval},
+        "dims": {"train": dims_train, "eval": dims_eval, "demo_all": dims_demo_all},
+        "dims_by_n_demos": dims_by_n_demos,
         "train_n_seq_raw": train_n_seq_raw,
         "eval_n_seq_raw": eval_n_seq_raw,
         "train_n_seq": int(model_n_seq),
@@ -382,6 +451,9 @@ def _make_task_shape_bundle(*, task_shape: dict, task_shape_idx: int) -> dict:
         "model_n_seq": int(model_n_seq),
         "n_vocab": max(int(dims_train["n_vocab"]), int(dims_eval["n_vocab"])),
         "max_completion_len": int(max_completion_len),
+        "dims_demo_all": dims_demo_all,
+        "demo_all_n_seq": int(_ceil_pow2_int(demo_all_n_seq_raw)),
+        "demo_all_max_transition_rules": max_transition_rules,
     }
 
 
@@ -441,6 +513,11 @@ def _evaluate_role_for_demo(
     n_iters: int,
     eval_max_n_demos: int,
     eval_alpha: float,
+    eval_demo_ranked: bool = True,
+    demo_distribution: str = "zipf",
+    include_oracle: bool = False,
+    demo_all: bool = False,
+    batch_size: int | None = None,
     model_fn=None,
     shared_adapter=None,
 ):
@@ -469,8 +546,12 @@ def _evaluate_role_for_demo(
         max_n_demos=int(eval_max_n_demos),
         fixed_length_mode=EVAL_FIXED_LENGTH_MODE,
         fixed_length_n_seq=int(n_seq_ar),
-        demo_distribution="zipf",
+        demo_distribution=str(demo_distribution),
         demo_distribution_alpha=float(eval_alpha),
+        demo_ranked=bool(eval_demo_ranked),
+        demo_all=bool(demo_all),
+        include_oracle=bool(include_oracle),
+        batch_size=batch_size,
     )
     try:
         all_batch_metrics = []
@@ -536,8 +617,11 @@ def _evaluate_role_for_demo(
                 min_n_demos=int(eval_max_n_demos),
                 max_n_demos=int(eval_max_n_demos),
                 max_unify_solutions=int(MAX_UNIFY_SOLUTIONS),
-                demo_distribution="zipf",
+                demo_distribution=str(demo_distribution),
                 demo_distribution_alpha=float(eval_alpha),
+                demo_ranked=bool(eval_demo_ranked),
+                demo_all=bool(demo_all),
+                include_oracle=bool(include_oracle),
             )
         else:
             rollout_demo_adapter.rule_bank = temp_bank
@@ -624,6 +708,7 @@ def _evaluate_role_for_demo(
             "eval_role": str(role),
             "eval_max_n_demos": int(eval_max_n_demos),
             "eval_alpha": float(eval_alpha),
+            "eval_demo_ranked": bool(eval_demo_ranked),
             "eval_n_batches": int(n_eval_batches),
             "eval_n_unique_seq_lens": int(len(seq_len_counts)),
             "eval_top_seq_lens": [
@@ -656,12 +741,14 @@ def _metric_by_role_demo(
     role: str,
     eval_max_n_demos: int,
     eval_alpha: float,
+    eval_demo_ranked: bool,
     metric_name: str,
 ) -> float:
     role_metrics = (metrics_by_role_eval_demo or {}).get(str(role), {})
     demo_metrics = (role_metrics or {}).get(int(eval_max_n_demos), {})
     alpha_metrics = (demo_metrics or {}).get(float(eval_alpha), {})
-    value = alpha_metrics.get(metric_name)
+    ranked_metrics = (alpha_metrics or {}).get(bool(eval_demo_ranked), {})
+    value = ranked_metrics.get(metric_name)
     if value is None:
         return float("nan")
     return float(value)
@@ -678,7 +765,6 @@ TASK_SHAPE_BUNDLES_BY_IDX = {
     int(bundle["task_shape_idx"]): bundle for bundle in TASK_SHAPE_BUNDLES
 }
 
-# <codecell>
 all_cases = []
 
 ar_light_metrics_fn = make_ar_light_metrics_fn()
@@ -689,7 +775,7 @@ for bundle in TASK_SHAPE_BUNDLES:
     eval_n_seq = int(bundle["eval_n_seq"])
     n_vocab = int(bundle["n_vocab"])
 
-    for n_layers, (n_hidden, n_heads), lr, pos_encoding, use_swiglu, train_iters, train_alpha in itertools.product(
+    for n_layers, (n_hidden, n_heads), lr, pos_encoding, use_swiglu, train_iters, train_alpha, train_demo_ranked in itertools.product(
         TRANSFORMER_LAYERS,
         TRANSFORMER_WIDTH_HEADS,
         TRANSFORMER_LRS,
@@ -697,6 +783,7 @@ for bundle in TASK_SHAPE_BUNDLES:
         TRANSFORMER_SWIGLU,
         TRAIN_ITERS_SWEEP,
         SWEEP_TRAIN_ALPHA,
+        SWEEP_TRAIN_DEMO_RANKED,
     ):
         config = TransformerConfig(
             n_vocab=n_vocab,
@@ -728,6 +815,7 @@ for bundle in TASK_SHAPE_BUNDLES:
             include_oracle=bool(TRAIN_INCLUDE_ORACLE),
             demo_distribution="zipf",
             demo_distribution_alpha=float(train_alpha),
+            demo_ranked=bool(train_demo_ranked),
         )
         test_task = _make_layer_task(
             task_shape=task_shape,
@@ -741,6 +829,7 @@ for bundle in TASK_SHAPE_BUNDLES:
             fixed_length_n_seq=eval_n_seq,
             demo_distribution="zipf",
             demo_distribution_alpha=float(train_alpha),
+            demo_ranked=bool(train_demo_ranked),
         )
 
         train_args = {
@@ -770,6 +859,7 @@ for bundle in TASK_SHAPE_BUNDLES:
             "predicate_name_len": int(PREDICATE_NAME_LEN),
             "train_include_oracle": bool(TRAIN_INCLUDE_ORACLE),
             "train_alpha": float(train_alpha),
+            "train_demo_ranked": bool(train_demo_ranked),
             "demo_distribution": "zipf",
             "n_layers": n_layers,
             "n_hidden": n_hidden,
@@ -793,6 +883,7 @@ for bundle in TASK_SHAPE_BUNDLES:
             f"13_zipf_demo_{bundle['task_shape_tag']}_transformer_"
             f"l{int(n_layers)}_h{int(n_hidden)}_heads{int(n_heads)}_"
             f"lr{_lr_tag(lr)}_a{_alpha_tag(train_alpha)}_"
+            f"{'ranked' if train_demo_ranked else 'unranked'}_"
             f"ga{int(GRAD_ACCUM_STEPS)}_ti{int(train_iters)}"
         )
         train_args["wandb_cfg"] = _make_case_wandb_cfg(
@@ -812,7 +903,7 @@ for bundle in TASK_SHAPE_BUNDLES:
         )
         all_cases.append(case)
 
-    for n_layers, (n_hidden, n_heads), d_state, d_conv, scan_chunk_len, lr, train_iters, train_alpha in itertools.product(
+    for n_layers, (n_hidden, n_heads), d_state, d_conv, scan_chunk_len, lr, train_iters, train_alpha, train_demo_ranked in itertools.product(
         MAMBA2_BONSAI_LAYERS,
         MAMBA2_BONSAI_WIDTH_HEADS,
         MAMBA2_BONSAI_D_STATE,
@@ -821,6 +912,7 @@ for bundle in TASK_SHAPE_BUNDLES:
         MAMBA2_BONSAI_LRS,
         TRAIN_ITERS_SWEEP,
         SWEEP_TRAIN_ALPHA,
+        SWEEP_TRAIN_DEMO_RANKED,
     ):
         config = Mamba2BonsaiConfig(
             n_vocab=n_vocab,
@@ -854,6 +946,7 @@ for bundle in TASK_SHAPE_BUNDLES:
             include_oracle=bool(TRAIN_INCLUDE_ORACLE),
             demo_distribution="zipf",
             demo_distribution_alpha=float(train_alpha),
+            demo_ranked=bool(train_demo_ranked),
         )
         test_task = _make_layer_task(
             task_shape=task_shape,
@@ -867,6 +960,7 @@ for bundle in TASK_SHAPE_BUNDLES:
             fixed_length_n_seq=eval_n_seq,
             demo_distribution="zipf",
             demo_distribution_alpha=float(train_alpha),
+            demo_ranked=bool(train_demo_ranked),
         )
 
         train_args = {
@@ -896,6 +990,7 @@ for bundle in TASK_SHAPE_BUNDLES:
             "predicate_name_len": int(PREDICATE_NAME_LEN),
             "train_include_oracle": bool(TRAIN_INCLUDE_ORACLE),
             "train_alpha": float(train_alpha),
+            "train_demo_ranked": bool(train_demo_ranked),
             "demo_distribution": "zipf",
             "n_layers": n_layers,
             "n_hidden": n_hidden,
@@ -920,6 +1015,7 @@ for bundle in TASK_SHAPE_BUNDLES:
             f"13_zipf_demo_{bundle['task_shape_tag']}_mamba2_bonsai_"
             f"l{int(n_layers)}_h{int(n_hidden)}_heads{int(n_heads)}_"
             f"ds{int(d_state)}_lr{_lr_tag(lr)}_a{_alpha_tag(train_alpha)}_"
+            f"{'ranked' if train_demo_ranked else 'unranked'}_"
             f"ga{int(GRAD_ACCUM_STEPS)}_ti{int(train_iters)}"
         )
         train_args["wandb_cfg"] = _make_case_wandb_cfg(
@@ -1019,64 +1115,181 @@ for case in tqdm(all_cases, desc="cases", leave=True):
     print("RUNNING", case.name, case.info)
     bundle = TASK_SHAPE_BUNDLES_BY_IDX[int(case.info["task_shape_idx"])]
     train_alpha = float(case.info["train_alpha"])
+    train_demo_ranked = bool(case.info["train_demo_ranked"])
     train_start = time.perf_counter()
     case.run()
     train_wall_s = time.perf_counter() - train_start
 
-    metrics_by_role_eval_demo = {}
     post_eval_start = time.perf_counter()
 
     model_fn = make_model_callable(case.optimizer, to_numpy=False)
-    shared_adapter = AutoregressiveLogitsAdapter(
-        n_seq=int(bundle["eval_n_seq"]),
+
+    # --- Standard zipf eval ---
+    n_standard_jobs = int(
+        len(EVAL_ROLES) * len(EVAL_MAX_N_DEMOS_SWEEP)
+        * len(EVAL_ALPHA_SWEEP) * len(EVAL_DEMO_RANKED_SWEEP)
+    )
+    eval_job_bar = tqdm(
+        total=n_standard_jobs,
+        desc=f"{case.name} standard eval",
+        leave=False,
+    )
+    metrics_by_role_eval_demo = {}
+    for role in EVAL_ROLES:
+        role_metrics: dict[int, dict[float, dict[bool, dict]]] = {}
+        for eval_max_n_demos in EVAL_MAX_N_DEMOS_SWEEP:
+            this_dims = bundle["dims_by_n_demos"][int(eval_max_n_demos)]
+            this_eval_n_seq = int(_ceil_pow2_int(int(this_dims["n_seq_ar"])))
+            this_batch_size, this_n_iters = _estimate_eval_batch_and_iters(
+                eval_n_seq=this_eval_n_seq,
+                base_n_seq=int(_ceil_pow2_int(bundle["train_n_seq_raw"])),
+                base_batch_size=BATCH_SIZE,
+                base_n_iters=EVAL_ITERS_PER_ROLE,
+            )
+            this_adapter = AutoregressiveLogitsAdapter(
+                n_seq=this_eval_n_seq,
+                max_completion_len=int(bundle["max_completion_len"]),
+                pad_token_id=0,
+                jit_step=True,
+            )
+            alpha_metrics: dict[float, dict[bool, dict]] = {}
+            for eval_alpha in EVAL_ALPHA_SWEEP:
+                ranked_metrics: dict[bool, dict] = {}
+                for eval_demo_ranked in EVAL_DEMO_RANKED_SWEEP:
+                    eval_job_bar.set_postfix(
+                        role=str(role),
+                        demos=int(eval_max_n_demos),
+                        alpha=float(eval_alpha),
+                        ranked=bool(eval_demo_ranked),
+                    )
+                    ranked_metrics[bool(eval_demo_ranked)] = _evaluate_role_for_demo(
+                        case.optimizer,
+                        task_shape=bundle["task_shape"],
+                        role=str(role),
+                        tokenizer=bundle["tokenizer"],
+                        rule_bank=bundle["base_bank"],
+                        n_seq_ar=this_eval_n_seq,
+                        max_completion_len=int(bundle["max_completion_len"]),
+                        n_iters=this_n_iters,
+                        eval_max_n_demos=int(eval_max_n_demos),
+                        eval_alpha=float(eval_alpha),
+                        eval_demo_ranked=bool(eval_demo_ranked),
+                        demo_distribution="zipf",
+                        batch_size=this_batch_size,
+                        model_fn=model_fn,
+                        shared_adapter=this_adapter,
+                    )
+                    eval_job_bar.update(1)
+                alpha_metrics[float(eval_alpha)] = ranked_metrics
+            role_metrics[int(eval_max_n_demos)] = alpha_metrics
+        metrics_by_role_eval_demo[str(role)] = role_metrics
+    eval_job_bar.close()
+
+    # --- Needle eval (zipf_headless + include_oracle) ---
+    n_needle_jobs = int(
+        len(EVAL_ROLES) * len(EVAL_MAX_N_DEMOS_SWEEP)
+        * len(EVAL_ALPHA_SWEEP) * len(EVAL_DEMO_RANKED_SWEEP)
+    )
+    needle_bar = tqdm(
+        total=n_needle_jobs,
+        desc=f"{case.name} needle eval",
+        leave=False,
+    )
+    metrics_by_role_eval_needle = {}
+    for role in EVAL_ROLES:
+        role_metrics_n: dict[int, dict[float, dict[bool, dict]]] = {}
+        for eval_max_n_demos in EVAL_MAX_N_DEMOS_SWEEP:
+            this_dims = bundle["dims_by_n_demos"][int(eval_max_n_demos)]
+            this_eval_n_seq = int(_ceil_pow2_int(int(this_dims["n_seq_ar"])))
+            this_batch_size, this_n_iters = _estimate_eval_batch_and_iters(
+                eval_n_seq=this_eval_n_seq,
+                base_n_seq=int(_ceil_pow2_int(bundle["train_n_seq_raw"])),
+                base_batch_size=BATCH_SIZE,
+                base_n_iters=EVAL_ITERS_PER_ROLE,
+            )
+            this_adapter = AutoregressiveLogitsAdapter(
+                n_seq=this_eval_n_seq,
+                max_completion_len=int(bundle["max_completion_len"]),
+                pad_token_id=0,
+                jit_step=True,
+            )
+            alpha_metrics_n: dict[float, dict[bool, dict]] = {}
+            for eval_alpha in EVAL_ALPHA_SWEEP:
+                ranked_metrics_n: dict[bool, dict] = {}
+                for eval_demo_ranked in EVAL_DEMO_RANKED_SWEEP:
+                    needle_bar.set_postfix(
+                        role=str(role),
+                        demos=int(eval_max_n_demos),
+                        alpha=float(eval_alpha),
+                        ranked=bool(eval_demo_ranked),
+                    )
+                    ranked_metrics_n[bool(eval_demo_ranked)] = _evaluate_role_for_demo(
+                        case.optimizer,
+                        task_shape=bundle["task_shape"],
+                        role=str(role),
+                        tokenizer=bundle["tokenizer"],
+                        rule_bank=bundle["base_bank"],
+                        n_seq_ar=this_eval_n_seq,
+                        max_completion_len=int(bundle["max_completion_len"]),
+                        n_iters=this_n_iters,
+                        eval_max_n_demos=int(eval_max_n_demos),
+                        eval_alpha=float(eval_alpha),
+                        eval_demo_ranked=bool(eval_demo_ranked),
+                        demo_distribution="zipf_headless",
+                        include_oracle=True,
+                        batch_size=this_batch_size,
+                        model_fn=model_fn,
+                        shared_adapter=this_adapter,
+                    )
+                    needle_bar.update(1)
+                alpha_metrics_n[float(eval_alpha)] = ranked_metrics_n
+            role_metrics_n[int(eval_max_n_demos)] = alpha_metrics_n
+        metrics_by_role_eval_needle[str(role)] = role_metrics_n
+    needle_bar.close()
+
+    # --- demo_all eval ---
+    demo_all_batch_size, demo_all_n_iters = _estimate_eval_batch_and_iters(
+        eval_n_seq=int(bundle["demo_all_n_seq"]),
+        base_n_seq=int(_ceil_pow2_int(bundle["train_n_seq_raw"])),
+        base_batch_size=BATCH_SIZE,
+        base_n_iters=EVAL_ITERS_PER_ROLE,
+    )
+    demo_all_adapter = AutoregressiveLogitsAdapter(
+        n_seq=int(bundle["demo_all_n_seq"]),
         max_completion_len=int(bundle["max_completion_len"]),
         pad_token_id=0,
         jit_step=True,
     )
-
-    eval_job_bar = tqdm(
-        total=int(len(EVAL_ROLES) * len(EVAL_MAX_N_DEMOS_SWEEP) * len(EVAL_ALPHA_SWEEP)),
-        desc=f"{case.name} eval role/demo/alpha sweep",
-        leave=False,
-    )
+    metrics_by_role_eval_demo_all = {}
     for role in EVAL_ROLES:
-        role_metrics: dict[int, dict[float, dict]] = {}
-        for eval_max_n_demos in EVAL_MAX_N_DEMOS_SWEEP:
-            alpha_metrics: dict[float, dict] = {}
-            for eval_alpha in EVAL_ALPHA_SWEEP:
-                eval_job_bar.set_postfix(
-                    role=str(role),
-                    demos=int(eval_max_n_demos),
-                    alpha=float(eval_alpha),
-                )
-                alpha_metrics[float(eval_alpha)] = _evaluate_role_for_demo(
-                    case.optimizer,
-                    task_shape=bundle["task_shape"],
-                    role=str(role),
-                    tokenizer=bundle["tokenizer"],
-                    rule_bank=bundle["base_bank"],
-                    n_seq_ar=int(bundle["eval_n_seq"]),
-                    max_completion_len=int(bundle["max_completion_len"]),
-                    n_iters=EVAL_ITERS_PER_ROLE,
-                    eval_max_n_demos=int(eval_max_n_demos),
-                    eval_alpha=float(eval_alpha),
-                    model_fn=model_fn,
-                    shared_adapter=shared_adapter,
-                )
-                eval_job_bar.update(1)
-            role_metrics[int(eval_max_n_demos)] = alpha_metrics
-        metrics_by_role_eval_demo[str(role)] = role_metrics
-    eval_job_bar.close()
+        metrics_by_role_eval_demo_all[str(role)] = _evaluate_role_for_demo(
+            case.optimizer,
+            task_shape=bundle["task_shape"],
+            role=str(role),
+            tokenizer=bundle["tokenizer"],
+            rule_bank=bundle["base_bank"],
+            n_seq_ar=int(bundle["demo_all_n_seq"]),
+            max_completion_len=int(bundle["max_completion_len"]),
+            n_iters=demo_all_n_iters,
+            eval_max_n_demos=0,
+            eval_alpha=0.0,
+            demo_all=True,
+            batch_size=demo_all_batch_size,
+            model_fn=model_fn,
+            shared_adapter=demo_all_adapter,
+        )
 
     post_eval_wall_s = time.perf_counter() - post_eval_start
 
     selection_metric_name = "rollout_success_rate"
     selection_eval_alpha = 1.0
+    selection_eval_demo_ranked = True
     selection_metric_value = _metric_by_role_demo(
         metrics_by_role_eval_demo,
         role="eval",
         eval_max_n_demos=int(SELECTION_EVAL_MAX_N_DEMOS),
         eval_alpha=selection_eval_alpha,
+        eval_demo_ranked=selection_eval_demo_ranked,
         metric_name=selection_metric_name,
     )
 
@@ -1088,6 +1301,7 @@ for case in tqdm(all_cases, desc="cases", leave=True):
         "task_shape_tag": case.info["task_shape_tag"],
         "mid_pred": int(case.info["mid_pred"]),
         "train_alpha": float(train_alpha),
+        "train_demo_ranked": bool(train_demo_ranked),
         "info": case.info,
         "train_args": {
             "loss": case.train_args["loss"],
@@ -1100,9 +1314,12 @@ for case in tqdm(all_cases, desc="cases", leave=True):
         },
         "metrics_final": case.hist["test"][-1] if case.hist and case.hist.get("test") else {},
         "metrics_by_role_eval_demo": metrics_by_role_eval_demo,
+        "metrics_by_role_eval_needle": metrics_by_role_eval_needle,
+        "metrics_by_role_eval_demo_all": metrics_by_role_eval_demo_all,
         "selection_role": "eval",
         "selection_eval_max_n_demos": int(SELECTION_EVAL_MAX_N_DEMOS),
         "selection_eval_alpha": float(selection_eval_alpha),
+        "selection_eval_demo_ranked": bool(selection_eval_demo_ranked),
         "selection_metric_name": selection_metric_name,
         "selection_metric_value": float(selection_metric_value),
         "eval_rollout_success_rate": _metric_by_role_demo(
@@ -1110,6 +1327,7 @@ for case in tqdm(all_cases, desc="cases", leave=True):
             role="eval",
             eval_max_n_demos=int(SELECTION_EVAL_MAX_N_DEMOS),
             eval_alpha=selection_eval_alpha,
+            eval_demo_ranked=selection_eval_demo_ranked,
             metric_name="rollout_success_rate",
         ),
         "train_rollout_success_rate": _metric_by_role_demo(
@@ -1117,6 +1335,7 @@ for case in tqdm(all_cases, desc="cases", leave=True):
             role="train",
             eval_max_n_demos=int(SELECTION_EVAL_MAX_N_DEMOS),
             eval_alpha=selection_eval_alpha,
+            eval_demo_ranked=selection_eval_demo_ranked,
             metric_name="rollout_success_rate",
         ),
         "fresh_icl_config": {

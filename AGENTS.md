@@ -34,6 +34,7 @@ This is a JAX/Flax NNX-based deep learning research codebase for studying neural
 - If a test is inherently long-running and cannot be made fast, mark it with `@pytest.mark.slow` (most slow tests involve coordinate checking).
 - Run slow tests only when the relevant code has changed (e.g., coordinate-checking logic); otherwise prefer `./.venv/bin/python -m pytest tests/ -v --tb=short -m "not slow"`.
 - To run only slow tests: `./.venv/bin/python -m pytest tests/ -v --tb=short -m slow`.
+- A "smoke run" on an experiment is run by uncommenting the config block demarcated by the comments "START TEST CONFIGS" and "END TEST CONFIGS". To perform a smoke run, uncomment these test configs, run the script, inspect the output to confirm it has the anticipated structure, run the plotting code to confirm it works and produces the expected plots, then finish by recommenting the test configs.
 
 ## Coding Style & Naming Conventions
 - Indentation: 4 spaces; keep lines reasonably short and readable.
