@@ -1261,23 +1261,23 @@ for case in tqdm(all_cases, desc="cases", leave=True):
         jit_step=True,
     )
     metrics_by_role_eval_demo_all = {}
-    for role in EVAL_ROLES:
-        metrics_by_role_eval_demo_all[str(role)] = _evaluate_role_for_demo(
-            case.optimizer,
-            task_shape=bundle["task_shape"],
-            role=str(role),
-            tokenizer=bundle["tokenizer"],
-            rule_bank=bundle["base_bank"],
-            n_seq_ar=int(bundle["demo_all_n_seq"]),
-            max_completion_len=int(bundle["max_completion_len"]),
-            n_iters=demo_all_n_iters,
-            eval_max_n_demos=0,
-            eval_alpha=0.0,
-            demo_all=True,
-            batch_size=demo_all_batch_size,
-            model_fn=model_fn,
-            shared_adapter=demo_all_adapter,
-        )
+    # for role in EVAL_ROLES:
+    #     metrics_by_role_eval_demo_all[str(role)] = _evaluate_role_for_demo(
+    #         case.optimizer,
+    #         task_shape=bundle["task_shape"],
+    #         role=str(role),
+    #         tokenizer=bundle["tokenizer"],
+    #         rule_bank=bundle["base_bank"],
+    #         n_seq_ar=int(bundle["demo_all_n_seq"]),
+    #         max_completion_len=int(bundle["max_completion_len"]),
+    #         n_iters=demo_all_n_iters,
+    #         eval_max_n_demos=0,
+    #         eval_alpha=0.0,
+    #         demo_all=True,
+    #         batch_size=demo_all_batch_size,
+    #         model_fn=model_fn,
+    #         shared_adapter=demo_all_adapter,
+    #     )
 
     post_eval_wall_s = time.perf_counter() - post_eval_start
 
