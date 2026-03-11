@@ -49,6 +49,9 @@ class Depth3ICLTransferSplitStrategy(FOLTaskSplitStrategy):
         min_n_demos: int,
         include_oracle: bool,
         completion_format: str,
+        demo_distribution: str = "uniform",
+        demo_distribution_alpha: float = 1.0,
+        demo_ranked: bool = True,
         demo_all: bool = False,
     ) -> "Depth3ICLTransferSplitStrategy":
         if str(mode) != "online":
@@ -87,9 +90,9 @@ class Depth3ICLTransferSplitStrategy(FOLTaskSplitStrategy):
             include_oracle=bool(include_oracle),
             forced_step_idx=online_forced_step_idx,
             completion_format=str(completion_format),
-            demo_distribution="uniform",
-            demo_distribution_alpha=1.0,
-            demo_ranked=True,
+            demo_distribution=str(demo_distribution),
+            demo_distribution_alpha=float(demo_distribution_alpha),
+            demo_ranked=bool(demo_ranked),
             demo_all=bool(demo_all),
         )
         return cls(
@@ -113,23 +116,9 @@ class Depth3ICLTransferSplitStrategy(FOLTaskSplitStrategy):
             init_fn=_init_fol_online_worker,
             sample_records_fn=_sample_fol_online_worker_records,
             initargs=(
-                int(self.sample_config.seed_base),
+                self.sample_config.to_dict(),
                 self.rule_bank.to_dict(),
                 self.tokenizer.to_dict(),
-                (2,),
-                int(self.sample_config.initial_ant_max),
-                int(self.sample_config.sample_max_attempts),
-                int(self.sample_config.max_unify_solutions),
-                int(self.sample_config.max_n_demos),
-                int(self.sample_config.min_n_demos),
-                bool(self.sample_config.include_oracle),
-                (
-                    None
-                    if self.online_forced_step_idx is None
-                    else int(self.online_forced_step_idx)
-                ),
-                str(self.sample_config.completion_format),
-                bool(self.sample_config.demo_all),
             ),
         )
 
@@ -141,23 +130,9 @@ class Depth3ICLTransferSplitStrategy(FOLTaskSplitStrategy):
         batch_size: int,
     ) -> dict | None:
         return {
-            "seed": int(self.sample_config.seed_base),
+            "config_payload": self.sample_config.to_dict(),
             "bank_payload": self.rule_bank.to_dict(),
             "tokenizer_payload": self.tokenizer.to_dict(),
-            "distances": (2,),
-            "initial_ant_max": int(self.sample_config.initial_ant_max),
-            "sample_max_attempts": int(self.sample_config.sample_max_attempts),
-            "max_unify_solutions": int(self.sample_config.max_unify_solutions),
-            "max_n_demos": int(self.sample_config.max_n_demos),
-            "min_n_demos": int(self.sample_config.min_n_demos),
-            "include_oracle": bool(self.sample_config.include_oracle),
-            "forced_step_idx": (
-                None
-                if self.online_forced_step_idx is None
-                else int(self.online_forced_step_idx)
-            ),
-            "completion_format": str(self.sample_config.completion_format),
-            "demo_all": bool(self.sample_config.demo_all),
             "workers": int(workers),
             "buffer_size": int(buffer_size),
             "batch_size": int(batch_size),

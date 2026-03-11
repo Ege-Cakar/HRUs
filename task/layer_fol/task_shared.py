@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass
 from typing import Callable, Protocol
 
@@ -27,6 +28,19 @@ class OnlineSampleConfig:
     demo_distribution_alpha: float
     demo_ranked: bool
     demo_all: bool
+
+    def to_dict(self) -> dict:
+        d = dataclasses.asdict(self)
+        d["distances"] = list(d["distances"])
+        return d
+
+    @classmethod
+    def from_dict(cls, payload: dict) -> "OnlineSampleConfig":
+        p = dict(payload)
+        p["distances"] = tuple(int(v) for v in p["distances"])
+        if "fresh_layer0_predicates" in p:
+            return FreshOnlineSampleConfig(**p)
+        return cls(**p)
 
 
 @dataclass(frozen=True)

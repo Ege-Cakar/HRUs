@@ -13,28 +13,7 @@ import jax.numpy as jnp
 from flax import nnx
 
 from model.mup import MuReadout
-
-
-def _validate_output_config(output_mode: str, n_pred_tokens: int) -> None:
-    if output_mode not in {"last_token", "full_sequence", "last_nonpad"}:
-        raise ValueError(
-            "output_mode must be one of 'last_token', 'full_sequence', or 'last_nonpad', "
-            f"got {output_mode!r}"
-        )
-    if n_pred_tokens < 1:
-        raise ValueError(f"n_pred_tokens must be >= 1, got {n_pred_tokens}")
-
-
-def _select_last_nonpad_hidden(
-    hidden: jnp.ndarray,
-    tokens: jnp.ndarray,
-    pad_token_id: int,
-) -> jnp.ndarray:
-    is_nonpad = tokens != pad_token_id
-    lengths = jnp.sum(is_nonpad, axis=1)
-    last_index = jnp.maximum(lengths - 1, 0)
-    batch_idx = jnp.arange(hidden.shape[0])
-    return hidden[batch_idx, last_index, :]
+from model.output import apply_output_projection, validate_output_config
 
 
 @jax.tree_util.register_pytree_node_class
@@ -492,7 +471,7 @@ class Mamba2Bonsai(nnx.Module):
     """Stacked Bonsai-style Mamba2 blocks with our output-mode contract."""
 
     def __init__(self, config: Mamba2BonsaiConfig, *, rngs: nnx.Rngs):
-        _validate_output_config(config.output_mode, config.n_pred_tokens)
+        validate_output_config(config.output_mode, config.n_pred_tokens)
         if config.n_hidden % config.n_heads != 0:
             raise ValueError(
                 f"n_hidden ({config.n_hidden}) must be divisible by n_heads ({config.n_heads})"
@@ -609,21 +588,14 @@ class Mamba2Bonsai(nnx.Module):
         if self.final_ln is not None:
             x = self.final_ln(x)
 
-        if config.output_mode == "full_sequence":
-            out = self.output(x)
-            if config.n_pred_tokens > 1:
-                out = out.reshape(out.shape[0], out.shape[1], config.n_pred_tokens, config.n_out)
-        else:
-            if config.output_mode == "last_nonpad":
-                x = _select_last_nonpad_hidden(x, tokens=tokens, pad_token_id=config.pad_token_id)
-            else:
-                x = x[:, -1, :]
-            out = self.output(x)
-            if config.n_pred_tokens > 1:
-                out = out.reshape(out.shape[0], config.n_pred_tokens, config.n_out)
-
-        if config.n_out == 1:
-            out = out.squeeze(-1)
+        out = apply_output_projection(
+            x, self.output,
+            output_mode=config.output_mode,
+            n_pred_tokens=config.n_pred_tokens,
+            n_out=config.n_out,
+            tokens=tokens,
+            pad_token_id=config.pad_token_id,
+        )
 
         if return_cache:
             return out, Mamba2BonsaiCache(

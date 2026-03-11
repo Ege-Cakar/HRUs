@@ -10,7 +10,12 @@ import numpy as np
 
 from task.layer_gen.util import online_prefetch as online_prefetch_util
 from task.layer_gen.util import tokenize_layer_fol
-from task.layer_gen.util.fol_rule_bank import FOLDepth3ICLSplitBundle, FOLRuleBank
+from task.layer_gen.util.fol_rule_bank import (
+    FOLDepth3ICLSplitBundle,
+    FOLRuleBank,
+    build_fresh_layer0_bank,
+    generate_fresh_predicate_names,
+)
 from .common import compute_fol_dims
 from .task_batching import (
     ceil_pow2,
@@ -32,9 +37,7 @@ from .task_prefetch import (
     init_server_prefetch,
 )
 from .task_sampling import (
-    _init_fol_online_fresh_worker,
     _init_fol_online_worker,
-    _sample_fol_online_fresh_worker_records,
     _sample_fol_online_worker_records,
 )
 from .task_shared import FOLTaskSplitStrategy
@@ -330,6 +333,9 @@ class FOLLayerTask:
                 include_oracle=bool(self.include_oracle),
                 completion_format=str(self.completion_format),
                 rng=self._rng,
+                demo_distribution=str(self.demo_distribution),
+                demo_distribution_alpha=float(self.demo_distribution_alpha),
+                demo_ranked=bool(self.demo_ranked),
                 demo_all=bool(self.demo_all),
             )
         if self.task_split == "depth3_icl_transfer":
@@ -347,6 +353,9 @@ class FOLLayerTask:
                 min_n_demos=int(self.min_n_demos),
                 include_oracle=bool(self.include_oracle),
                 completion_format=str(self.completion_format),
+                demo_distribution=str(self.demo_distribution),
+                demo_distribution_alpha=float(self.demo_distribution_alpha),
+                demo_ranked=bool(self.demo_ranked),
                 demo_all=bool(self.demo_all),
             )
         return Depth3FreshICLSplitStrategy.build(
@@ -605,6 +614,84 @@ class FOLLayerTask:
     def tokenizer(self) -> tokenize_layer_fol.FOLLayerTokenizer | None:
         return self._tokenizer
 
+    def build_fresh_temp_bank(self, rng: np.random.Generator) -> FOLRuleBank:
+        """Build a fresh temp bank using this task's config."""
+        if self._base_bank is None:
+            raise RuntimeError("build_fresh_temp_bank requires a base bank (depth3_fresh_icl).")
+        fresh_preds = generate_fresh_predicate_names(
+            len(self._base_bank.predicates_for_layer(0)),
+            rng,
+            name_len=self._predicate_name_len,
+        )
+        return build_fresh_layer0_bank(
+            base_bank=self._base_bank,
+            fresh_predicates=fresh_preds,
+            rules_per_transition=len(self._base_bank.transition_rules(0)),
+            k_in_min=self._k_in_min,
+            k_in_max=self._k_in_max,
+            k_out_min=self._k_out_min,
+            k_out_max=self._k_out_max,
+            rng=rng,
+        )
+
+    def make_demo_adapter(
+        self,
+        base_adapter,
+        rule_bank: FOLRuleBank,
+        *,
+        min_n_demos: int | None = None,
+        max_n_demos: int | None = None,
+        include_oracle: bool | None = None,
+        demo_distribution: str | None = None,
+        demo_distribution_alpha: float | None = None,
+        demo_ranked: bool | None = None,
+        demo_all: bool | None = None,
+    ):
+        """Create a demo-augmented adapter from this task's config.
+
+        All demo parameters default to the task's own settings but can be
+        overridden per call.  Import is deferred to avoid circular dependency.
+        """
+        from .demos import FOLDemoAugmentedAdapter  # noqa: E402
+        return FOLDemoAugmentedAdapter(
+            base_adapter=base_adapter,
+            rule_bank=rule_bank,
+            tokenizer=self._tokenizer,
+            min_n_demos=int(min_n_demos if min_n_demos is not None else self.min_n_demos),
+            max_n_demos=int(max_n_demos if max_n_demos is not None else self.max_n_demos),
+            max_unify_solutions=self.max_unify_solutions,
+            include_oracle=bool(include_oracle if include_oracle is not None else self.include_oracle),
+            demo_distribution=str(demo_distribution if demo_distribution is not None else self.demo_distribution),
+            demo_distribution_alpha=float(demo_distribution_alpha if demo_distribution_alpha is not None else self.demo_distribution_alpha),
+            demo_ranked=bool(demo_ranked if demo_ranked is not None else self.demo_ranked),
+            demo_all=bool(demo_all if demo_all is not None else self.demo_all),
+        )
+
+    def sample_rollout_example(
+        self,
+        rng: np.random.Generator,
+        *,
+        rule_bank: FOLRuleBank | None = None,
+        max_steps: int | None = None,
+    ):
+        """Sample a rollout example from the given (or base) bank."""
+        from .eval import sample_rollout_examples  # noqa: E402
+        bank = rule_bank if rule_bank is not None else self._rule_bank
+        if bank is None:
+            raise RuntimeError("sample_rollout_example requires a rule bank.")
+        distance = int(self._distances[0]) if self._distances else 2
+        steps = max_steps if max_steps is not None else distance
+        examples = sample_rollout_examples(
+            rule_bank=bank,
+            distance=distance,
+            n_examples=1,
+            initial_ant_max=self.initial_ant_max,
+            max_steps=int(steps),
+            max_unify_solutions=self.max_unify_solutions,
+            rng=rng,
+        )
+        return examples[0]
+
     def _make_batch_fn(self):
         return make_batch_fn(
             prediction_objective=self.prediction_objective,
@@ -669,6 +756,4 @@ __all__ = [
     "FOLLayerTask",
     "_init_fol_online_worker",
     "_sample_fol_online_worker_records",
-    "_init_fol_online_fresh_worker",
-    "_sample_fol_online_fresh_worker_records",
 ]

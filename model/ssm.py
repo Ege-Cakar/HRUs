@@ -9,6 +9,7 @@ import jax.numpy as jnp
 from flax import nnx
 
 from model.mup import MuReadout
+from model.output import apply_output_projection, validate_output_config
 from model.ssm_kernels import selective_scan_mamba, selective_scan_mamba2
 
 # TODO: all mamba models are extremely inefficient
@@ -21,16 +22,6 @@ def _resolve_dt_rank(dt_rank: int | str, n_hidden: int) -> int:
     raise ValueError(f"dt_rank must be 'auto' or int >= 1, got {dt_rank!r}")
 
 
-def _validate_output_config(output_mode: str, n_pred_tokens: int) -> None:
-    if output_mode not in {"last_token", "full_sequence", "last_nonpad"}:
-        raise ValueError(
-            "output_mode must be one of 'last_token', 'full_sequence', or 'last_nonpad', "
-            f"got {output_mode!r}"
-        )
-    if n_pred_tokens < 1:
-        raise ValueError(f"n_pred_tokens must be >= 1, got {n_pred_tokens}")
-
-
 def _validate_scan_config(scan_backend: str, scan_chunk_len: int) -> None:
     if scan_backend not in {"reference", "pallas", "auto"}:
         raise ValueError(
@@ -39,18 +30,6 @@ def _validate_scan_config(scan_backend: str, scan_chunk_len: int) -> None:
         )
     if scan_chunk_len < 1:
         raise ValueError(f"scan_chunk_len must be >= 1, got {scan_chunk_len}")
-
-
-def _select_last_nonpad_hidden(
-    hidden: jnp.ndarray,
-    tokens: jnp.ndarray,
-    pad_token_id: int,
-) -> jnp.ndarray:
-    is_nonpad = tokens != pad_token_id
-    lengths = jnp.sum(is_nonpad, axis=1)
-    last_index = jnp.maximum(lengths - 1, 0)
-    batch_idx = jnp.arange(hidden.shape[0])
-    return hidden[batch_idx, last_index, :]
 
 
 def _causal_depthwise_conv1d(
@@ -374,7 +353,7 @@ class Mamba(nnx.Module):
     """Stacked Mamba blocks with Transformer-compatible output modes."""
 
     def __init__(self, config: MambaConfig, *, rngs: nnx.Rngs):
-        _validate_output_config(config.output_mode, config.n_pred_tokens)
+        validate_output_config(config.output_mode, config.n_pred_tokens)
         self.config = config
 
         if config.n_vocab is not None:
@@ -414,29 +393,21 @@ class Mamba(nnx.Module):
         if self.final_ln is not None:
             x = self.final_ln(x)
 
-        if config.output_mode == "full_sequence":
-            out = self.output(x)
-            if config.n_pred_tokens > 1:
-                out = out.reshape(out.shape[0], out.shape[1], config.n_pred_tokens, config.n_out)
-        else:
-            if config.output_mode == "last_nonpad":
-                x = _select_last_nonpad_hidden(x, tokens=tokens, pad_token_id=config.pad_token_id)
-            else:
-                x = x[:, -1, :]
-            out = self.output(x)
-            if config.n_pred_tokens > 1:
-                out = out.reshape(out.shape[0], config.n_pred_tokens, config.n_out)
-
-        if config.n_out == 1:
-            out = out.squeeze(-1)
-        return out
+        return apply_output_projection(
+            x, self.output,
+            output_mode=config.output_mode,
+            n_pred_tokens=config.n_pred_tokens,
+            n_out=config.n_out,
+            tokens=tokens,
+            pad_token_id=config.pad_token_id,
+        )
 
 
 class Mamba2(nnx.Module):
     """Stacked Mamba-2 blocks with Transformer-compatible output modes."""
 
     def __init__(self, config: Mamba2Config, *, rngs: nnx.Rngs):
-        _validate_output_config(config.output_mode, config.n_pred_tokens)
+        validate_output_config(config.output_mode, config.n_pred_tokens)
         if config.n_hidden % config.n_heads != 0:
             raise ValueError(
                 f"n_hidden ({config.n_hidden}) must be divisible by n_heads ({config.n_heads})"
@@ -480,19 +451,11 @@ class Mamba2(nnx.Module):
         if self.final_ln is not None:
             x = self.final_ln(x)
 
-        if config.output_mode == "full_sequence":
-            out = self.output(x)
-            if config.n_pred_tokens > 1:
-                out = out.reshape(out.shape[0], out.shape[1], config.n_pred_tokens, config.n_out)
-        else:
-            if config.output_mode == "last_nonpad":
-                x = _select_last_nonpad_hidden(x, tokens=tokens, pad_token_id=config.pad_token_id)
-            else:
-                x = x[:, -1, :]
-            out = self.output(x)
-            if config.n_pred_tokens > 1:
-                out = out.reshape(out.shape[0], config.n_pred_tokens, config.n_out)
-
-        if config.n_out == 1:
-            out = out.squeeze(-1)
-        return out
+        return apply_output_projection(
+            x, self.output,
+            output_mode=config.output_mode,
+            n_pred_tokens=config.n_pred_tokens,
+            n_out=config.n_out,
+            tokens=tokens,
+            pad_token_id=config.pad_token_id,
+        )

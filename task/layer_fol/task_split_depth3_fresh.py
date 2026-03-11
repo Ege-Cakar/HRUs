@@ -15,8 +15,8 @@ from task.layer_gen.util.fol_rule_bank import (
 )
 from .common import _build_tokenizer_for_fresh_icl
 from .task_sampling import (
-    _init_fol_online_fresh_worker,
-    _sample_fol_online_fresh_worker_records,
+    _init_fol_online_worker,
+    _sample_fol_online_worker_records,
     sample_online_fresh_record,
 )
 from .task_shared import (
@@ -169,35 +169,12 @@ class Depth3FreshICLSplitStrategy(FOLTaskSplitStrategy):
         if self.base_bank is None:
             raise RuntimeError("Fresh-ICL prefetch requires base bank metadata.")
         return OnlineWorkerSpec(
-            init_fn=_init_fol_online_fresh_worker,
-            sample_records_fn=_sample_fol_online_fresh_worker_records,
+            init_fn=_init_fol_online_worker,
+            sample_records_fn=_sample_fol_online_worker_records,
             initargs=(
-                int(self.sample_config.seed_base),
+                self.sample_config.to_dict(),
                 self.base_bank.to_dict(),
                 self.tokenizer.to_dict(),
-                int(self.sample_config.fresh_layer0_predicates),
-                int(self.sample_config.fresh_rules_per_transition),
-                int(self.sample_config.k_in_min),
-                int(self.sample_config.k_in_max),
-                int(self.sample_config.k_out_min),
-                int(self.sample_config.k_out_max),
-                int(self.sample_config.initial_ant_max),
-                int(self.sample_config.sample_max_attempts),
-                int(self.sample_config.max_unify_solutions),
-                int(self.sample_config.max_n_demos),
-                int(self.sample_config.min_n_demos),
-                bool(self.sample_config.include_oracle),
-                (
-                    None
-                    if self.online_forced_step_idx is None
-                    else int(self.online_forced_step_idx)
-                ),
-                str(self.sample_config.completion_format),
-                int(self.sample_config.predicate_name_len),
-                str(self.sample_config.demo_distribution),
-                float(self.sample_config.demo_distribution_alpha),
-                bool(self.sample_config.demo_ranked),
-                bool(self.sample_config.demo_all),
             ),
         )
 
@@ -211,33 +188,9 @@ class Depth3FreshICLSplitStrategy(FOLTaskSplitStrategy):
         if self.base_bank is None:
             raise RuntimeError("Fresh-ICL server prefetch requires base bank metadata.")
         return {
-            "sampler_kind": "fresh_icl",
-            "seed": int(self.sample_config.seed_base),
-            "base_bank_payload": self.base_bank.to_dict(),
+            "config_payload": self.sample_config.to_dict(),
+            "bank_payload": self.base_bank.to_dict(),
             "tokenizer_payload": self.tokenizer.to_dict(),
-            "fresh_layer0_predicates": int(self.sample_config.fresh_layer0_predicates),
-            "fresh_rules_per_transition": int(self.sample_config.fresh_rules_per_transition),
-            "k_in_min": int(self.sample_config.k_in_min),
-            "k_in_max": int(self.sample_config.k_in_max),
-            "k_out_min": int(self.sample_config.k_out_min),
-            "k_out_max": int(self.sample_config.k_out_max),
-            "initial_ant_max": int(self.sample_config.initial_ant_max),
-            "sample_max_attempts": int(self.sample_config.sample_max_attempts),
-            "max_unify_solutions": int(self.sample_config.max_unify_solutions),
-            "max_n_demos": int(self.sample_config.max_n_demos),
-            "min_n_demos": int(self.sample_config.min_n_demos),
-            "include_oracle": bool(self.sample_config.include_oracle),
-            "forced_step_idx": (
-                None
-                if self.online_forced_step_idx is None
-                else int(self.online_forced_step_idx)
-            ),
-            "completion_format": str(self.sample_config.completion_format),
-            "predicate_name_len": int(self.sample_config.predicate_name_len),
-            "demo_distribution": str(self.sample_config.demo_distribution),
-            "demo_distribution_alpha": float(self.sample_config.demo_distribution_alpha),
-            "demo_ranked": bool(self.sample_config.demo_ranked),
-            "demo_all": bool(self.sample_config.demo_all),
             "workers": int(workers),
             "buffer_size": int(buffer_size),
             "batch_size": int(batch_size),

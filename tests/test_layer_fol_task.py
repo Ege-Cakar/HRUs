@@ -27,6 +27,9 @@ from task.layer_gen.util.fol_rule_bank import (
 )
 
 
+from task.layer_fol.task_shared import FreshOnlineSampleConfig, OnlineSampleConfig
+
+
 def _write_array_record(path: Path, records) -> None:
     writer = array_record_module.ArrayRecordWriter(str(path), "group_size:1")
     for record in records:
@@ -174,6 +177,64 @@ def _record_has_demo_for_schema(task: FOLLayerTask, rec: dict, schema: FOLLayerR
         ) is not None:
             return True
     return False
+
+
+def test_online_sample_config_round_trip() -> None:
+    config = OnlineSampleConfig(
+        seed_base=42,
+        distances=(1, 2, 3),
+        initial_ant_max=3,
+        sample_max_attempts=100,
+        max_unify_solutions=64,
+        max_n_demos=4,
+        min_n_demos=1,
+        include_oracle=True,
+        forced_step_idx=None,
+        completion_format="single",
+        demo_distribution="zipf",
+        demo_distribution_alpha=1.5,
+        demo_ranked=False,
+        demo_all=True,
+    )
+    payload = config.to_dict()
+    assert isinstance(payload, dict)
+    assert payload["distances"] == [1, 2, 3]
+    restored = OnlineSampleConfig.from_dict(payload)
+    assert isinstance(restored, OnlineSampleConfig)
+    assert not isinstance(restored, FreshOnlineSampleConfig)
+    assert restored == config
+
+
+def test_fresh_online_sample_config_round_trip() -> None:
+    config = FreshOnlineSampleConfig(
+        seed_base=99,
+        distances=(2,),
+        initial_ant_max=1,
+        sample_max_attempts=512,
+        max_unify_solutions=128,
+        max_n_demos=8,
+        min_n_demos=2,
+        include_oracle=False,
+        forced_step_idx=0,
+        completion_format="full",
+        demo_distribution="uniform",
+        demo_distribution_alpha=1.0,
+        demo_ranked=True,
+        demo_all=False,
+        fresh_layer0_predicates=10,
+        fresh_rules_per_transition=16,
+        k_in_min=1,
+        k_in_max=3,
+        k_out_min=1,
+        k_out_max=3,
+        predicate_name_len=4,
+    )
+    payload = config.to_dict()
+    assert isinstance(payload, dict)
+    assert "fresh_layer0_predicates" in payload
+    restored = OnlineSampleConfig.from_dict(payload)
+    assert isinstance(restored, FreshOnlineSampleConfig)
+    assert restored == config
 
 
 def test_layer_fol_task_offline_autoreg(tmp_path: Path) -> None:

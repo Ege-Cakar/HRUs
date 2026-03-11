@@ -25,7 +25,6 @@ from model.ssm_bonsai import Mamba2BonsaiConfig
 from model.transformer import TransformerConfig
 from task.layer_fol import (
     AutoregressiveLogitsAdapter,
-    FOLDemoAugmentedAdapter,
     FOLLayerTask,
     _build_tokenizer_for_fresh_icl,
     _fresh_predicate_sentinels,
@@ -33,13 +32,10 @@ from task.layer_fol import (
     predicted_rule_reaches_goal,
     print_task_preview,
     run_layer_rollout_fol,
-    sample_rollout_examples,
 )
 from task.layer_gen.util.fol_rule_bank import (
     FOLLayerRule,
-    build_fresh_layer0_bank,
     build_random_fol_rule_bank,
-    generate_fresh_predicate_names,
     parse_atom_text,
     parse_clause_text,
 )
@@ -591,56 +587,26 @@ def _evaluate_role_for_demo(
 
     rollout_demo_adapter = None
     for _ in range(int(ROLLOUT_EXAMPLES_PER_ROLE)):
-        # Build a per-example fresh bank
-        fresh_preds = generate_fresh_predicate_names(
-            len(rule_bank.predicates_for_layer(0)),
-            rollout_rng,
-            name_len=int(PREDICATE_NAME_LEN),
-        )
-        temp_bank = build_fresh_layer0_bank(
-            base_bank=rule_bank,
-            fresh_predicates=fresh_preds,
-            rules_per_transition=len(rule_bank.transition_rules(0)),
-            k_in_min=1,
-            k_in_max=int(K_IN_MAX),
-            k_out_min=1,
-            k_out_max=int(K_OUT_MAX),
-            rng=rollout_rng,
-        )
+        temp_bank = eval_task.build_fresh_temp_bank(rollout_rng)
 
-        # Build/reuse a rollout adapter that uses the temp bank for demos
         if rollout_demo_adapter is None:
-            rollout_demo_adapter = FOLDemoAugmentedAdapter(
-                base_adapter=shared_adapter,
-                rule_bank=temp_bank,
-                tokenizer=tokenizer,
+            rollout_demo_adapter = eval_task.make_demo_adapter(
+                shared_adapter,
+                temp_bank,
                 min_n_demos=int(eval_max_n_demos),
                 max_n_demos=int(eval_max_n_demos),
-                max_unify_solutions=int(MAX_UNIFY_SOLUTIONS),
-                demo_distribution=str(demo_distribution),
                 demo_distribution_alpha=float(eval_alpha),
                 demo_ranked=bool(eval_demo_ranked),
-                demo_all=bool(demo_all),
-                include_oracle=bool(include_oracle),
             )
         else:
             rollout_demo_adapter.rule_bank = temp_bank
 
-        # Sample one rollout example from this bank
-        examples = sample_rollout_examples(
-            rule_bank=temp_bank,
-            distance=2,
-            n_examples=1,
-            initial_ant_max=int(INITIAL_ANT_MAX),
-            max_steps=2,
-            max_unify_solutions=int(MAX_UNIFY_SOLUTIONS),
-            rng=rollout_rng,
-        )
+        example = eval_task.sample_rollout_example(rollout_rng, rule_bank=temp_bank)
 
         # Run rollout with the temp bank
         result = run_layer_rollout_fol(
             rule_bank=temp_bank,
-            example=examples[0],
+            example=example,
             model=model_fn,
             adapter=rollout_demo_adapter,
             tokenizer=tokenizer,
@@ -663,8 +629,8 @@ def _evaluate_role_for_demo(
             n_rollout_goal_not_reached += 1
 
         # Per-step reachability tracking
-        goal_atom = parse_atom_text(examples[0].goal_atom)
-        goal_layer = int(examples[0].start_layer) + int(examples[0].distance)
+        goal_atom = parse_atom_text(example.goal_atom)
+        goal_layer = int(example.start_layer) + int(example.distance)
         for step in result.steps:
             if step.matched_rule_statement is None:
                 continue
@@ -1261,23 +1227,23 @@ for case in tqdm(all_cases, desc="cases", leave=True):
         jit_step=True,
     )
     metrics_by_role_eval_demo_all = {}
-    # for role in EVAL_ROLES:
-    #     metrics_by_role_eval_demo_all[str(role)] = _evaluate_role_for_demo(
-    #         case.optimizer,
-    #         task_shape=bundle["task_shape"],
-    #         role=str(role),
-    #         tokenizer=bundle["tokenizer"],
-    #         rule_bank=bundle["base_bank"],
-    #         n_seq_ar=int(bundle["demo_all_n_seq"]),
-    #         max_completion_len=int(bundle["max_completion_len"]),
-    #         n_iters=demo_all_n_iters,
-    #         eval_max_n_demos=0,
-    #         eval_alpha=0.0,
-    #         demo_all=True,
-    #         batch_size=demo_all_batch_size,
-    #         model_fn=model_fn,
-    #         shared_adapter=demo_all_adapter,
-    #     )
+    for role in EVAL_ROLES:
+        metrics_by_role_eval_demo_all[str(role)] = _evaluate_role_for_demo(
+            case.optimizer,
+            task_shape=bundle["task_shape"],
+            role=str(role),
+            tokenizer=bundle["tokenizer"],
+            rule_bank=bundle["base_bank"],
+            n_seq_ar=int(bundle["demo_all_n_seq"]),
+            max_completion_len=int(bundle["max_completion_len"]),
+            n_iters=demo_all_n_iters,
+            eval_max_n_demos=0,
+            eval_alpha=0.0,
+            demo_all=True,
+            batch_size=demo_all_batch_size,
+            model_fn=model_fn,
+            shared_adapter=demo_all_adapter,
+        )
 
     post_eval_wall_s = time.perf_counter() - post_eval_start
 

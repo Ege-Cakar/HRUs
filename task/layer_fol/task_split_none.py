@@ -58,6 +58,9 @@ class NoSplitStrategy(FOLTaskSplitStrategy):
         include_oracle: bool,
         completion_format: str,
         rng: np.random.Generator,
+        demo_distribution: str = "uniform",
+        demo_distribution_alpha: float = 1.0,
+        demo_ranked: bool = True,
         demo_all: bool = False,
     ) -> "NoSplitStrategy":
         if rule_bank_path is not None:
@@ -89,9 +92,9 @@ class NoSplitStrategy(FOLTaskSplitStrategy):
             include_oracle=bool(include_oracle),
             forced_step_idx=None,
             completion_format=str(completion_format),
-            demo_distribution="uniform",
-            demo_distribution_alpha=1.0,
-            demo_ranked=True,
+            demo_distribution=str(demo_distribution),
+            demo_distribution_alpha=float(demo_distribution_alpha),
+            demo_ranked=bool(demo_ranked),
             demo_all=bool(demo_all),
         )
         return cls(
@@ -113,19 +116,9 @@ class NoSplitStrategy(FOLTaskSplitStrategy):
             init_fn=_init_fol_online_worker,
             sample_records_fn=_sample_fol_online_worker_records,
             initargs=(
-                int(self.sample_config.seed_base),
+                self.sample_config.to_dict(),
                 self.rule_bank.to_dict(),
                 None,
-                tuple(int(distance) for distance in self.sample_config.distances),
-                int(self.sample_config.initial_ant_max),
-                int(self.sample_config.sample_max_attempts),
-                int(self.sample_config.max_unify_solutions),
-                int(self.sample_config.max_n_demos),
-                int(self.sample_config.min_n_demos),
-                bool(self.sample_config.include_oracle),
-                None,
-                str(self.sample_config.completion_format),
-                bool(self.sample_config.demo_all),
             ),
         )
 
@@ -137,19 +130,9 @@ class NoSplitStrategy(FOLTaskSplitStrategy):
         batch_size: int,
     ) -> dict | None:
         return {
-            "seed": int(self.sample_config.seed_base),
+            "config_payload": self.sample_config.to_dict(),
             "bank_payload": self.rule_bank.to_dict(),
             "tokenizer_payload": None,
-            "distances": tuple(int(distance) for distance in self.sample_config.distances),
-            "initial_ant_max": int(self.sample_config.initial_ant_max),
-            "sample_max_attempts": int(self.sample_config.sample_max_attempts),
-            "max_unify_solutions": int(self.sample_config.max_unify_solutions),
-            "max_n_demos": int(self.sample_config.max_n_demos),
-            "min_n_demos": int(self.sample_config.min_n_demos),
-            "include_oracle": bool(self.sample_config.include_oracle),
-            "forced_step_idx": None,
-            "completion_format": str(self.sample_config.completion_format),
-            "demo_all": bool(self.sample_config.demo_all),
             "workers": int(workers),
             "buffer_size": int(buffer_size),
             "batch_size": int(batch_size),

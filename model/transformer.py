@@ -9,6 +9,7 @@ import numpy as np
 from flax import nnx
 
 from model.mup import MuReadout, mup_attention_scale
+from model.output import apply_output_projection, validate_output_config
 
 
 @jax.tree_util.register_pytree_node_class
@@ -572,14 +573,8 @@ class Transformer(nnx.Module):
             raise ValueError(
                 f"pos_encoding must be one of 'absolute', 'rope', or 'none', got {config.pos_encoding!r}"
             )
-        if config.output_mode not in {"last_token", "full_sequence", "last_nonpad"}:
-            raise ValueError(
-                "output_mode must be one of 'last_token', 'full_sequence', or 'last_nonpad', "
-                f"got {config.output_mode!r}"
-            )
-        if config.n_pred_tokens < 1:
-            raise ValueError(f"n_pred_tokens must be >= 1, got {config.n_pred_tokens}")
-        
+        validate_output_config(config.output_mode, config.n_pred_tokens)
+
         # Token embedding
         if config.n_vocab is not None:
             self.embed = nnx.Embed(
@@ -790,28 +785,16 @@ class Transformer(nnx.Module):
         # Final RMS norm
         if self.final_ln is not None:
             x = self.final_ln(x)
-        
+
         # Output projection
-        if config.output_mode == "full_sequence":
-            out = self.output(x)  # (batch, seq_len, n_out * n_pred_tokens)
-            if config.n_pred_tokens > 1:
-                out = out.reshape(out.shape[0], out.shape[1], config.n_pred_tokens, config.n_out)
-        else:
-            if config.output_mode == "last_nonpad":
-                is_nonpad = tokens != config.pad_token_id
-                lengths = jnp.sum(is_nonpad, axis=1)
-                last_index = jnp.maximum(lengths - 1, 0)
-                batch_idx = jnp.arange(x.shape[0])
-                x = x[batch_idx, last_index, :]
-            else:
-                x = x[:, -1, :]  # (batch, n_hidden)
-            out = self.output(x)  # (batch, n_out * n_pred_tokens)
-            if config.n_pred_tokens > 1:
-                out = out.reshape(out.shape[0], config.n_pred_tokens, config.n_out)
-        
-        # Squeeze single output dimension
-        if config.n_out == 1:
-            out = out.squeeze(-1)
+        out = apply_output_projection(
+            x, self.output,
+            output_mode=config.output_mode,
+            n_pred_tokens=config.n_pred_tokens,
+            n_out=config.n_out,
+            tokens=tokens,
+            pad_token_id=config.pad_token_id,
+        )
 
         if return_cache:
             return out, TransformerKVCache(

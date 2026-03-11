@@ -35,9 +35,7 @@ from task.layer_fol import (
     sample_rollout_examples,
 )
 from task.layer_gen.util.fol_rule_bank import (
-    build_fresh_layer0_bank,
     build_random_fol_rule_bank,
-    generate_fresh_predicate_names,
 )
 from train import Case, ce_mask, warmup_cosine_schedule
 
@@ -482,51 +480,23 @@ def _evaluate_role_for_demo(
 
     rollout_demo_adapter = None
     for _ in range(int(ROLLOUT_EXAMPLES_PER_ROLE)):
-        # Build a per-example fresh bank
-        fresh_preds = generate_fresh_predicate_names(
-            len(rule_bank.predicates_for_layer(0)),
-            rollout_rng,
-            name_len=int(PREDICATE_NAME_LEN),
-        )
-        temp_bank = build_fresh_layer0_bank(
-            base_bank=rule_bank,
-            fresh_predicates=fresh_preds,
-            rules_per_transition=len(rule_bank.transition_rules(0)),
-            k_in_min=1,
-            k_in_max=int(K_IN_MAX),
-            k_out_min=1,
-            k_out_max=int(K_OUT_MAX),
-            rng=rollout_rng,
-        )
+        temp_bank = eval_task.build_fresh_temp_bank(rollout_rng)
 
-        # Build/reuse a rollout adapter that uses the temp bank for demos
         if rollout_demo_adapter is None:
-            rollout_demo_adapter = FOLDemoAugmentedAdapter(
-                base_adapter=shared_adapter,
-                rule_bank=temp_bank,
-                tokenizer=tokenizer,
+            rollout_demo_adapter = eval_task.make_demo_adapter(
+                shared_adapter,
+                temp_bank,
                 min_n_demos=int(eval_max_n_demos),
                 max_n_demos=int(eval_max_n_demos),
-                max_unify_solutions=int(MAX_UNIFY_SOLUTIONS),
             )
         else:
             rollout_demo_adapter.rule_bank = temp_bank
 
-        # Sample one rollout example from this bank
-        examples = sample_rollout_examples(
-            rule_bank=temp_bank,
-            distance=2,
-            n_examples=1,
-            initial_ant_max=int(INITIAL_ANT_MAX),
-            max_steps=2,
-            max_unify_solutions=int(MAX_UNIFY_SOLUTIONS),
-            rng=rollout_rng,
-        )
+        example = eval_task.sample_rollout_example(rollout_rng, rule_bank=temp_bank)
 
-        # Run rollout with the temp bank
         result = run_layer_rollout_fol(
             rule_bank=temp_bank,
-            example=examples[0],
+            example=example,
             model=model_fn,
             adapter=rollout_demo_adapter,
             tokenizer=tokenizer,

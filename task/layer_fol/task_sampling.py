@@ -209,48 +209,59 @@ def sample_online_fresh_record(
     rng: np.random.Generator,
     config: FreshOnlineSampleConfig,
 ) -> dict:
-    fresh_preds = generate_fresh_predicate_names(
-        config.fresh_layer0_predicates,
-        rng,
-        name_len=config.predicate_name_len,
-    )
-    temp_bank = build_fresh_layer0_bank(
-        base_bank=base_bank,
-        fresh_predicates=fresh_preds,
-        rules_per_transition=config.fresh_rules_per_transition,
-        k_in_min=config.k_in_min,
-        k_in_max=config.k_in_max,
-        k_out_min=config.k_out_min,
-        k_out_max=config.k_out_max,
-        rng=rng,
-    )
-    distance = 2
-    sampled = _sample_problem_with_retry(
-        bank=temp_bank,
-        distance=distance,
-        initial_ant_max=config.initial_ant_max,
-        rng=rng,
-        sample_max_attempts=config.sample_max_attempts,
-        max_unify_solutions=config.max_unify_solutions,
-        failure_label="fresh-ICL FOLLayerTask record",
-    )
-    record, src_layer, demo_schemas, demo_instances, demo_ranks = _base_record(
-        tokenizer=tokenizer,
-        rule_bank=temp_bank,
-        rng=rng,
-        sampled=sampled,
-        distance=distance,
-        config=config,
-    )
-    record["rule_context"] = fresh_rule_context(
-        base_bank=base_bank,
-        temp_bank=temp_bank,
-        src_layer=int(src_layer),
-        demo_schemas=demo_schemas,
-        demo_instances=demo_instances,
-        demo_ranks=demo_ranks,
-    )
-    return record
+    distance = int(config.distances[0])
+    last_err = None
+    for _ in range(3):
+        fresh_preds = generate_fresh_predicate_names(
+            config.fresh_layer0_predicates,
+            rng,
+            name_len=config.predicate_name_len,
+        )
+        temp_bank = build_fresh_layer0_bank(
+            base_bank=base_bank,
+            fresh_predicates=fresh_preds,
+            rules_per_transition=config.fresh_rules_per_transition,
+            k_in_min=config.k_in_min,
+            k_in_max=config.k_in_max,
+            k_out_min=config.k_out_min,
+            k_out_max=config.k_out_max,
+            rng=rng,
+        )
+        try:
+            sampled = sample_fol_problem(
+                bank=temp_bank,
+                distance=distance,
+                initial_ant_max=int(config.initial_ant_max),
+                rng=rng,
+                max_attempts=int(config.sample_max_attempts),
+                max_unify_solutions=int(config.max_unify_solutions),
+            )
+        except RuntimeError as err:
+            last_err = err
+            continue
+
+        record, src_layer, demo_schemas, demo_instances, demo_ranks = _base_record(
+            tokenizer=tokenizer,
+            rule_bank=temp_bank,
+            rng=rng,
+            sampled=sampled,
+            distance=distance,
+            config=config,
+        )
+        record["rule_context"] = fresh_rule_context(
+            base_bank=base_bank,
+            temp_bank=temp_bank,
+            src_layer=int(src_layer),
+            demo_schemas=demo_schemas,
+            demo_instances=demo_instances,
+            demo_ranks=demo_ranks,
+        )
+        return record
+
+    raise RuntimeError(
+        f"Failed to sample fresh-ICL FOLLayerTask record for distance={distance} "
+        f"after 3 retries with max_attempts={int(config.sample_max_attempts)}."
+    ) from last_err
 
 
 def _worker_seed(seed_base: int) -> int:
@@ -262,59 +273,45 @@ def _worker_seed(seed_base: int) -> int:
 
 
 def _init_fol_online_worker(
-    seed_base: int,
+    config_payload: dict,
     bank_payload: dict,
     tokenizer_payload: dict | None,
-    distances: tuple[int, ...],
-    initial_ant_max: int,
-    sample_max_attempts: int,
-    max_unify_solutions: int,
-    max_n_demos: int,
-    min_n_demos: int,
-    include_oracle: bool,
-    forced_step_idx: int | None,
-    completion_format: str = "single",
-    demo_all: bool = False,
 ) -> None:
+    config = OnlineSampleConfig.from_dict(config_payload)
+    is_fresh = isinstance(config, FreshOnlineSampleConfig)
     bank = FOLRuleBank.from_dict(bank_payload)
     if tokenizer_payload is None:
         tokenizer = tokenize_layer_fol.build_tokenizer_from_rule_bank(bank)
     else:
         tokenizer = tokenize_layer_fol.FOLLayerTokenizer.from_dict(tokenizer_payload)
-    _FOL_ONLINE_WORKER_LOCAL.state = {
+    state = {
         "bank": bank,
         "tokenizer": tokenizer,
-        "config": OnlineSampleConfig(
-            seed_base=int(seed_base),
-            distances=tuple(int(distance) for distance in distances),
-            initial_ant_max=int(initial_ant_max),
-            sample_max_attempts=int(sample_max_attempts),
-            max_unify_solutions=int(max_unify_solutions),
-            max_n_demos=int(max_n_demos),
-            min_n_demos=int(min_n_demos),
-            include_oracle=bool(include_oracle),
-            forced_step_idx=(
-                None if forced_step_idx is None else int(forced_step_idx)
-            ),
-            completion_format=str(completion_format),
-            demo_distribution="uniform",
-            demo_distribution_alpha=1.0,
-            demo_ranked=True,
-            demo_all=bool(demo_all),
-        ),
-        "rng": np.random.default_rng(_worker_seed(seed_base)),
+        "config": config,
+        "rng": np.random.default_rng(_worker_seed(config.seed_base)),
     }
+    if is_fresh:
+        state["base_bank"] = bank
+    _FOL_ONLINE_WORKER_LOCAL.state = state
 
 
 def _sample_fol_online_worker_record() -> dict:
     state = getattr(_FOL_ONLINE_WORKER_LOCAL, "state", None)
     if state is None:
         raise RuntimeError("FOL online worker state was not initialized.")
+    config = state["config"]
+    if isinstance(config, FreshOnlineSampleConfig):
+        return sample_online_fresh_record(
+            base_bank=state["base_bank"],
+            tokenizer=state["tokenizer"],
+            rng=state["rng"],
+            config=config,
+        )
     return sample_online_record(
         bank=state["bank"],
         tokenizer=state["tokenizer"],
         rng=state["rng"],
-        config=state["config"],
+        config=config,
     )
 
 
@@ -323,78 +320,3 @@ def _sample_fol_online_worker_records(n_records: int) -> list[dict]:
     if n_records < 1:
         raise ValueError(f"n_records must be >= 1, got {n_records}")
     return [_sample_fol_online_worker_record() for _ in range(n_records)]
-
-
-def _init_fol_online_fresh_worker(
-    seed_base: int,
-    base_bank_payload: dict,
-    tokenizer_payload: dict,
-    fresh_layer0_predicates: int,
-    fresh_rules_per_transition: int,
-    k_in_min: int,
-    k_in_max: int,
-    k_out_min: int,
-    k_out_max: int,
-    initial_ant_max: int,
-    sample_max_attempts: int,
-    max_unify_solutions: int,
-    max_n_demos: int,
-    min_n_demos: int,
-    include_oracle: bool,
-    forced_step_idx: int | None,
-    completion_format: str,
-    predicate_name_len: int = 4,
-    demo_distribution: str = "uniform",
-    demo_distribution_alpha: float = 1.0,
-    demo_ranked: bool = True,
-    demo_all: bool = False,
-) -> None:
-    _FOL_ONLINE_WORKER_LOCAL.state = {
-        "base_bank": FOLRuleBank.from_dict(base_bank_payload),
-        "tokenizer": tokenize_layer_fol.FOLLayerTokenizer.from_dict(tokenizer_payload),
-        "config": FreshOnlineSampleConfig(
-            seed_base=int(seed_base),
-            distances=(2,),
-            initial_ant_max=int(initial_ant_max),
-            sample_max_attempts=int(sample_max_attempts),
-            max_unify_solutions=int(max_unify_solutions),
-            max_n_demos=int(max_n_demos),
-            min_n_demos=int(min_n_demos),
-            include_oracle=bool(include_oracle),
-            forced_step_idx=(
-                None if forced_step_idx is None else int(forced_step_idx)
-            ),
-            completion_format=str(completion_format),
-            fresh_layer0_predicates=int(fresh_layer0_predicates),
-            fresh_rules_per_transition=int(fresh_rules_per_transition),
-            k_in_min=int(k_in_min),
-            k_in_max=int(k_in_max),
-            k_out_min=int(k_out_min),
-            k_out_max=int(k_out_max),
-            predicate_name_len=int(predicate_name_len),
-            demo_distribution=str(demo_distribution),
-            demo_distribution_alpha=float(demo_distribution_alpha),
-            demo_ranked=bool(demo_ranked),
-            demo_all=bool(demo_all),
-        ),
-        "rng": np.random.default_rng(_worker_seed(seed_base)),
-    }
-
-
-def _sample_fol_online_fresh_worker_record() -> dict:
-    state = getattr(_FOL_ONLINE_WORKER_LOCAL, "state", None)
-    if state is None:
-        raise RuntimeError("FOL online fresh worker state was not initialized.")
-    return sample_online_fresh_record(
-        base_bank=state["base_bank"],
-        tokenizer=state["tokenizer"],
-        rng=state["rng"],
-        config=state["config"],
-    )
-
-
-def _sample_fol_online_fresh_worker_records(n_records: int) -> list[dict]:
-    n_records = int(n_records)
-    if n_records < 1:
-        raise ValueError(f"n_records must be >= 1, got {n_records}")
-    return [_sample_fol_online_fresh_worker_record() for _ in range(n_records)]

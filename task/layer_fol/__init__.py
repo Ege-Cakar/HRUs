@@ -79,9 +79,7 @@ from .preview import (
 )
 from .task import (
     FOLLayerTask,
-    _init_fol_online_fresh_worker,
     _init_fol_online_worker,
-    _sample_fol_online_fresh_worker_records,
     _sample_fol_online_worker_records,
 )
 
@@ -151,8 +149,6 @@ __all__ = [
     "summarize_first_transition_counts",
     "_init_fol_online_worker",
     "_sample_fol_online_worker_records",
-    "_init_fol_online_fresh_worker",
-    "_sample_fol_online_fresh_worker_records",
     "_safe_rate",
     "_sorted_fol_atoms",
 ]
