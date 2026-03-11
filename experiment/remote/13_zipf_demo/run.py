@@ -54,8 +54,8 @@ USE_WANDB = True
 
 EVAL_ROLES = ["train", "eval"]
 
-SWEEP_TRAIN_ALPHA = [0, 0.5, 1, 10]
-EVAL_ALPHA_SWEEP = [0, 0.5, 1, 10]
+SWEEP_TRAIN_ALPHA = [0, 2, 3, 4, 10]
+EVAL_ALPHA_SWEEP = [0, 1, 2, 3, 4, 10]
 
 SWEEP_TRAIN_DEMO_RANKED = [True, False]
 EVAL_DEMO_RANKED_SWEEP = [True, False]
@@ -69,7 +69,7 @@ BATCH_SIZE = 32
 GRAD_ACCUM_STEPS = 1
 EFFECTIVE_BATCH_SIZE = int(BATCH_SIZE) * int(GRAD_ACCUM_STEPS)
 TRAIN_ITERS_SWEEP = [25600]
-TEST_EVERY = 100
+TEST_EVERY = 1000
 TEST_ITERS = 2
 ROLLOUT_EXAMPLES_PER_ROLE = BATCH_SIZE
 EVAL_ITERS_PER_ROLE = 128 // BATCH_SIZE
@@ -80,8 +80,8 @@ SWEEP_MID_PRED = [256]
 
 SWEEP_TASK_SHAPES = [
     {
-        "predicates_per_layer": (1, p1, BASE_NUM_PRED),
-        "rules_per_transition": (BASE_NUM_PRED, BASE_NUM_PRED**2),
+        "predicates_per_layer": (BASE_NUM_PRED, p1, BASE_NUM_PRED),
+        "rules_per_transition": (BASE_NUM_PRED**2, BASE_NUM_PRED**2),
     }
     for p1 in SWEEP_MID_PRED
 ]
