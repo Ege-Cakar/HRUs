@@ -207,9 +207,10 @@ class FOLLayerTask:
                 f"max_unify_solutions must be >= 1, got {self.max_unify_solutions}"
             )
         self.demo_distribution = str(demo_distribution)
-        if self.demo_distribution not in {"uniform", "zipf", "zipf_headless"}:
+        if self.demo_distribution not in {"uniform", "zipf", "zipf_headless", "zipf_per_rule", "zipf_per_rule_headless"}:
             raise ValueError(
-                "demo_distribution must be 'uniform', 'zipf', or 'zipf_headless', "
+                "demo_distribution must be 'uniform', 'zipf', 'zipf_headless', "
+                "'zipf_per_rule', or 'zipf_per_rule_headless', "
                 f"got {self.demo_distribution!r}"
             )
         self.demo_distribution_alpha = float(demo_distribution_alpha)

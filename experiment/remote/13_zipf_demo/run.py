@@ -98,7 +98,7 @@ SAMPLE_MAX_ATTEMPTS = 4096
 MAX_UNIFY_SOLUTIONS = 128
 BASE_BANK_SEED = 2047
 PREDICATE_NAME_LEN = 4
-TRAIN_INCLUDE_ORACLE = True
+TRAIN_INCLUDE_ORACLE = False
 
 TRAIN_FIXED_LENGTH_MODE = "next_pow2"
 EVAL_FIXED_LENGTH_MODE = "next_pow2"
@@ -581,9 +581,7 @@ def _evaluate_role_for_demo(
     rollout_steps: list[int] = []
 
     step0_reachable_count = 0
-    step0_valid_count = 0
     step1_reachable_count = 0
-    step1_valid_count = 0
 
     rollout_demo_adapter = None
     for _ in range(int(ROLLOUT_EXAMPLES_PER_ROLE)):
@@ -632,7 +630,7 @@ def _evaluate_role_for_demo(
         goal_atom = parse_atom_text(example.goal_atom)
         goal_layer = int(example.start_layer) + int(example.distance)
         for step in result.steps:
-            if step.matched_rule_statement is None:
+            if step.matched_rule_statement is None or step.inapplicable_rule_error:
                 continue
             try:
                 lhs, rhs = parse_clause_text(str(step.matched_rule_statement))
@@ -653,11 +651,9 @@ def _evaluate_role_for_demo(
                 reachable = False
 
             if int(step.step_idx) == 0:
-                step0_valid_count += 1
                 if reachable:
                     step0_reachable_count += 1
             elif int(step.step_idx) == 1:
-                step1_valid_count += 1
                 if reachable:
                     step1_reachable_count += 1
 
@@ -665,9 +661,6 @@ def _evaluate_role_for_demo(
 
     def _rollout_rate(n: int) -> float:
         return float(n) / float(n_rollout_total) if n_rollout_total > 0 else 0.0
-
-    def _safe_rate(num: int, denom: int) -> float:
-        return float(num) / float(denom) if denom > 0 else float("nan")
 
     agg.update(
         {
@@ -691,10 +684,8 @@ def _evaluate_role_for_demo(
             ),
             "rollout_goal_not_reached_rate": _rollout_rate(n_rollout_goal_not_reached),
             "rollout_avg_steps": float(np.mean(rollout_steps)) if rollout_steps else 0.0,
-            "rollout_step0_reachable_rate": _safe_rate(step0_reachable_count, step0_valid_count),
-            "rollout_step1_reachable_rate": _safe_rate(step1_reachable_count, step1_valid_count),
-            "rollout_step0_valid_count": int(step0_valid_count),
-            "rollout_step1_valid_count": int(step1_valid_count),
+            "rollout_step0_reachable_rate": _rollout_rate(step0_reachable_count),
+            "rollout_step1_reachable_rate": _rollout_rate(step1_reachable_count),
         }
     )
 

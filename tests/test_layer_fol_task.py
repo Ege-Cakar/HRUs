@@ -2447,3 +2447,135 @@ def test_layer_fol_task_demo_ranked_produces_sorted_ranks() -> None:
             assert demo_ranks[i] >= demo_ranks[i + 1], (
                 f"demo_ranks not descending: {demo_ranks}"
             )
+
+
+def test_zipf_per_rule_high_alpha_favors_rank_1() -> None:
+    """With very high alpha, nearly all samples should come from rank 1."""
+    from task.layer_fol.demos import _sample_demo_schemas_zipf_per_rule
+
+    r1 = FOLLayerRule(src_layer=0, dst_layer=1, lhs=(FOLAtom("A", ()),), rhs=(FOLAtom("M", ()),))
+    r4 = FOLLayerRule(src_layer=0, dst_layer=1, lhs=(FOLAtom("C", ()),), rhs=(FOLAtom("N", ()),))
+
+    ranked = {1: [r1], 2: [], 3: [], 4: [r4]}
+    rng = np.random.default_rng(42)
+    schemas, ranks = _sample_demo_schemas_zipf_per_rule(
+        rng=rng,
+        ranked_rules=ranked,
+        n_demos=100,
+        alpha=10.0,
+        include_oracle=False,
+        oracle_rule=None,
+    )
+    assert len(schemas) == 100
+    assert len(ranks) == 100
+    rank1_count = sum(1 for r in ranks if r == 1)
+    assert rank1_count > 90, f"Expected rank 1 to dominate, got {rank1_count}/100"
+
+
+def test_zipf_per_rule_alpha_0_uniform_across_rules() -> None:
+    """With alpha=0, weight is 1 per rule → 1 rank-1 rule vs 3 rank-2 rules gives ~25% / ~75%."""
+    from task.layer_fol.demos import _sample_demo_schemas_zipf_per_rule
+
+    r1 = FOLLayerRule(src_layer=0, dst_layer=1, lhs=(FOLAtom("A", ()),), rhs=(FOLAtom("M", ()),))
+    r2a = FOLLayerRule(src_layer=0, dst_layer=1, lhs=(FOLAtom("B", ()),), rhs=(FOLAtom("N", ()),))
+    r2b = FOLLayerRule(src_layer=0, dst_layer=1, lhs=(FOLAtom("C", ()),), rhs=(FOLAtom("P", ()),))
+    r2c = FOLLayerRule(src_layer=0, dst_layer=1, lhs=(FOLAtom("D", ()),), rhs=(FOLAtom("Q", ()),))
+
+    ranked = {1: [r1], 2: [r2a, r2b, r2c], 3: [], 4: []}
+    rng = np.random.default_rng(42)
+    schemas, ranks = _sample_demo_schemas_zipf_per_rule(
+        rng=rng,
+        ranked_rules=ranked,
+        n_demos=4000,
+        alpha=0.0,
+        include_oracle=False,
+        oracle_rule=None,
+    )
+    from collections import Counter
+    counts = Counter(ranks)
+    # 1 rule at rank 1, 3 at rank 2 → rank 1 ~25%, rank 2 ~75%
+    assert 700 < counts[1] < 1300, f"Rank 1 count {counts[1]} not near 1000 (25%)"
+    assert 2700 < counts[2] < 3300, f"Rank 2 count {counts[2]} not near 3000 (75%)"
+
+
+def test_zipf_per_rule_count_sensitivity() -> None:
+    """1 rule rank 1, 10 rules rank 2, alpha=1 → rank 1 fraction ~1/(1+10/2) = 2/12 ≈ 0.167."""
+    from task.layer_fol.demos import _sample_demo_schemas_zipf_per_rule
+
+    r1 = FOLLayerRule(src_layer=0, dst_layer=1, lhs=(FOLAtom("A", ()),), rhs=(FOLAtom("M", ()),))
+    r2_rules = [
+        FOLLayerRule(
+            src_layer=0, dst_layer=1,
+            lhs=(FOLAtom(f"B{i}", ()),),
+            rhs=(FOLAtom(f"N{i}", ()),),
+        )
+        for i in range(10)
+    ]
+
+    ranked = {1: [r1], 2: r2_rules, 3: [], 4: []}
+    rng = np.random.default_rng(42)
+    schemas, ranks = _sample_demo_schemas_zipf_per_rule(
+        rng=rng,
+        ranked_rules=ranked,
+        n_demos=6000,
+        alpha=1.0,
+        include_oracle=False,
+        oracle_rule=None,
+    )
+    rank1_frac = sum(1 for r in ranks if r == 1) / len(ranks)
+    # Expected: 1/(1 + 10*0.5) = 1/6 ≈ 0.167
+    assert 0.10 < rank1_frac < 0.25, (
+        f"rank 1 fraction {rank1_frac:.3f} not near expected ~0.167"
+    )
+
+
+def test_zipf_per_rule_headless_excludes_rank_1() -> None:
+    """headless=True, include_oracle=False → no rank-1 in results."""
+    from task.layer_fol.demos import _sample_demo_schemas_zipf_per_rule
+
+    r1 = FOLLayerRule(src_layer=0, dst_layer=1, lhs=(FOLAtom("A", ()),), rhs=(FOLAtom("M", ()),))
+    r2 = FOLLayerRule(src_layer=0, dst_layer=1, lhs=(FOLAtom("B", ()),), rhs=(FOLAtom("N", ()),))
+    r4 = FOLLayerRule(src_layer=0, dst_layer=1, lhs=(FOLAtom("D", ()),), rhs=(FOLAtom("Q", ()),))
+
+    ranked = {1: [r1], 2: [r2], 3: [], 4: [r4]}
+    rng = np.random.default_rng(42)
+    schemas, ranks = _sample_demo_schemas_zipf_per_rule(
+        rng=rng,
+        ranked_rules=ranked,
+        n_demos=100,
+        alpha=1.0,
+        include_oracle=False,
+        oracle_rule=None,
+        headless=True,
+    )
+    assert len(schemas) == 100
+    assert len(ranks) == 100
+    assert 1 not in ranks, f"Rank 1 should not appear in headless mode, got ranks={set(ranks)}"
+
+
+def test_zipf_per_rule_include_oracle() -> None:
+    """include_oracle=True, headless=True → exactly one rank-1 (oracle) demo, rest from ranks 2-4."""
+    from task.layer_fol.demos import _sample_demo_schemas_zipf_per_rule
+
+    r1 = FOLLayerRule(src_layer=0, dst_layer=1, lhs=(FOLAtom("A", ()),), rhs=(FOLAtom("M", ()),))
+    r2 = FOLLayerRule(src_layer=0, dst_layer=1, lhs=(FOLAtom("B", ()),), rhs=(FOLAtom("N", ()),))
+    r4 = FOLLayerRule(src_layer=0, dst_layer=1, lhs=(FOLAtom("D", ()),), rhs=(FOLAtom("Q", ()),))
+
+    ranked = {1: [r1], 2: [r2], 3: [], 4: [r4]}
+    rng = np.random.default_rng(42)
+    schemas, ranks = _sample_demo_schemas_zipf_per_rule(
+        rng=rng,
+        ranked_rules=ranked,
+        n_demos=10,
+        alpha=1.0,
+        include_oracle=True,
+        oracle_rule=r1,
+        headless=True,
+    )
+    assert len(schemas) == 10
+    assert len(ranks) == 10
+    rank1_count = sum(1 for r in ranks if r == 1)
+    assert rank1_count == 1, f"Expected exactly 1 oracle (rank 1), got {rank1_count}"
+    non_oracle_ranks = [r for r in ranks if r != 1]
+    for r in non_oracle_ranks:
+        assert r in {2, 4}, f"Non-oracle demo should be rank 2 or 4, got {r}"

@@ -23,6 +23,7 @@ OUT_DIR = Path("fig/13_zipf_demo")
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 SELECTION_EVAL_MAX_N_DEMOS = 8
+TRAIN_MAX_N_DEMOS = 8
 
 ROLE_EVAL_DEMO_METRIC_COLS = [
     "loss",
@@ -434,12 +435,13 @@ def _plot_role_metric_group(
         estimator="mean",
         errorbar=None,
         facet_kws={"sharex": True, "sharey": bool(sharey)},
-        height=3.0,
-        aspect=1.15,
+        height=3.5,
+        aspect=1.3,
         hue_order=eval_alpha_order,
     )
     for ax in np.ravel(g.axes):
         ax.set_xlim(left=0.0)
+        ax.axvline(TRAIN_MAX_N_DEMOS, color="gray", linestyle="--", linewidth=0.8, alpha=0.6)
     g.set_axis_labels("Eval max_n_demos", "Metric value")
     g.set_titles("{row_name} | {col_name}")
     legend = g._legend

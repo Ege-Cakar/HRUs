@@ -39,6 +39,7 @@ if str(ROOT) not in sys.path:
 from task.layer_fol.demos import (
     _classify_rules_by_rank,
     _sample_demo_schemas_zipf,
+    _sample_demo_schemas_zipf_per_rule,
 )
 from task.layer_gen.util.fol_rule_bank import (
     FOLAtom,
@@ -57,9 +58,10 @@ CONFIG = {
     "seed": 0,
     "out_dir": ROOT / "task" / "interactive" / "set" / "layer_stats_mid_pred",
     "base_num_pred": 16,
-    "sweep_mid_pred": [16, 32, 64, 128, 256],
-    "sweep_alpha": [0, 0.5, 1, 10],
-    "exact_n_demos_values": [1, 2, 4, 8, 16, 32],
+    "sweep_mid_pred": [256],
+    "sweep_alpha": [0, 0.5, 1, 2, 3, 4, 5, 6, 8, 10, 12],
+    "exact_n_demos_values": [1, 2, 4, 8, 16, 24, 32, 40, 48, 56, 64],
+    "sweep_demo_distributions": ["zipf", "zipf_per_rule"],
     "step_indices": (0, 1),
     "n_banks_per_setting": 2,
     "n_prompts_per_bank": 200,
@@ -89,14 +91,15 @@ if _out_dir_env is not None and str(_out_dir_env).strip():
 if os.environ.get("LAYER_STATS_MID_PRED_SMOKE", "").strip():
     CONFIG["n_banks_per_setting"] = 1
     CONFIG["n_prompts_per_bank"] = 24
-    CONFIG["sweep_mid_pred"] = [16, 32]
+    CONFIG["sweep_mid_pred"] = [32, 64]
     CONFIG["sweep_alpha"] = [0, 1]
     CONFIG["exact_n_demos_values"] = [1, 4]
+    CONFIG["sweep_demo_distributions"] = ["zipf", "zipf_per_rule"]
 
 ### START TEST CONFIGS
 # CONFIG["n_banks_per_setting"] = 1
 # CONFIG["n_prompts_per_bank"] = 24
-# CONFIG["sweep_mid_pred"] = [16, 32]
+# CONFIG["sweep_mid_pred"] = [32, 64]
 # CONFIG["sweep_alpha"] = [0, 1]
 # CONFIG["exact_n_demos_values"] = [1, 4]
 # CONFIG["step_indices"] = (0,)
@@ -170,8 +173,10 @@ def _build_base_bank(
     arity_max = int(bank_cfg["arity_max"])
     return build_random_fol_rule_bank(
         n_layers=3,
-        predicates_per_layer=(1, int(mid_pred), int(base_num_pred)),
-        rules_per_transition=(int(base_num_pred), int(base_num_pred) ** 2),
+        predicates_per_layer=(int(base_num_pred), int(mid_pred), int(base_num_pred)),
+        rules_per_transition=(int(base_num_pred) ** 2, int(base_num_pred) ** 2),
+        # predicates_per_layer=(1, int(mid_pred), int(base_num_pred)),
+        # rules_per_transition=(int(base_num_pred), int(base_num_pred) ** 2),
         arity_min=min(1, arity_max),
         arity_max=arity_max,
         vars_per_rule_max=int(bank_cfg["vars_per_rule_max"]),
@@ -232,6 +237,12 @@ def _sample_prompt_state_fresh(
     return temp_bank, src_layer, ants, goal_atom, goal_layer
 
 
+_SAMPLER_DISPATCH = {
+    "zipf": _sample_demo_schemas_zipf,
+    "zipf_per_rule": _sample_demo_schemas_zipf_per_rule,
+}
+
+
 # <codecell>
 def run_study(cfg: dict[str, Any]) -> tuple[pd.DataFrame, pd.DataFrame]:
     seed = int(cfg["seed"])
@@ -239,6 +250,9 @@ def run_study(cfg: dict[str, Any]) -> tuple[pd.DataFrame, pd.DataFrame]:
     sweep_mid_pred = [int(v) for v in cfg["sweep_mid_pred"]]
     sweep_alpha = [float(v) for v in cfg["sweep_alpha"]]
     exact_n_demos_values = [int(v) for v in cfg["exact_n_demos_values"]]
+    sweep_demo_distributions = [
+        str(d) for d in cfg.get("sweep_demo_distributions", ["zipf"])
+    ]
     n_banks = int(cfg["n_banks_per_setting"])
     n_prompts = int(cfg["n_prompts_per_bank"])
     base_num_pred = int(cfg["base_num_pred"])
@@ -261,14 +275,15 @@ def run_study(cfg: dict[str, Any]) -> tuple[pd.DataFrame, pd.DataFrame]:
     summary_rows: list[dict[str, Any]] = []
     trial_rows: list[dict[str, Any]] = []
 
-    # Accumulator key: (mid_pred, alpha, n_demos, step_idx)
-    AccKey = tuple[int, float, int, int]
+    # Accumulator key: (demo_distribution, mid_pred, alpha, n_demos, step_idx)
+    AccKey = tuple[str, int, float, int, int]
     p_demo_good_acc: dict[AccKey, list[float]] = {}
     p_random_good_acc: dict[AccKey, list[float]] = {}
     n_prompts_acc: dict[AccKey, int] = {}
     n_rank1_sum_acc: dict[AccKey, int] = {}
     n_total_rules_sum_acc: dict[AccKey, int] = {}
     n_sample_failures_acc: dict[AccKey, int] = {}
+    p_good_is_valid_acc: dict[AccKey, list[float]] = {}
 
     settings_total = len(sweep_mid_pred)
     settings_bar = tqdm(
@@ -307,12 +322,13 @@ def run_study(cfg: dict[str, Any]) -> tuple[pd.DataFrame, pd.DataFrame]:
                     )
                     prompt_bar.update(1)
                     if result is None:
-                        for alpha in sweep_alpha:
-                            for n_demos in exact_n_demos_values:
-                                key: AccKey = (mid_pred, alpha, n_demos, step_idx)
-                                n_sample_failures_acc[key] = (
-                                    n_sample_failures_acc.get(key, 0) + 1
-                                )
+                        for demo_dist in sweep_demo_distributions:
+                            for alpha in sweep_alpha:
+                                for n_demos in exact_n_demos_values:
+                                    key: AccKey = (demo_dist, mid_pred, alpha, n_demos, step_idx)
+                                    n_sample_failures_acc[key] = (
+                                        n_sample_failures_acc.get(key, 0) + 1
+                                    )
                         continue
 
                     temp_bank, src_layer, ants, goal_atom, goal_layer = result
@@ -332,60 +348,79 @@ def run_study(cfg: dict[str, Any]) -> tuple[pd.DataFrame, pd.DataFrame]:
                     # P(random good) for this prompt
                     p_random_good = n_rank1 / n_total if n_total > 0 else 0.0
 
-                    for alpha in sweep_alpha:
-                        # Use a separate rng for demo sampling so alpha
-                        # variations don't interfere with the prompt rng.
-                        demo_rng = np.random.default_rng(
-                            int(prompt_rng.integers(0, np.iinfo(np.int64).max))
-                        )
-                        for n_demos in exact_n_demos_values:
-                            key = (mid_pred, alpha, n_demos, step_idx)
+                    # P(good is valid): among goal-reachable rules (rank 1 + rank 3),
+                    # what fraction are also applicable (rank 1)?
+                    n_rank3 = len(ranked.get(3, []))
+                    n_goal_reachable = n_rank1 + n_rank3
+                    p_good_is_valid = (
+                        n_rank1 / n_goal_reachable if n_goal_reachable > 0 else float("nan")
+                    )
 
-                            # Initialise accumulators on first encounter
-                            p_demo_good_acc.setdefault(key, [])
-                            p_random_good_acc.setdefault(key, [])
-                            n_prompts_acc[key] = n_prompts_acc.get(key, 0) + 1
-                            n_rank1_sum_acc[key] = (
-                                n_rank1_sum_acc.get(key, 0) + n_rank1
-                            )
-                            n_total_rules_sum_acc[key] = (
-                                n_total_rules_sum_acc.get(key, 0) + n_total
-                            )
+                    # Draw one demo_rng seed per alpha upfront so that adding
+                    # sweep_demo_distributions does not change prompt_rng state.
+                    alpha_demo_seeds = [
+                        int(prompt_rng.integers(0, np.iinfo(np.int64).max))
+                        for _ in sweep_alpha
+                    ]
 
-                            # Sample demos with Zipf(alpha)
-                            sampled, sampled_ranks = _sample_demo_schemas_zipf(
-                                rng=demo_rng,
-                                ranked_rules=ranked,
-                                n_demos=n_demos,
-                                alpha=alpha,
-                                include_oracle=False,
-                                oracle_rule=None,
-                                demo_ranked=False,
+                    for demo_dist in sweep_demo_distributions:
+                        sampler_fn = _SAMPLER_DISPATCH[demo_dist]
+                        for alpha_idx, alpha in enumerate(sweep_alpha):
+                            demo_rng = np.random.default_rng(
+                                alpha_demo_seeds[alpha_idx]
                             )
+                            for n_demos in exact_n_demos_values:
+                                key = (demo_dist, mid_pred, alpha, n_demos, step_idx)
 
-                            # P(demo good) indicator: any rank-1 rule sampled?
-                            has_good_demo = float(
-                                any(r == 1 for r in sampled_ranks)
-                            )
-                            p_demo_good_acc[key].append(has_good_demo)
-                            p_random_good_acc[key].append(p_random_good)
-
-                            if save_trial_rows:
-                                trial_rows.append(
-                                    {
-                                        "mid_pred": int(mid_pred),
-                                        "alpha": float(alpha),
-                                        "n_demos": int(n_demos),
-                                        "step_idx": int(step_idx),
-                                        "src_layer": int(src_layer),
-                                        "bank_idx": int(bank_idx),
-                                        "prompt_idx": int(prompt_idx),
-                                        "n_rank1": int(n_rank1),
-                                        "n_total_rules": int(n_total),
-                                        "p_random_good": p_random_good,
-                                        "has_good_demo": has_good_demo,
-                                    }
+                                # Initialise accumulators on first encounter
+                                p_demo_good_acc.setdefault(key, [])
+                                p_random_good_acc.setdefault(key, [])
+                                n_prompts_acc[key] = n_prompts_acc.get(key, 0) + 1
+                                n_rank1_sum_acc[key] = (
+                                    n_rank1_sum_acc.get(key, 0) + n_rank1
                                 )
+                                n_total_rules_sum_acc[key] = (
+                                    n_total_rules_sum_acc.get(key, 0) + n_total
+                                )
+
+                                # Sample demos
+                                sampled, sampled_ranks = sampler_fn(
+                                    rng=demo_rng,
+                                    ranked_rules=ranked,
+                                    n_demos=n_demos,
+                                    alpha=alpha,
+                                    include_oracle=False,
+                                    oracle_rule=None,
+                                    demo_ranked=False,
+                                )
+
+                                # P(demo good) indicator: any rank-1 rule sampled?
+                                has_good_demo = float(
+                                    any(r == 1 for r in sampled_ranks)
+                                )
+                                p_demo_good_acc[key].append(has_good_demo)
+                                p_random_good_acc[key].append(p_random_good)
+                                p_good_is_valid_acc.setdefault(key, [])
+                                p_good_is_valid_acc[key].append(p_good_is_valid)
+
+                                if save_trial_rows:
+                                    trial_rows.append(
+                                        {
+                                            "demo_distribution": str(demo_dist),
+                                            "mid_pred": int(mid_pred),
+                                            "alpha": float(alpha),
+                                            "n_demos": int(n_demos),
+                                            "step_idx": int(step_idx),
+                                            "src_layer": int(src_layer),
+                                            "bank_idx": int(bank_idx),
+                                            "prompt_idx": int(prompt_idx),
+                                            "n_rank1": int(n_rank1),
+                                            "n_total_rules": int(n_total),
+                                            "p_random_good": p_random_good,
+                                            "p_good_is_valid": p_good_is_valid,
+                                            "has_good_demo": has_good_demo,
+                                        }
+                                    )
 
         prompt_bar.close()
         settings_bar.update(1)
@@ -393,7 +428,7 @@ def run_study(cfg: dict[str, Any]) -> tuple[pd.DataFrame, pd.DataFrame]:
 
     # Build summary rows
     for key in sorted(p_demo_good_acc.keys()):
-        mid_pred, alpha, n_demos, step_idx = key
+        demo_dist, mid_pred, alpha, n_demos, step_idx = key
         demo_vals = p_demo_good_acc[key]
         random_vals = p_random_good_acc[key]
         n_total_prompts = n_prompts_acc.get(key, 0)
@@ -405,6 +440,13 @@ def run_study(cfg: dict[str, Any]) -> tuple[pd.DataFrame, pd.DataFrame]:
         p_random = float(np.mean(random_vals)) if random_vals else float("nan")
         p_random_ci_low, p_random_ci_high = _bootstrap_mean_ci(
             random_vals, rng=bootstrap_rng, n_bootstrap=n_bootstrap,
+        )
+        good_valid_vals = p_good_is_valid_acc.get(key, [])
+        # Filter NaN values (prompts with no goal-reachable rules)
+        good_valid_finite = [v for v in good_valid_vals if not np.isnan(v)]
+        p_good_valid = float(np.mean(good_valid_finite)) if good_valid_finite else float("nan")
+        p_good_valid_ci_low, p_good_valid_ci_high = _bootstrap_mean_ci(
+            good_valid_finite, rng=bootstrap_rng, n_bootstrap=n_bootstrap,
         )
 
         mean_n_rank1 = (
@@ -423,6 +465,7 @@ def run_study(cfg: dict[str, Any]) -> tuple[pd.DataFrame, pd.DataFrame]:
 
         summary_rows.append(
             {
+                "demo_distribution": str(demo_dist),
                 "mid_pred": int(mid_pred),
                 "alpha": float(alpha),
                 "n_demos": int(n_demos),
@@ -435,6 +478,9 @@ def run_study(cfg: dict[str, Any]) -> tuple[pd.DataFrame, pd.DataFrame]:
                 "p_random_good": p_random,
                 "p_random_good_ci_low": float(p_random_ci_low),
                 "p_random_good_ci_high": float(p_random_ci_high),
+                "p_good_is_valid": p_good_valid,
+                "p_good_is_valid_ci_low": float(p_good_valid_ci_low),
+                "p_good_is_valid_ci_high": float(p_good_valid_ci_high),
                 "mean_n_rank1": mean_n_rank1,
                 "mean_n_total_rules": mean_n_total_rules,
                 "n_sample_failures": n_sample_failures_acc.get(key, 0),
@@ -446,16 +492,26 @@ def run_study(cfg: dict[str, Any]) -> tuple[pd.DataFrame, pd.DataFrame]:
 
 # <codecell>
 def _plot_demo_good_heatmaps(summary_df: pd.DataFrame, out_dir: Path) -> None:
-    """Heatmaps of p_demo_good: alpha (columns) × n_demos (rows), per (mid_pred, step_idx)."""
+    """Heatmaps of p_demo_good: alpha (columns) x n_demos (rows), per (demo_distribution, mid_pred, step_idx)."""
     if summary_df.empty:
         return
     required = {"mid_pred", "alpha", "n_demos", "step_idx", "p_demo_good"}
     if not required.issubset(set(summary_df.columns)):
         return
 
-    for (mid_pred, step_idx), part in summary_df.groupby(
-        ["mid_pred", "step_idx"], sort=True
-    ):
+    has_dist = "demo_distribution" in summary_df.columns
+    group_cols = (
+        ["demo_distribution", "mid_pred", "step_idx"]
+        if has_dist
+        else ["mid_pred", "step_idx"]
+    )
+
+    for group_key, part in summary_df.groupby(group_cols, sort=True):
+        if has_dist:
+            demo_dist, mid_pred, step_idx = group_key
+        else:
+            mid_pred, step_idx = group_key
+            demo_dist = "zipf"
         heat = (
             part.pivot(index="n_demos", columns="alpha", values="p_demo_good")
             .sort_index()
@@ -474,21 +530,21 @@ def _plot_demo_good_heatmaps(summary_df: pd.DataFrame, out_dir: Path) -> None:
             cbar_kws={"label": "P(demo good)"},
         )
         plt.title(
-            f"P(demo good) heatmap (mid_pred={mid_pred}, step={step_idx})"
+            f"P(demo good) heatmap ({demo_dist}, mid_pred={mid_pred}, step={step_idx})"
         )
         plt.xlabel("alpha")
         plt.ylabel("n_demos")
         plt.tight_layout()
         plt.savefig(
             out_dir
-            / f"p_demo_good_heatmap_mid{int(mid_pred)}_step{int(step_idx)}.png",
+            / f"p_demo_good_heatmap_{demo_dist}_mid{int(mid_pred)}_step{int(step_idx)}.png",
             dpi=180,
         )
         plt.close()
 
 
 def _plot_demo_good_lines(summary_df: pd.DataFrame, out_dir: Path) -> None:
-    """Line plots of p_demo_good: alpha on x-axis, lines by n_demos, per (mid_pred, step_idx).
+    """Line plots of p_demo_good: alpha on x-axis, lines by n_demos, per (demo_distribution, mid_pred, step_idx).
 
     Includes p_random_good as a horizontal dashed reference line.
     """
@@ -502,9 +558,19 @@ def _plot_demo_good_lines(summary_df: pd.DataFrame, out_dir: Path) -> None:
     if not required.issubset(set(summary_df.columns)):
         return
 
-    for (mid_pred, step_idx), part in summary_df.groupby(
-        ["mid_pred", "step_idx"], sort=True
-    ):
+    has_dist = "demo_distribution" in summary_df.columns
+    group_cols = (
+        ["demo_distribution", "mid_pred", "step_idx"]
+        if has_dist
+        else ["mid_pred", "step_idx"]
+    )
+
+    for group_key, part in summary_df.groupby(group_cols, sort=True):
+        if has_dist:
+            demo_dist, mid_pred, step_idx = group_key
+        else:
+            mid_pred, step_idx = group_key
+            demo_dist = "zipf"
         ordered = part.sort_values(["n_demos", "alpha"])
         if ordered.empty:
             continue
@@ -515,6 +581,7 @@ def _plot_demo_good_lines(summary_df: pd.DataFrame, out_dir: Path) -> None:
             y="p_demo_good",
             hue="n_demos",
             marker="o",
+            legend="full"
         )
         for _, row in ordered.iterrows():
             if pd.isna(row["p_demo_good"]):
@@ -538,9 +605,20 @@ def _plot_demo_good_lines(summary_df: pd.DataFrame, out_dir: Path) -> None:
                 linewidth=1.5,
                 label=f"P(random good)={p_random_ref:.3f}",
             )
+        # p_good_is_valid reference line (constant across alpha/n_demos)
+        if "p_good_is_valid" in ordered.columns:
+            p_valid_ref = ordered["p_good_is_valid"].mean()
+            if not pd.isna(p_valid_ref):
+                plt.axhline(
+                    y=p_valid_ref,
+                    color="magenta",
+                    linestyle="--",
+                    linewidth=1.5,
+                    label=f"P(good is valid)={p_valid_ref:.3f}",
+                )
         plt.ylim(0.0, 1.05)
         plt.title(
-            f"P(demo good) (mid_pred={mid_pred}, step={step_idx})"
+            f"P(demo good) ({demo_dist}, mid_pred={mid_pred}, step={step_idx})"
         )
         plt.xlabel("alpha")
         plt.ylabel("P(demo good)")
@@ -548,7 +626,7 @@ def _plot_demo_good_lines(summary_df: pd.DataFrame, out_dir: Path) -> None:
         plt.tight_layout()
         plt.savefig(
             out_dir
-            / f"p_demo_good_lines_mid{int(mid_pred)}_step{int(step_idx)}.png",
+            / f"p_demo_good_lines_{demo_dist}_mid{int(mid_pred)}_step{int(step_idx)}.png",
             dpi=180,
         )
         plt.close()
@@ -626,6 +704,7 @@ def print_console_summary(summary_df: pd.DataFrame) -> None:
         print("(no rows)")
         return
     cols = [
+        "demo_distribution",
         "mid_pred",
         "alpha",
         "n_demos",
@@ -636,14 +715,16 @@ def print_console_summary(summary_df: pd.DataFrame) -> None:
         "p_random_good",
         "p_random_good_ci_low",
         "p_random_good_ci_high",
+        "p_good_is_valid",
+        "p_good_is_valid_ci_low",
+        "p_good_is_valid_ci_high",
         "mean_n_rank1",
         "mean_n_total_rules",
         "n_sample_failures",
     ]
     present = [c for c in cols if c in summary_df.columns]
-    ordered = summary_df[present].sort_values(
-        ["mid_pred", "step_idx", "alpha", "n_demos"]
-    )
+    sort_cols = [c for c in ["demo_distribution", "mid_pred", "step_idx", "alpha", "n_demos"] if c in present]
+    ordered = summary_df[present].sort_values(sort_cols)
     print(ordered.to_string(index=False))
 
 
@@ -652,3 +733,6 @@ SUMMARY_DF, TRIAL_DF = run_study(CONFIG)
 OUT_DIR = save_outputs(cfg=CONFIG, summary_df=SUMMARY_DF, trial_df=TRIAL_DF)
 print(f"\nSaved outputs to: {OUT_DIR}")
 print_console_summary(SUMMARY_DF)
+
+# <codecell>
+1 - (1 - 0.028)**128

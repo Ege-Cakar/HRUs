@@ -104,12 +104,13 @@ def augment_prompt_with_demos(
             demo_ranks=(),
         )
 
-    if demo_distribution not in {"uniform", "zipf", "zipf_headless"}:
+    if demo_distribution not in {"uniform", "zipf", "zipf_headless", "zipf_per_rule", "zipf_per_rule_headless"}:
         raise ValueError(
-            f"demo_distribution must be 'uniform', 'zipf', or 'zipf_headless', "
+            f"demo_distribution must be 'uniform', 'zipf', 'zipf_headless', "
+            f"'zipf_per_rule', or 'zipf_per_rule_headless', "
             f"got {demo_distribution!r}"
         )
-    if demo_distribution in {"zipf", "zipf_headless"} and goal_atom is None:
+    if demo_distribution in {"zipf", "zipf_headless", "zipf_per_rule", "zipf_per_rule_headless"} and goal_atom is None:
         raise ValueError(f"demo_distribution={demo_distribution!r} requires goal_atom.")
     if min_n_demos > max_n_demos:
         raise ValueError(
@@ -139,6 +140,21 @@ def augment_prompt_with_demos(
             n_demos=n_demos,
             include_oracle=include_oracle,
             oracle_rule=oracle_rule,
+        )
+    elif demo_distribution in {"zipf_per_rule", "zipf_per_rule_headless"}:
+        sampled_schemas, sampled_ranks = _sample_zipf_per_rule(
+            rule_bank=rule_bank,
+            src_layer=int(src_layer),
+            ants=ants,
+            max_unify_solutions=int(max_unify_solutions),
+            rng=rng,
+            n_demos=n_demos,
+            include_oracle=include_oracle,
+            oracle_rule=oracle_rule,
+            alpha=demo_distribution_alpha,
+            goal_atom=goal_atom,
+            headless=(demo_distribution == "zipf_per_rule_headless"),
+            demo_ranked=demo_ranked,
         )
     else:
         sampled_schemas, sampled_ranks = _sample_zipf(
@@ -591,6 +607,155 @@ def _sample_demo_schemas_zipf(
         sampled_schemas = [sampled_schemas[int(i)] for i in order]
         sampled_ranks = [sampled_ranks[int(i)] for i in order]
     return sampled_schemas, sampled_ranks
+
+
+def _build_per_rule_pool_and_weights(
+    ranked_rules: dict[int, list[FOLLayerRule]],
+    alpha: float,
+    exclude_rank_1: bool,
+) -> tuple[list[tuple[FOLLayerRule, int]], np.ndarray]:
+    """Build flat (rule, rank) list and per-rule Zipf weights."""
+    pool: list[tuple[FOLLayerRule, int]] = []
+    for rank in sorted(ranked_rules):
+        if exclude_rank_1 and rank == 1:
+            continue
+        for rule in ranked_rules[rank]:
+            pool.append((rule, rank))
+    if not pool:
+        return pool, np.array([])
+    weights = np.array([1.0 / (rank ** alpha) for _, rank in pool])
+    weights /= weights.sum()
+    return pool, weights
+
+
+def _sample_demo_schemas_zipf_per_rule(
+    *,
+    rng: np.random.Generator,
+    ranked_rules: dict[int, list[FOLLayerRule]],
+    n_demos: int,
+    alpha: float,
+    include_oracle: bool,
+    oracle_rule: FOLLayerRule | None,
+    headless: bool = False,
+    demo_ranked: bool = True,
+) -> tuple[list[FOLLayerRule], list[int]]:
+    non_empty_ranks = sorted(k for k, v in ranked_rules.items() if v)
+    if not non_empty_ranks:
+        return [], []
+
+    if not include_oracle:
+        pool, weights = _build_per_rule_pool_and_weights(
+            ranked_rules, alpha, exclude_rank_1=headless,
+        )
+        if not pool:
+            return [], []
+        sampled_schemas: list[FOLLayerRule] = []
+        sampled_ranks: list[int] = []
+        for _ in range(int(n_demos)):
+            idx = int(rng.choice(len(pool), p=weights))
+            rule, rank = pool[idx]
+            sampled_schemas.append(rule)
+            sampled_ranks.append(rank)
+        if demo_ranked:
+            paired = sorted(
+                zip(sampled_ranks, sampled_schemas),
+                key=lambda x: x[0],
+                reverse=True,
+            )
+            sampled_schemas = [s for _, s in paired]
+            sampled_ranks = [r for r, _ in paired]
+        return sampled_schemas, sampled_ranks
+
+    if oracle_rule is None:
+        raise ValueError("include_oracle=True requires oracle_rule.")
+
+    oracle_schema = _find_matching_demo_schema_for_rule(
+        schemas=ranked_rules.get(1, []),
+        oracle_rule=oracle_rule,
+    )
+    if oracle_schema is None:
+        all_schemas = [r for rules in ranked_rules.values() for r in rules]
+        oracle_schema = _find_matching_demo_schema_for_rule(
+            schemas=all_schemas,
+            oracle_rule=oracle_rule,
+        )
+    if oracle_schema is None:
+        raise RuntimeError(
+            "Oracle rule schema was not found among rules in any rank."
+        )
+
+    sampled_schemas = [oracle_schema]
+    sampled_ranks = [1]
+
+    if int(n_demos) > 1:
+        pool, weights = _build_per_rule_pool_and_weights(
+            ranked_rules, alpha, exclude_rank_1=headless,
+        )
+        if not pool:
+            # Fallback: try non-rank-1, then all ranks
+            fallback_pool, fallback_weights = _build_per_rule_pool_and_weights(
+                ranked_rules, alpha, exclude_rank_1=True,
+            )
+            if not fallback_pool:
+                fallback_pool, fallback_weights = _build_per_rule_pool_and_weights(
+                    ranked_rules, alpha, exclude_rank_1=False,
+                )
+            pool, weights = fallback_pool, fallback_weights
+        if pool:
+            for _ in range(int(n_demos) - 1):
+                idx = int(rng.choice(len(pool), p=weights))
+                rule, rank = pool[idx]
+                sampled_schemas.append(rule)
+                sampled_ranks.append(rank)
+
+    if demo_ranked:
+        paired = sorted(
+            zip(sampled_ranks, sampled_schemas),
+            key=lambda x: x[0],
+            reverse=True,
+        )
+        sampled_schemas = [s for _, s in paired]
+        sampled_ranks = [r for r, _ in paired]
+    else:
+        order = rng.permutation(len(sampled_schemas))
+        sampled_schemas = [sampled_schemas[int(i)] for i in order]
+        sampled_ranks = [sampled_ranks[int(i)] for i in order]
+    return sampled_schemas, sampled_ranks
+
+
+def _sample_zipf_per_rule(
+    *,
+    rule_bank: FOLRuleBank,
+    src_layer: int,
+    ants: tuple[FOLAtom, ...],
+    max_unify_solutions: int,
+    rng: np.random.Generator,
+    n_demos: int,
+    include_oracle: bool,
+    oracle_rule: FOLLayerRule | None,
+    alpha: float,
+    goal_atom: FOLAtom,
+    headless: bool = False,
+    demo_ranked: bool = True,
+) -> tuple[list[FOLLayerRule], list[int]]:
+    rules = list(rule_bank.transition_rules(int(src_layer)))
+    ranked = _classify_rules_by_rank(
+        rules=rules,
+        ants=ants,
+        goal_atom=goal_atom,
+        rule_bank=rule_bank,
+        max_unify_solutions=int(max_unify_solutions),
+    )
+    return _sample_demo_schemas_zipf_per_rule(
+        rng=rng,
+        ranked_rules=ranked,
+        n_demos=n_demos,
+        alpha=alpha,
+        include_oracle=include_oracle,
+        oracle_rule=oracle_rule,
+        headless=headless,
+        demo_ranked=demo_ranked,
+    )
 
 
 def _instantiate_demo_schema_with_random_constants(
