@@ -96,6 +96,7 @@ class FOLLayerTask:
         demo_distribution_alpha=1.0,
         demo_ranked=True,
         demo_all=False,
+        demo_unique=True,
     ) -> None:
         self.mode = str(mode)
         if self.mode not in {"offline", "online"}:
@@ -220,6 +221,7 @@ class FOLLayerTask:
             )
         self.demo_ranked = bool(demo_ranked)
         self.demo_all = bool(demo_all)
+        self.demo_unique = bool(demo_unique)
         self._online_prefetch_requested = bool(online_prefetch)
         self._online_prefetch_backend_requested = str(online_prefetch_backend)
         self._online_prefetch_workers_requested = (
@@ -338,6 +340,7 @@ class FOLLayerTask:
                 demo_distribution_alpha=float(self.demo_distribution_alpha),
                 demo_ranked=bool(self.demo_ranked),
                 demo_all=bool(self.demo_all),
+                demo_unique=bool(self.demo_unique),
             )
         if self.task_split == "depth3_icl_transfer":
             return Depth3ICLTransferSplitStrategy.build(
@@ -358,6 +361,7 @@ class FOLLayerTask:
                 demo_distribution_alpha=float(self.demo_distribution_alpha),
                 demo_ranked=bool(self.demo_ranked),
                 demo_all=bool(self.demo_all),
+                demo_unique=bool(self.demo_unique),
             )
         return Depth3FreshICLSplitStrategy.build(
             mode=self.mode,
@@ -390,6 +394,7 @@ class FOLLayerTask:
             demo_distribution_alpha=float(self.demo_distribution_alpha),
             demo_ranked=bool(self.demo_ranked),
             demo_all=bool(self.demo_all),
+            demo_unique=bool(self.demo_unique),
         )
 
     def _adopt_strategy_state(self, strategy: FOLTaskSplitStrategy) -> None:
@@ -647,6 +652,7 @@ class FOLLayerTask:
         demo_distribution_alpha: float | None = None,
         demo_ranked: bool | None = None,
         demo_all: bool | None = None,
+        demo_unique: bool | None = None,
     ):
         """Create a demo-augmented adapter from this task's config.
 
@@ -666,6 +672,7 @@ class FOLLayerTask:
             demo_distribution_alpha=float(demo_distribution_alpha if demo_distribution_alpha is not None else self.demo_distribution_alpha),
             demo_ranked=bool(demo_ranked if demo_ranked is not None else self.demo_ranked),
             demo_all=bool(demo_all if demo_all is not None else self.demo_all),
+            demo_unique=bool(demo_unique if demo_unique is not None else self.demo_unique),
         )
 
     def sample_rollout_example(

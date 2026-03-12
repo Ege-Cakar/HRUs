@@ -53,6 +53,7 @@ class Depth3ICLTransferSplitStrategy(FOLTaskSplitStrategy):
         demo_distribution_alpha: float = 1.0,
         demo_ranked: bool = True,
         demo_all: bool = False,
+        demo_unique: bool = True,
     ) -> "Depth3ICLTransferSplitStrategy":
         if str(mode) != "online":
             raise ValueError("task_split='depth3_icl_transfer' requires mode='online'.")
@@ -94,6 +95,7 @@ class Depth3ICLTransferSplitStrategy(FOLTaskSplitStrategy):
             demo_distribution_alpha=float(demo_distribution_alpha),
             demo_ranked=bool(demo_ranked),
             demo_all=bool(demo_all),
+            demo_unique=bool(demo_unique),
         )
         return cls(
             rule_bank=rule_bank,

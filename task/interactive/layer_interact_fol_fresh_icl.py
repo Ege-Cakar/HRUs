@@ -26,14 +26,14 @@ from task.layer_fol import FOLLayerTask, split_prompt_row_segments
 # ---- CONFIG (edit in-place for local iteration) ----
 TASK_CFG = {
     "seed": np.random.randint(0, 999),
-    "base_bank_seed": 2042,
-    "predicates_per_layer": 8,
-    "rules_per_transition": 32,
+    "base_bank_seed": 2043,
+    "predicates_per_layer": [16, 256, 16],
+    "rules_per_transition": [256, 256],
     "arity_max": 1,
     "vars_per_rule_max": 4,
     "k_in_max": 1,
     "k_out_max": 1,
-    "constants": ("a", "b", "c", "d"),
+    "constants": ("a"),
     "initial_ant_max": 1,
     "max_n_demos": 8,
 }
@@ -111,12 +111,13 @@ train_task = FOLLayerTask(
     constants=tuple(str(c) for c in TASK_CFG["constants"]),
     initial_ant_max=int(TASK_CFG["initial_ant_max"]),
     max_n_demos=int(TASK_CFG["max_n_demos"]),
-    include_oracle=True,
+    include_oracle=False,
     online_prefetch_backend="sync",
-    min_n_demos=8,
-    demo_distribution='zipf_headless',
-    demo_distribution_alpha=0,
-    demo_all=True
+    min_n_demos=1,
+    demo_distribution='zipf_per_rule',
+    demo_distribution_alpha=3,
+    demo_unique=True,
+    demo_all=False
 )
 
 eval_task = FOLLayerTask(

@@ -1013,6 +1013,7 @@ def test_demo_augmented_adapter_include_oracle_records_oracle_rule() -> None:
         max_n_demos=2,
         max_unify_solutions=64,
         include_oracle=True,
+        demo_unique=False,
     )
     adapter.set_oracle_rule(sampled.step_rules[0])
     _ = adapter.predict_completion(

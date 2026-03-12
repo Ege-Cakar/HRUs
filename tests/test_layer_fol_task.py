@@ -195,6 +195,7 @@ def test_online_sample_config_round_trip() -> None:
         demo_distribution_alpha=1.5,
         demo_ranked=False,
         demo_all=True,
+        demo_unique=False,
     )
     payload = config.to_dict()
     assert isinstance(payload, dict)
@@ -221,6 +222,7 @@ def test_fresh_online_sample_config_round_trip() -> None:
         demo_distribution_alpha=1.0,
         demo_ranked=True,
         demo_all=False,
+        demo_unique=False,
         fresh_layer0_predicates=10,
         fresh_rules_per_transition=16,
         k_in_min=1,
@@ -377,6 +379,7 @@ def test_layer_fol_preview_formats_single_completion() -> None:
         min_n_demos=2,
         max_n_demos=2,
         online_prefetch_backend="sync",
+        demo_unique=False,
     )
 
     text = format_preview_record(task, task._sample_online_record(), role="train")
@@ -726,6 +729,7 @@ def test_layer_fol_task_online_sampling_respects_demo_min_max_bounds() -> None:
         min_n_demos=2,
         max_n_demos=4,
         online_prefetch_backend="sync",
+        demo_unique=False,
     )
 
     for _ in range(20):
@@ -790,6 +794,7 @@ def test_layer_fol_task_online_sampling_uses_exact_demo_count_when_min_equals_ma
         min_n_demos=2,
         max_n_demos=2,
         online_prefetch_backend="sync",
+        demo_unique=False,
     )
 
     for _ in range(20):
@@ -817,6 +822,7 @@ def test_layer_fol_task_online_sampling_demo_candidates_sampled_with_replacement
         initial_ant_max=1,
         max_n_demos=3,
         online_prefetch_backend="sync",
+        demo_unique=False,
     )
 
     saw_multi_demo = False

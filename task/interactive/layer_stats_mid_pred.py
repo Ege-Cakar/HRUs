@@ -281,6 +281,9 @@ def run_study(cfg: dict[str, Any]) -> tuple[pd.DataFrame, pd.DataFrame]:
     p_random_good_acc: dict[AccKey, list[float]] = {}
     n_prompts_acc: dict[AccKey, int] = {}
     n_rank1_sum_acc: dict[AccKey, int] = {}
+    n_rank2_sum_acc: dict[AccKey, int] = {}
+    n_rank3_sum_acc: dict[AccKey, int] = {}
+    n_rank4_sum_acc: dict[AccKey, int] = {}
     n_total_rules_sum_acc: dict[AccKey, int] = {}
     n_sample_failures_acc: dict[AccKey, int] = {}
     p_good_is_valid_acc: dict[AccKey, list[float]] = {}
@@ -343,6 +346,9 @@ def run_study(cfg: dict[str, Any]) -> tuple[pd.DataFrame, pd.DataFrame]:
                         max_unify_solutions=max_unify_solutions,
                     )
                     n_rank1 = len(ranked.get(1, []))
+                    n_rank2 = len(ranked.get(2, []))
+                    n_rank3 = len(ranked.get(3, []))
+                    n_rank4 = len(ranked.get(4, []))
                     n_total = len(rules)
 
                     # P(random good) for this prompt
@@ -350,7 +356,6 @@ def run_study(cfg: dict[str, Any]) -> tuple[pd.DataFrame, pd.DataFrame]:
 
                     # P(good is valid): among goal-reachable rules (rank 1 + rank 3),
                     # what fraction are also applicable (rank 1)?
-                    n_rank3 = len(ranked.get(3, []))
                     n_goal_reachable = n_rank1 + n_rank3
                     p_good_is_valid = (
                         n_rank1 / n_goal_reachable if n_goal_reachable > 0 else float("nan")
@@ -378,6 +383,15 @@ def run_study(cfg: dict[str, Any]) -> tuple[pd.DataFrame, pd.DataFrame]:
                                 n_prompts_acc[key] = n_prompts_acc.get(key, 0) + 1
                                 n_rank1_sum_acc[key] = (
                                     n_rank1_sum_acc.get(key, 0) + n_rank1
+                                )
+                                n_rank2_sum_acc[key] = (
+                                    n_rank2_sum_acc.get(key, 0) + n_rank2
+                                )
+                                n_rank3_sum_acc[key] = (
+                                    n_rank3_sum_acc.get(key, 0) + n_rank3
+                                )
+                                n_rank4_sum_acc[key] = (
+                                    n_rank4_sum_acc.get(key, 0) + n_rank4
                                 )
                                 n_total_rules_sum_acc[key] = (
                                     n_total_rules_sum_acc.get(key, 0) + n_total
@@ -454,6 +468,21 @@ def run_study(cfg: dict[str, Any]) -> tuple[pd.DataFrame, pd.DataFrame]:
             if n_total_prompts > 0
             else 0.0
         )
+        mean_n_rank2 = (
+            float(n_rank2_sum_acc.get(key, 0) / n_total_prompts)
+            if n_total_prompts > 0
+            else 0.0
+        )
+        mean_n_rank3 = (
+            float(n_rank3_sum_acc.get(key, 0) / n_total_prompts)
+            if n_total_prompts > 0
+            else 0.0
+        )
+        mean_n_rank4 = (
+            float(n_rank4_sum_acc.get(key, 0) / n_total_prompts)
+            if n_total_prompts > 0
+            else 0.0
+        )
         mean_n_total_rules = (
             float(n_total_rules_sum_acc.get(key, 0) / n_total_prompts)
             if n_total_prompts > 0
@@ -482,6 +511,9 @@ def run_study(cfg: dict[str, Any]) -> tuple[pd.DataFrame, pd.DataFrame]:
                 "p_good_is_valid_ci_low": float(p_good_valid_ci_low),
                 "p_good_is_valid_ci_high": float(p_good_valid_ci_high),
                 "mean_n_rank1": mean_n_rank1,
+                "mean_n_rank2": mean_n_rank2,
+                "mean_n_rank3": mean_n_rank3,
+                "mean_n_rank4": mean_n_rank4,
                 "mean_n_total_rules": mean_n_total_rules,
                 "n_sample_failures": n_sample_failures_acc.get(key, 0),
             }
@@ -674,6 +706,65 @@ def _plot_random_good_heatmap(summary_df: pd.DataFrame, out_dir: Path) -> None:
     plt.close()
 
 
+def _plot_rank_sizes(summary_df: pd.DataFrame, out_dir: Path) -> None:
+    """Line plot of mean rank sizes vs mid_pred, faceted by step_idx."""
+    if summary_df.empty:
+        return
+    rank_cols = ["mean_n_rank1", "mean_n_rank2", "mean_n_rank3", "mean_n_rank4"]
+    required = {"step_idx", "mid_pred"} | set(rank_cols)
+    if not required.issubset(set(summary_df.columns)):
+        return
+
+    # Collapse alpha/n_demos/demo_dist dimensions by averaging
+    grouped = (
+        summary_df.groupby(["step_idx", "mid_pred"], sort=True)[rank_cols]
+        .mean()
+        .reset_index()
+    )
+    step_vals = sorted(grouped["step_idx"].unique())
+    n_steps = len(step_vals)
+    if n_steps == 0:
+        return
+
+    rank_labels = {
+        "mean_n_rank1": "Rank 1 (applicable + goal-reachable)",
+        "mean_n_rank2": "Rank 2 (applicable only)",
+        "mean_n_rank3": "Rank 3 (goal-reachable only)",
+        "mean_n_rank4": "Rank 4 (irrelevant)",
+    }
+    rank_colors = {
+        "mean_n_rank1": "tab:green",
+        "mean_n_rank2": "tab:orange",
+        "mean_n_rank3": "tab:blue",
+        "mean_n_rank4": "tab:red",
+    }
+
+    for use_log in (False, True):
+        fig, axes = plt.subplots(1, n_steps, figsize=(6 * n_steps, 5), squeeze=False)
+        for col_idx, step in enumerate(step_vals):
+            ax = axes[0, col_idx]
+            sub = grouped[grouped["step_idx"] == step].sort_values("mid_pred")
+            for rc in rank_cols:
+                ax.plot(
+                    sub["mid_pred"], sub[rc],
+                    marker="o", label=rank_labels[rc], color=rank_colors[rc],
+                )
+            ax.set_xlabel("mid_pred")
+            ax.set_ylabel("mean count")
+            ax.set_title(f"step_idx={step}")
+            if use_log:
+                ax.set_yscale("log")
+            ax.legend(fontsize="small")
+        fig.suptitle(
+            "Mean rank sizes vs mid_pred" + (" (log scale)" if use_log else ""),
+            fontsize=14,
+        )
+        fig.tight_layout()
+        suffix = "_log" if use_log else ""
+        fig.savefig(out_dir / f"rank_sizes_vs_mid_pred{suffix}.png", dpi=180)
+        plt.close(fig)
+
+
 # <codecell>
 def save_outputs(
     *,
@@ -695,6 +786,7 @@ def save_outputs(
     _plot_demo_good_heatmaps(summary_df, out_dir=out_dir)
     _plot_demo_good_lines(summary_df, out_dir=out_dir)
     _plot_random_good_heatmap(summary_df, out_dir=out_dir)
+    _plot_rank_sizes(summary_df, out_dir=out_dir)
     return out_dir
 
 
@@ -719,6 +811,9 @@ def print_console_summary(summary_df: pd.DataFrame) -> None:
         "p_good_is_valid_ci_low",
         "p_good_is_valid_ci_high",
         "mean_n_rank1",
+        "mean_n_rank2",
+        "mean_n_rank3",
+        "mean_n_rank4",
         "mean_n_total_rules",
         "n_sample_failures",
     ]

@@ -65,6 +65,7 @@ def augment_prompt_with_demos(
     goal_atom: FOLAtom | None = None,
     demo_ranked: bool = True,
     demo_all: bool = False,
+    demo_unique: bool = True,
 ) -> FOLDemoAugmentationResult:
     max_n_demos = int(max_n_demos)
     min_n_demos = int(min_n_demos)
@@ -73,6 +74,7 @@ def augment_prompt_with_demos(
     demo_distribution_alpha = float(demo_distribution_alpha)
     demo_ranked = bool(demo_ranked)
     demo_all = bool(demo_all)
+    demo_unique = bool(demo_unique)
 
     _empty = FOLDemoAugmentationResult(
         prompt_tokens=list(int(tok) for tok in prompt_tokens),
@@ -140,6 +142,7 @@ def augment_prompt_with_demos(
             n_demos=n_demos,
             include_oracle=include_oracle,
             oracle_rule=oracle_rule,
+            demo_unique=demo_unique,
         )
     elif demo_distribution in {"zipf_per_rule", "zipf_per_rule_headless"}:
         sampled_schemas, sampled_ranks = _sample_zipf_per_rule(
@@ -155,6 +158,7 @@ def augment_prompt_with_demos(
             goal_atom=goal_atom,
             headless=(demo_distribution == "zipf_per_rule_headless"),
             demo_ranked=demo_ranked,
+            demo_unique=demo_unique,
         )
     else:
         sampled_schemas, sampled_ranks = _sample_zipf(
@@ -170,6 +174,7 @@ def augment_prompt_with_demos(
             goal_atom=goal_atom,
             headless=(demo_distribution == "zipf_headless"),
             demo_ranked=demo_ranked,
+            demo_unique=demo_unique,
         )
 
     if not sampled_schemas:
@@ -215,6 +220,7 @@ def _augment_prompt_with_demos(
     goal_atom: FOLAtom | None = None,
     demo_ranked: bool = True,
     demo_all: bool = False,
+    demo_unique: bool = True,
 ) -> list[int]:
     return augment_prompt_with_demos(
         prompt_tokens=prompt_tokens,
@@ -233,6 +239,7 @@ def _augment_prompt_with_demos(
         goal_atom=goal_atom,
         demo_ranked=demo_ranked,
         demo_all=demo_all,
+        demo_unique=demo_unique,
     ).prompt_tokens
 
 
@@ -301,19 +308,24 @@ def _find_lhs_substitutions_for_facts(
     return solutions
 
 
-def _sample_demo_schemas_with_replacement(
+def _sample_demo_schemas(
     *,
     rng: np.random.Generator,
     schemas: list[FOLLayerRule],
     n_demos: int,
     include_oracle: bool = False,
     oracle_rule: FOLLayerRule | None = None,
+    demo_unique: bool = False,
 ) -> list[FOLLayerRule]:
     if n_demos < 1 or not schemas:
         return []
 
     if not include_oracle:
-        picks = rng.integers(0, len(schemas), size=int(n_demos))
+        if demo_unique:
+            n = min(int(n_demos), len(schemas))
+            picks = rng.choice(len(schemas), size=n, replace=False)
+        else:
+            picks = rng.integers(0, len(schemas), size=int(n_demos))
         return [schemas[int(idx)] for idx in picks]
 
     if oracle_rule is None:
@@ -328,8 +340,18 @@ def _sample_demo_schemas_with_replacement(
 
     sampled = [oracle_schema]
     if int(n_demos) > 1:
-        picks = rng.integers(0, len(schemas), size=int(n_demos) - 1)
-        sampled.extend(schemas[int(idx)] for idx in picks)
+        if demo_unique:
+            oracle_idx = next(
+                i for i, s in enumerate(schemas) if s is oracle_schema
+            )
+            remaining = [s for i, s in enumerate(schemas) if i != oracle_idx]
+            if remaining:
+                n = min(int(n_demos) - 1, len(remaining))
+                picks = rng.choice(len(remaining), size=n, replace=False)
+                sampled.extend(remaining[int(idx)] for idx in picks)
+        else:
+            picks = rng.integers(0, len(schemas), size=int(n_demos) - 1)
+            sampled.extend(schemas[int(idx)] for idx in picks)
     order = rng.permutation(len(sampled))
     return [sampled[int(idx)] for idx in order]
 
@@ -386,6 +408,7 @@ def _sample_uniform(
     n_demos: int,
     include_oracle: bool,
     oracle_rule: FOLLayerRule | None,
+    demo_unique: bool = False,
 ) -> tuple[list[FOLLayerRule], list[int]]:
     schemas = _collect_applicable_demo_schemas(
         rule_bank=rule_bank,
@@ -395,12 +418,13 @@ def _sample_uniform(
     )
     if not schemas:
         return [], []
-    sampled = _sample_demo_schemas_with_replacement(
+    sampled = _sample_demo_schemas(
         rng=rng,
         schemas=schemas,
         n_demos=n_demos,
         include_oracle=include_oracle,
         oracle_rule=oracle_rule,
+        demo_unique=demo_unique,
     )
     return sampled, []
 
@@ -419,6 +443,7 @@ def _sample_zipf(
     goal_atom: FOLAtom,
     headless: bool = False,
     demo_ranked: bool = True,
+    demo_unique: bool = False,
 ) -> tuple[list[FOLLayerRule], list[int]]:
     rules = list(rule_bank.transition_rules(int(src_layer)))
     ranked = _classify_rules_by_rank(
@@ -437,6 +462,7 @@ def _sample_zipf(
         oracle_rule=oracle_rule,
         headless=headless,
         demo_ranked=demo_ranked,
+        demo_unique=demo_unique,
     )
 
 
@@ -523,6 +549,7 @@ def _sample_demo_schemas_zipf(
     oracle_rule: FOLLayerRule | None,
     headless: bool = False,
     demo_ranked: bool = True,
+    demo_unique: bool = False,
 ) -> tuple[list[FOLLayerRule], list[int]]:
     non_empty_ranks = sorted(k for k, v in ranked_rules.items() if v)
     if not non_empty_ranks:
@@ -536,17 +563,35 @@ def _sample_demo_schemas_zipf(
     if not include_oracle:
         if not sampling_ranks:
             return [], []
-        weights = np.array([1.0 / (k ** alpha) for k in sampling_ranks])
-        weights /= weights.sum()
-        sampled_schemas: list[FOLLayerRule] = []
-        sampled_ranks: list[int] = []
-        for _ in range(int(n_demos)):
-            rank_idx = int(rng.choice(len(sampling_ranks), p=weights))
-            rank = sampling_ranks[rank_idx]
-            pool = ranked_rules[rank]
-            rule = pool[int(rng.integers(0, len(pool)))]
-            sampled_schemas.append(rule)
-            sampled_ranks.append(rank)
+        if demo_unique:
+            flat_pool: list[tuple[FOLLayerRule, int]] = []
+            flat_weights: list[float] = []
+            for k in sampling_ranks:
+                rules_in_rank = ranked_rules[k]
+                per_rule_w = (1.0 / (k ** alpha)) / len(rules_in_rank)
+                for rule in rules_in_rank:
+                    flat_pool.append((rule, k))
+                    flat_weights.append(per_rule_w)
+            if not flat_pool:
+                return [], []
+            w = np.array(flat_weights)
+            w /= w.sum()
+            n = min(int(n_demos), len(flat_pool))
+            indices = rng.choice(len(flat_pool), size=n, replace=False, p=w)
+            sampled_schemas = [flat_pool[int(i)][0] for i in indices]
+            sampled_ranks = [flat_pool[int(i)][1] for i in indices]
+        else:
+            weights = np.array([1.0 / (k ** alpha) for k in sampling_ranks])
+            weights /= weights.sum()
+            sampled_schemas: list[FOLLayerRule] = []
+            sampled_ranks: list[int] = []
+            for _ in range(int(n_demos)):
+                rank_idx = int(rng.choice(len(sampling_ranks), p=weights))
+                rank = sampling_ranks[rank_idx]
+                pool = ranked_rules[rank]
+                rule = pool[int(rng.integers(0, len(pool)))]
+                sampled_schemas.append(rule)
+                sampled_ranks.append(rank)
         if demo_ranked:
             paired = sorted(
                 zip(sampled_ranks, sampled_schemas),
@@ -579,20 +624,40 @@ def _sample_demo_schemas_zipf(
     sampled_ranks = [1]
 
     if int(n_demos) > 1:
-        if not sampling_ranks:
-            extra_ranks = [k for k in non_empty_ranks if k != 1]
-            if not extra_ranks:
-                extra_ranks = list(non_empty_ranks)
-            sampling_ranks = extra_ranks if extra_ranks else list(non_empty_ranks)
-        weights = np.array([1.0 / (k ** alpha) for k in sampling_ranks])
-        weights /= weights.sum()
-        for _ in range(int(n_demos) - 1):
-            rank_idx = int(rng.choice(len(sampling_ranks), p=weights))
-            rank = sampling_ranks[rank_idx]
-            pool = ranked_rules[rank]
-            rule = pool[int(rng.integers(0, len(pool)))]
-            sampled_schemas.append(rule)
-            sampled_ranks.append(rank)
+        if demo_unique:
+            flat_pool = []
+            flat_weights = []
+            for k in sampling_ranks:
+                rules_in_rank = ranked_rules[k]
+                per_rule_w = (1.0 / (k ** alpha)) / len(rules_in_rank)
+                for rule in rules_in_rank:
+                    if rule is oracle_schema:
+                        continue
+                    flat_pool.append((rule, k))
+                    flat_weights.append(per_rule_w)
+            if flat_pool:
+                w = np.array(flat_weights)
+                w /= w.sum()
+                n = min(int(n_demos) - 1, len(flat_pool))
+                indices = rng.choice(len(flat_pool), size=n, replace=False, p=w)
+                for i in indices:
+                    sampled_schemas.append(flat_pool[int(i)][0])
+                    sampled_ranks.append(flat_pool[int(i)][1])
+        else:
+            if not sampling_ranks:
+                extra_ranks = [k for k in non_empty_ranks if k != 1]
+                if not extra_ranks:
+                    extra_ranks = list(non_empty_ranks)
+                sampling_ranks = extra_ranks if extra_ranks else list(non_empty_ranks)
+            weights = np.array([1.0 / (k ** alpha) for k in sampling_ranks])
+            weights /= weights.sum()
+            for _ in range(int(n_demos) - 1):
+                rank_idx = int(rng.choice(len(sampling_ranks), p=weights))
+                rank = sampling_ranks[rank_idx]
+                pool = ranked_rules[rank]
+                rule = pool[int(rng.integers(0, len(pool)))]
+                sampled_schemas.append(rule)
+                sampled_ranks.append(rank)
 
     if demo_ranked:
         paired = sorted(
@@ -638,6 +703,7 @@ def _sample_demo_schemas_zipf_per_rule(
     oracle_rule: FOLLayerRule | None,
     headless: bool = False,
     demo_ranked: bool = True,
+    demo_unique: bool = False,
 ) -> tuple[list[FOLLayerRule], list[int]]:
     non_empty_ranks = sorted(k for k, v in ranked_rules.items() if v)
     if not non_empty_ranks:
@@ -649,13 +715,19 @@ def _sample_demo_schemas_zipf_per_rule(
         )
         if not pool:
             return [], []
-        sampled_schemas: list[FOLLayerRule] = []
-        sampled_ranks: list[int] = []
-        for _ in range(int(n_demos)):
-            idx = int(rng.choice(len(pool), p=weights))
-            rule, rank = pool[idx]
-            sampled_schemas.append(rule)
-            sampled_ranks.append(rank)
+        if demo_unique:
+            n = min(int(n_demos), len(pool))
+            indices = rng.choice(len(pool), size=n, replace=False, p=weights)
+            sampled_schemas = [pool[int(i)][0] for i in indices]
+            sampled_ranks = [pool[int(i)][1] for i in indices]
+        else:
+            sampled_schemas: list[FOLLayerRule] = []
+            sampled_ranks: list[int] = []
+            for _ in range(int(n_demos)):
+                idx = int(rng.choice(len(pool), p=weights))
+                rule, rank = pool[idx]
+                sampled_schemas.append(rule)
+                sampled_ranks.append(rank)
         if demo_ranked:
             paired = sorted(
                 zip(sampled_ranks, sampled_schemas),
@@ -702,11 +774,28 @@ def _sample_demo_schemas_zipf_per_rule(
                 )
             pool, weights = fallback_pool, fallback_weights
         if pool:
-            for _ in range(int(n_demos) - 1):
-                idx = int(rng.choice(len(pool), p=weights))
-                rule, rank = pool[idx]
-                sampled_schemas.append(rule)
-                sampled_ranks.append(rank)
+            if demo_unique:
+                remaining_indices = [
+                    i for i, (rule, _) in enumerate(pool)
+                    if rule is not oracle_schema
+                ]
+                if remaining_indices:
+                    remaining_pool = [pool[i] for i in remaining_indices]
+                    remaining_weights = np.array([weights[i] for i in remaining_indices])
+                    remaining_weights /= remaining_weights.sum()
+                    n = min(int(n_demos) - 1, len(remaining_pool))
+                    indices = rng.choice(
+                        len(remaining_pool), size=n, replace=False, p=remaining_weights,
+                    )
+                    for i in indices:
+                        sampled_schemas.append(remaining_pool[int(i)][0])
+                        sampled_ranks.append(remaining_pool[int(i)][1])
+            else:
+                for _ in range(int(n_demos) - 1):
+                    idx = int(rng.choice(len(pool), p=weights))
+                    rule, rank = pool[idx]
+                    sampled_schemas.append(rule)
+                    sampled_ranks.append(rank)
 
     if demo_ranked:
         paired = sorted(
@@ -737,6 +826,7 @@ def _sample_zipf_per_rule(
     goal_atom: FOLAtom,
     headless: bool = False,
     demo_ranked: bool = True,
+    demo_unique: bool = False,
 ) -> tuple[list[FOLLayerRule], list[int]]:
     rules = list(rule_bank.transition_rules(int(src_layer)))
     ranked = _classify_rules_by_rank(
@@ -755,6 +845,7 @@ def _sample_zipf_per_rule(
         oracle_rule=oracle_rule,
         headless=headless,
         demo_ranked=demo_ranked,
+        demo_unique=demo_unique,
     )
 
 
@@ -810,6 +901,7 @@ class FOLDemoAugmentedAdapter:
         demo_distribution_alpha: float = 1.0,
         demo_ranked: bool = True,
         demo_all: bool = False,
+        demo_unique: bool = True,
     ) -> None:
         self.base_adapter = base_adapter
         self.rule_bank = rule_bank
@@ -822,6 +914,7 @@ class FOLDemoAugmentedAdapter:
         self.demo_distribution_alpha = float(demo_distribution_alpha)
         self.demo_ranked = bool(demo_ranked)
         self.demo_all = bool(demo_all)
+        self.demo_unique = bool(demo_unique)
         self._last_demo_rules: list[FOLLayerRule] = []
         self._oracle_rule: FOLLayerRule | None = None
 
@@ -881,6 +974,7 @@ class FOLDemoAugmentedAdapter:
                 goal_atom=sequent.cons,
                 demo_ranked=self.demo_ranked,
                 demo_all=self.demo_all,
+                demo_unique=self.demo_unique,
             )
             prompt = augmented.prompt_tokens
             self._last_demo_rules = list(augmented.demo_schemas)

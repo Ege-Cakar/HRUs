@@ -139,6 +139,7 @@ def _base_record(
         goal_atom=sampled.goal_atom,
         demo_ranked=bool(config.demo_ranked),
         demo_all=bool(config.demo_all),
+        demo_unique=bool(config.demo_unique),
     )
     record = {
         "distance": int(distance),

@@ -36,7 +36,7 @@ if str(ROOT) not in sys.path:
 from task.layer_fol import (
     _collect_applicable_demo_schemas,
     _find_lhs_substitutions_for_facts,
-    _sample_demo_schemas_with_replacement,
+    _sample_demo_schemas,
     _subst_binds_rhs_variables,
 )
 from task.layer_gen.util.fol_rule_bank import (
@@ -466,7 +466,7 @@ def run_study(cfg: dict[str, Any]) -> tuple[pd.DataFrame, pd.DataFrame]:
                             acc.n_prompts_with_schema += 1
                             acc.schema_count_sum += schema_count
 
-                            sampled_schemas = _sample_demo_schemas_with_replacement(
+                            sampled_schemas = _sample_demo_schemas(
                                 rng=prompt_rng,
                                 schemas=schemas,
                                 n_demos=int(n_demos),
