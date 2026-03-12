@@ -929,8 +929,13 @@ def _plot_param_count_comparison(*, final_df, out_dir):
 
 
 def _plot_flops_vs_seq_len(*, final_df, out_dir):
-    """Plot 2: Forward FLOPs vs sequence length — quadratic vs linear scaling."""
-    seq_lens = np.array([16, 32, 64, 128, 256, 512, 1024, 2048])
+    """Plot 2: Forward FLOPs vs sequence length — quadratic vs linear scaling.
+
+    Two panels: (a) total forward FLOPs per layer (excluding the shared output
+    head so the comparison is fair), (b) attention/SSD component only, which
+    isolates the O(S²) vs O(S) scaling story.
+    """
+    seq_lens = np.array([16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192])
     records = []
     seen = set()
     for _, row in final_df.iterrows():
@@ -941,26 +946,63 @@ def _plot_flops_vs_seq_len(*, final_df, out_dir):
         info = _build_info_from_final_row(row)
         for s in seq_lens:
             try:
-                flops = compute_metrics_from_info(info, n_seq_override=int(s))["forward_flops"]
+                metrics = compute_metrics_from_info(info, n_seq_override=int(s))
             except (KeyError, ValueError, TypeError):
                 continue
-            records.append({"model_family": family, "n_seq": int(s), "forward_flops": flops})
+            flops = metrics["flops"]
+            rec = {
+                "model_family": family,
+                "n_seq": int(s),
+                "total": flops["total"],
+                "all_layers": flops["all_layers"],
+                "per_layer": flops["per_layer"],
+            }
+            if family == "transformer":
+                rec["seq_dependent"] = flops["attn_per_layer"]
+                rec["seq_dep_label"] = "attention"
+            elif family == "mamba2_bonsai":
+                rec["seq_dependent"] = flops["ssd_per_layer"]
+                rec["seq_dep_label"] = "SSD scan"
+            records.append(rec)
     if not records:
         return
 
     plot_df = pd.DataFrame(records)
-    fig, ax = plt.subplots(figsize=(7, 4))
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
+
+    # Panel (a): per-layer FLOPs (apples-to-apples, no output head)
+    ax = axes[0]
     for family, grp in plot_df.groupby("model_family"):
         grp_sorted = grp.sort_values("n_seq")
         dash = MODEL_FAMILY_DASHES.get(family, "")
-        ax.plot(grp_sorted["n_seq"], grp_sorted["forward_flops"],
-                label=family, marker="o", dashes=dash if dash else (None, None))
+        ax.plot(grp_sorted["n_seq"], grp_sorted["per_layer"],
+                label=family, marker="o",
+                dashes=dash if dash else (None, None))
     ax.set_xscale("log", base=2)
     ax.set_yscale("log")
     ax.set_xlabel("Sequence length")
-    ax.set_ylabel("Forward FLOPs (log)")
-    ax.set_title("FLOPs vs Sequence Length")
+    ax.set_ylabel("FLOPs per layer (log)")
+    ax.set_title("(a) Per-layer FLOPs")
     ax.legend()
+
+    # Panel (b): attention vs SSD component only
+    ax = axes[1]
+    for family, grp in plot_df.groupby("model_family"):
+        grp_sorted = grp.sort_values("n_seq")
+        label_suffix = grp_sorted["seq_dep_label"].iloc[0]
+        dash = MODEL_FAMILY_DASHES.get(family, "")
+        ax.plot(grp_sorted["n_seq"], grp_sorted["seq_dependent"],
+                label=f"{family} ({label_suffix})", marker="o",
+                dashes=dash if dash else (None, None))
+    ax.set_xscale("log", base=2)
+    ax.set_yscale("log")
+    ax.set_xlabel("Sequence length")
+    ax.set_ylabel("FLOPs (log)")
+    ax.set_title("(b) Attention vs SSD scan FLOPs")
+    ax.legend()
+
+    fig.suptitle("FLOPs vs Sequence Length", y=1.02)
     fig.tight_layout()
     fig.savefig(out_dir / "compute_flops_vs_seq_len.png", bbox_inches="tight")
     plt.close(fig)
