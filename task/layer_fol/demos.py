@@ -453,14 +453,14 @@ def _sample_zipf(
         rule_bank=rule_bank,
         max_unify_solutions=int(max_unify_solutions),
     )
-    return _sample_demo_schemas_zipf(
-        rng=rng,
+    return sample_ranked_demos(
         ranked_rules=ranked,
+        rng=rng,
         n_demos=n_demos,
+        demo_distribution="zipf_headless" if headless else "zipf",
         alpha=alpha,
         include_oracle=include_oracle,
         oracle_rule=oracle_rule,
-        headless=headless,
         demo_ranked=demo_ranked,
         demo_unique=demo_unique,
     )
@@ -888,14 +888,14 @@ def _sample_zipf_per_rule(
         rule_bank=rule_bank,
         max_unify_solutions=int(max_unify_solutions),
     )
-    return _sample_demo_schemas_zipf_per_rule(
-        rng=rng,
+    return sample_ranked_demos(
         ranked_rules=ranked,
+        rng=rng,
         n_demos=n_demos,
+        demo_distribution="zipf_per_rule_headless" if headless else "zipf_per_rule",
         alpha=alpha,
         include_oracle=include_oracle,
         oracle_rule=oracle_rule,
-        headless=headless,
         demo_ranked=demo_ranked,
         demo_unique=demo_unique,
     )

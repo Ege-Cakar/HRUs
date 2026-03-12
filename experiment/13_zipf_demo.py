@@ -16,6 +16,11 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(ROOT))
 
 from common import collate_dfs, set_theme
+from model.compute import (
+    compute_metrics_from_info,
+    memory_bytes_estimate,
+    training_flops_total,
+)
 
 
 set_theme()
@@ -23,7 +28,6 @@ OUT_DIR = Path("fig/13_zipf_demo")
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 SELECTION_EVAL_MAX_N_DEMOS = 8
-TRAIN_MAX_N_DEMOS = 8
 
 ROLE_EVAL_DEMO_METRIC_COLS = [
     "loss",
@@ -190,6 +194,17 @@ def _extract_train_demo_ranked(row, *, info: dict | None = None) -> bool | None:
     return None
 
 
+def _extract_train_max_n_demos(row, *, info: dict | None = None) -> float:
+    info = (row.get("info", {}) or {}) if info is None else info
+    for value in (row.get("train_max_n_demos"), info.get("train_max_n_demos")):
+        if value is not None:
+            try:
+                return float(int(value))
+            except (TypeError, ValueError):
+                continue
+    return 8.0  # backward compat default
+
+
 def _extract_task_shape_idx(row, *, info: dict | None = None) -> float:
     info = (row.get("info", {}) or {}) if info is None else info
     for value in (row.get("task_shape_idx"), info.get("task_shape_idx")):
@@ -210,9 +225,34 @@ def _extract_task_shape_tag(row, *, info: dict | None = None) -> str | None:
     return None
 
 
+def _compute_row_n_params(info):
+    try:
+        return compute_metrics_from_info(info)["n_params"]
+    except (KeyError, ValueError, TypeError):
+        return np.nan
+
+
+def _compute_row_training_flops(info, *, train_iters_val):
+    try:
+        train_n_seq = info.get("train_fixed_length_n_seq", info.get("n_seq"))
+        metrics = compute_metrics_from_info(info, n_seq_override=train_n_seq)
+        ti = int(train_iters_val) if not np.isnan(train_iters_val) else 0
+        return training_flops_total(
+            metrics["forward_flops"],
+            train_iters=ti,
+            batch_size=int(info.get("microbatch_size", 1)),
+            grad_accum_steps=int(info.get("grad_accum_steps", 1)),
+        )
+    except (KeyError, ValueError, TypeError):
+        return np.nan
+
+
 def _extract_final_row(row):
     info = row.get("info", {}) or {}
     final = row.get("metrics_final", {}) or {}
+    train_iters_val = _extract_train_iters(row, info=info)
+    n_params = _compute_row_n_params(info)
+    row_training_flops = _compute_row_training_flops(info, train_iters_val=train_iters_val)
 
     return pd.Series(
         {
@@ -223,7 +263,7 @@ def _extract_final_row(row):
             "task_shape_idx": _extract_task_shape_idx(row, info=info),
             "task_shape_tag": _extract_task_shape_tag(row, info=info),
             "mid_pred": _extract_mid_pred(row, info=info),
-            "train_iters": _extract_train_iters(row, info=info),
+            "train_iters": train_iters_val,
             "train_alpha": _extract_train_alpha(row, info=info),
             "train_demo_ranked": _extract_train_demo_ranked(row, info=info),
             "selection_role": row.get("selection_role"),
@@ -238,7 +278,7 @@ def _extract_final_row(row):
             "distance_range": str(_as_int_list(info.get("distance_range"))),
             "predicates_per_layer": str(info.get("predicates_per_layer")),
             "rules_per_transition": str(info.get("rules_per_transition")),
-            "train_max_n_demos": info.get("train_max_n_demos", np.nan),
+            "train_max_n_demos": _extract_train_max_n_demos(row, info=info),
             "eval_max_n_demos_sweep": str(_as_int_list(info.get("eval_max_n_demos_sweep"))),
             "lr": info.get("lr", np.nan),
             "n_layers": info.get("n_layers", np.nan),
@@ -251,6 +291,8 @@ def _extract_final_row(row):
             "scan_chunk_len": info.get("scan_chunk_len", np.nan),
             "n_seq": info.get("n_seq", np.nan),
             "n_vocab": info.get("n_vocab", np.nan),
+            "n_params": n_params,
+            "training_flops_total": row_training_flops,
             "loss": final.get("loss", np.nan),
             "final_token_acc": final.get("final_token_acc", np.nan),
             "seq_exact_acc": final.get("seq_exact_acc", np.nan),
@@ -259,8 +301,10 @@ def _extract_final_row(row):
     )
 
 
-def _common_row_fields(row, *, info, train_iters, mid_pred, train_alpha, task_shape_idx, task_shape_tag):
+def _common_row_fields(row, *, info, train_iters, mid_pred, train_alpha, task_shape_idx, task_shape_tag, train_max_n_demos):
     train_demo_ranked = _extract_train_demo_ranked(row, info=info)
+    n_params = _compute_row_n_params(info)
+    row_training_flops = _compute_row_training_flops(info, train_iters_val=train_iters)
     return {
         "run_row_id": row.get("__row_id"),
         "run_id": row.get("run_id"),
@@ -272,11 +316,14 @@ def _common_row_fields(row, *, info, train_iters, mid_pred, train_alpha, task_sh
         "train_iters": train_iters,
         "train_alpha": float(train_alpha),
         "train_demo_ranked": train_demo_ranked,
+        "train_max_n_demos": float(train_max_n_demos),
         "lr": info.get("lr", np.nan),
         "n_layers": info.get("n_layers", np.nan),
         "n_hidden": info.get("n_hidden", np.nan),
         "predicates_per_layer": str(info.get("predicates_per_layer")),
         "rules_per_transition": str(info.get("rules_per_transition")),
+        "n_params": n_params,
+        "training_flops_total": row_training_flops,
     }
 
 
@@ -296,10 +343,11 @@ def _explode_4level_metrics(
         train_alpha = _extract_train_alpha(row, info=info)
         task_shape_idx = _extract_task_shape_idx(row, info=info)
         task_shape_tag = _extract_task_shape_tag(row, info=info)
+        train_max_n_demos = _extract_train_max_n_demos(row, info=info)
         base = _common_row_fields(
             row, info=info, train_iters=train_iters, mid_pred=mid_pred,
             train_alpha=train_alpha, task_shape_idx=task_shape_idx,
-            task_shape_tag=task_shape_tag,
+            task_shape_tag=task_shape_tag, train_max_n_demos=train_max_n_demos,
         )
         for role, by_demo in by_role.items():
             for eval_demo, by_alpha in (by_demo or {}).items():
@@ -309,12 +357,14 @@ def _explode_4level_metrics(
                     ):
                         # Legacy 3-level format: by_ranked IS the metrics dict
                         metrics = by_ranked or {}
+                        eval_top = metrics.get("eval_top_seq_lens", [])
                         out = {
                             **base,
                             "eval_role": str(role),
                             "eval_max_n_demos": int(eval_demo),
                             "eval_alpha": float(eval_alpha),
                             "eval_demo_ranked": None,
+                            "eval_dominant_seq_len": int(eval_top[0]["seq_len"]) if eval_top else np.nan,
                         }
                         if eval_type is not None:
                             out["eval_type"] = eval_type
@@ -324,12 +374,14 @@ def _explode_4level_metrics(
                     else:
                         for eval_ranked, metrics in (by_ranked or {}).items():
                             metrics = metrics or {}
+                            eval_top = metrics.get("eval_top_seq_lens", [])
                             out = {
                                 **base,
                                 "eval_role": str(role),
                                 "eval_max_n_demos": int(eval_demo),
                                 "eval_alpha": float(eval_alpha),
                                 "eval_demo_ranked": bool(eval_ranked),
+                                "eval_dominant_seq_len": int(eval_top[0]["seq_len"]) if eval_top else np.nan,
                             }
                             if eval_type is not None:
                                 out["eval_type"] = eval_type
@@ -359,10 +411,11 @@ def _explode_role_eval_demo_all_rows(df: pd.DataFrame) -> pd.DataFrame:
         train_alpha = _extract_train_alpha(row, info=info)
         task_shape_idx = _extract_task_shape_idx(row, info=info)
         task_shape_tag = _extract_task_shape_tag(row, info=info)
+        train_max_n_demos = _extract_train_max_n_demos(row, info=info)
         base = _common_row_fields(
             row, info=info, train_iters=train_iters, mid_pred=mid_pred,
             train_alpha=train_alpha, task_shape_idx=task_shape_idx,
-            task_shape_tag=task_shape_tag,
+            task_shape_tag=task_shape_tag, train_max_n_demos=train_max_n_demos,
         )
         for role, metrics in by_role.items():
             metrics = metrics or {}
@@ -391,6 +444,7 @@ def _plot_role_metric_group(
     out_path: Path,
     title: str,
     sharey: bool = False,
+    train_max_n_demos: int | None = None,
 ) -> None:
     plot_df = role_eval_demo_df.loc[role_eval_demo_df["eval_role"] == str(eval_role)].copy()
     available = [metric for metric in metric_names if metric in plot_df.columns]
@@ -441,7 +495,8 @@ def _plot_role_metric_group(
     )
     for ax in np.ravel(g.axes):
         ax.set_xlim(left=0.0)
-        ax.axvline(TRAIN_MAX_N_DEMOS, color="gray", linestyle="--", linewidth=0.8, alpha=0.6)
+        if train_max_n_demos is not None:
+            ax.axvline(train_max_n_demos, color="gray", linestyle="--", linewidth=0.8, alpha=0.6)
     g.set_axis_labels("Eval max_n_demos", "Metric value")
     g.set_titles("{row_name} | {col_name}")
     legend = g._legend
@@ -546,30 +601,35 @@ def _save_aggregates_for_mid_pred_and_train_iters(
     *,
     mid_pred: int,
     train_iters: int,
+    train_max_n_demos: int,
     final_df: pd.DataFrame,
     role_eval_demo_df: pd.DataFrame,
     role_eval_needle_df: pd.DataFrame,
     role_eval_demo_all_df: pd.DataFrame,
     out_root: Path,
 ) -> None:
-    out_dir = out_root / f"mid{int(mid_pred)}" / f"train_iters_{int(train_iters)}"
+    out_dir = out_root / f"mid{int(mid_pred)}" / f"train_iters_{int(train_iters)}" / f"train_max_demos_{int(train_max_n_demos)}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     final_slice = final_df.loc[
         (final_df["train_iters"] == float(train_iters))
         & (final_df["mid_pred"] == float(mid_pred))
+        & (final_df["train_max_n_demos"] == float(train_max_n_demos))
     ].copy()
     role_slice = role_eval_demo_df.loc[
         (role_eval_demo_df["train_iters"] == float(train_iters))
         & (role_eval_demo_df["mid_pred"] == float(mid_pred))
+        & (role_eval_demo_df["train_max_n_demos"] == float(train_max_n_demos))
     ].copy()
     needle_slice = role_eval_needle_df.loc[
         (role_eval_needle_df["train_iters"] == float(train_iters))
         & (role_eval_needle_df["mid_pred"] == float(mid_pred))
+        & (role_eval_needle_df["train_max_n_demos"] == float(train_max_n_demos))
     ].copy() if not role_eval_needle_df.empty else pd.DataFrame()
     demo_all_slice = role_eval_demo_all_df.loc[
         (role_eval_demo_all_df["train_iters"] == float(train_iters))
         & (role_eval_demo_all_df["mid_pred"] == float(mid_pred))
+        & (role_eval_demo_all_df["train_max_n_demos"] == float(train_max_n_demos))
     ].copy() if not role_eval_demo_all_df.empty else pd.DataFrame()
 
     if final_slice.empty:
@@ -584,7 +644,7 @@ def _save_aggregates_for_mid_pred_and_train_iters(
         "seq_exact_acc",
         "token_acc",
     ]
-    groupby_cols = ["train_iters", "model_family", "mid_pred", "train_alpha"]
+    groupby_cols = ["train_iters", "model_family", "mid_pred", "train_alpha", "train_max_n_demos"]
     if "train_demo_ranked" in final_slice.columns:
         groupby_cols.append("train_demo_ranked")
     final_agg = (
@@ -605,7 +665,7 @@ def _save_aggregates_for_mid_pred_and_train_iters(
         ]
         role_groupby = [
             "train_iters", "model_family", "mid_pred", "train_alpha",
-            "train_demo_ranked", "eval_role", "eval_max_n_demos", "eval_alpha",
+            "train_max_n_demos", "train_demo_ranked", "eval_role", "eval_max_n_demos", "eval_alpha",
         ]
         if "eval_demo_ranked" in role_slice.columns:
             role_groupby.append("eval_demo_ranked")
@@ -645,6 +705,7 @@ def _save_aggregates_for_mid_pred_and_train_iters(
                             f"(mid{int(mid_pred)}, ti={int(train_iters)}, eval_{tag})"
                         ),
                         sharey=bool(group["sharey"]),
+                        train_max_n_demos=int(train_max_n_demos),
                     )
 
             for model_family in sub["model_family"].unique():
@@ -665,7 +726,7 @@ def _save_aggregates_for_mid_pred_and_train_iters(
         ]
         needle_groupby = [
             "train_iters", "model_family", "mid_pred", "train_alpha",
-            "train_demo_ranked", "eval_role", "eval_max_n_demos", "eval_alpha",
+            "train_max_n_demos", "train_demo_ranked", "eval_role", "eval_max_n_demos", "eval_alpha",
         ]
         if "eval_demo_ranked" in needle_slice.columns:
             needle_groupby.append("eval_demo_ranked")
@@ -705,6 +766,7 @@ def _save_aggregates_for_mid_pred_and_train_iters(
                             f"(mid{int(mid_pred)}, ti={int(train_iters)}, eval_{tag})"
                         ),
                         sharey=bool(group["sharey"]),
+                        train_max_n_demos=int(train_max_n_demos),
                     )
 
             for model_family in sub["model_family"].unique():
@@ -744,7 +806,31 @@ role_eval_demo_df = _explode_role_eval_demo_rows(df)
 role_eval_needle_df = _explode_role_eval_needle_rows(df)
 role_eval_demo_all_df = _explode_role_eval_demo_all_rows(df)
 
-sort_cols = ["model_family", "mid_pred", "train_alpha"]
+# <codecell>
+# --- Compute forward FLOPs at eval sequence length ---
+_info_by_row_id = {
+    int(row["__row_id"]): (row.get("info", {}) or {})
+    for _, row in df.iterrows()
+}
+
+
+def _compute_eval_forward_flops(row):
+    info = _info_by_row_id.get(int(row["run_row_id"]), {})
+    seq_len = row.get("eval_dominant_seq_len")
+    if pd.isna(seq_len):
+        return np.nan
+    try:
+        return compute_metrics_from_info(info, n_seq_override=int(seq_len))["forward_flops"]
+    except (KeyError, ValueError, TypeError):
+        return np.nan
+
+
+if "eval_dominant_seq_len" in role_eval_demo_df.columns:
+    role_eval_demo_df["forward_flops_at_eval_seq"] = role_eval_demo_df.apply(
+        _compute_eval_forward_flops, axis=1,
+    )
+
+sort_cols = ["model_family", "mid_pred", "train_alpha", "train_max_n_demos"]
 if "train_demo_ranked" in final_df.columns:
     sort_cols.append("train_demo_ranked")
 selection_df = final_df.sort_values(
@@ -762,19 +848,256 @@ selection_df.to_csv(OUT_DIR / "selection_ranked.csv", index=False)
 
 mid_pred_values = sorted(int(v) for v in final_df["mid_pred"].dropna().astype(int).unique())
 train_iters_values = sorted(int(v) for v in final_df["train_iters"].dropna().astype(int).unique())
+train_max_n_demos_values = sorted(int(v) for v in final_df["train_max_n_demos"].dropna().astype(int).unique())
+if not train_max_n_demos_values:
+    train_max_n_demos_values = [8]
 
 for mid_pred in mid_pred_values:
     for train_iters in train_iters_values:
-        _save_aggregates_for_mid_pred_and_train_iters(
-            mid_pred=mid_pred,
-            train_iters=train_iters,
-            final_df=final_df,
-            role_eval_demo_df=role_eval_demo_df,
-            role_eval_needle_df=role_eval_needle_df,
-            role_eval_demo_all_df=role_eval_demo_all_df,
-            out_root=OUT_DIR,
-        )
+        for train_max_n_demos in train_max_n_demos_values:
+            _save_aggregates_for_mid_pred_and_train_iters(
+                mid_pred=mid_pred,
+                train_iters=train_iters,
+                train_max_n_demos=train_max_n_demos,
+                final_df=final_df,
+                role_eval_demo_df=role_eval_demo_df,
+                role_eval_needle_df=role_eval_needle_df,
+                role_eval_demo_all_df=role_eval_demo_all_df,
+                out_root=OUT_DIR,
+            )
 
 print("Saved:", OUT_DIR)
+
+
+# <codecell>
+# ====== Compute-efficiency plots ======
+
+
+def _build_info_from_final_row(row) -> dict:
+    """Reconstruct a minimal info dict from final_df columns."""
+    info = {
+        "model_family": row.get("model_family"),
+        "n_vocab": row.get("n_vocab"),
+        "n_layers": row.get("n_layers"),
+        "n_hidden": row.get("n_hidden"),
+        "n_heads": row.get("n_heads"),
+        "use_swiglu": row.get("use_swiglu"),
+        "d_state": row.get("d_state"),
+        "d_conv": row.get("d_conv"),
+        "scan_chunk_len": row.get("scan_chunk_len"),
+        "n_seq": row.get("n_seq"),
+    }
+    return {k: v for k, v in info.items() if v is not None and not (isinstance(v, float) and np.isnan(v))}
+
+
+def _plot_param_count_comparison(*, final_df, out_dir):
+    """Plot 1: Parameter count by model family, broken down by component."""
+    records = []
+    seen = set()
+    for _, row in final_df.iterrows():
+        family = row.get("model_family")
+        if family in seen or family is None:
+            continue
+        seen.add(family)
+        info = _build_info_from_final_row(row)
+        try:
+            params = compute_metrics_from_info(info)["params"]
+        except (KeyError, ValueError, TypeError):
+            continue
+        records.append({
+            "model_family": family,
+            "embedding": params["embedding"],
+            "blocks": params["blocks_total"],
+            "output_head": params["output_head"],
+        })
+    if not records:
+        return
+
+    plot_df = pd.DataFrame(records).melt(
+        id_vars=["model_family"],
+        value_vars=["embedding", "blocks", "output_head"],
+        var_name="component",
+        value_name="count",
+    )
+    fig, ax = plt.subplots(figsize=(6, 4))
+    sns.barplot(data=plot_df, x="model_family", y="count", hue="component", ax=ax)
+    ax.set_title("Parameter Count by Component")
+    ax.set_ylabel("Parameters")
+    fig.tight_layout()
+    fig.savefig(out_dir / "compute_param_count_comparison.png", bbox_inches="tight")
+    plt.close(fig)
+
+
+def _plot_flops_vs_seq_len(*, final_df, out_dir):
+    """Plot 2: Forward FLOPs vs sequence length — quadratic vs linear scaling."""
+    seq_lens = np.array([16, 32, 64, 128, 256, 512, 1024, 2048])
+    records = []
+    seen = set()
+    for _, row in final_df.iterrows():
+        family = row.get("model_family")
+        if family in seen or family is None:
+            continue
+        seen.add(family)
+        info = _build_info_from_final_row(row)
+        for s in seq_lens:
+            try:
+                flops = compute_metrics_from_info(info, n_seq_override=int(s))["forward_flops"]
+            except (KeyError, ValueError, TypeError):
+                continue
+            records.append({"model_family": family, "n_seq": int(s), "forward_flops": flops})
+    if not records:
+        return
+
+    plot_df = pd.DataFrame(records)
+    fig, ax = plt.subplots(figsize=(7, 4))
+    for family, grp in plot_df.groupby("model_family"):
+        grp_sorted = grp.sort_values("n_seq")
+        dash = MODEL_FAMILY_DASHES.get(family, "")
+        ax.plot(grp_sorted["n_seq"], grp_sorted["forward_flops"],
+                label=family, marker="o", dashes=dash if dash else (None, None))
+    ax.set_xscale("log", base=2)
+    ax.set_yscale("log")
+    ax.set_xlabel("Sequence length")
+    ax.set_ylabel("Forward FLOPs (log)")
+    ax.set_title("FLOPs vs Sequence Length")
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(out_dir / "compute_flops_vs_seq_len.png", bbox_inches="tight")
+    plt.close(fig)
+
+
+def _plot_accuracy_vs_inference_flops(*, role_eval_demo_df, out_dir):
+    """Plot 3: rollout_success_rate vs forward FLOPs at eval sequence length."""
+    if "forward_flops_at_eval_seq" not in role_eval_demo_df.columns:
+        return
+    plot_df = role_eval_demo_df.loc[
+        (role_eval_demo_df["eval_role"] == "eval")
+        & role_eval_demo_df["forward_flops_at_eval_seq"].notna()
+        & role_eval_demo_df["rollout_success_rate"].notna()
+    ].copy()
+    if plot_df.empty:
+        return
+
+    plot_df["facet_label"] = (
+        "train_a=" + plot_df["train_alpha"].astype(str)
+        + " " + plot_df["train_demo_ranked"].map(
+            {True: "ranked", False: "unranked", None: "n/a"}
+        ).fillna("n/a")
+    )
+    g = sns.relplot(
+        data=plot_df,
+        kind="scatter",
+        x="forward_flops_at_eval_seq",
+        y="rollout_success_rate",
+        hue="model_family",
+        style="model_family",
+        col="facet_label",
+        col_wrap=min(3, plot_df["facet_label"].nunique()),
+        height=3.5,
+        aspect=1.3,
+    )
+    for ax in np.ravel(g.axes):
+        ax.set_xscale("log")
+    g.set_axis_labels("Forward FLOPs at eval seq len (log)", "Rollout success rate")
+    g.set_titles("{col_name}")
+    g.fig.suptitle("Accuracy vs Inference FLOPs", y=1.02)
+    g.savefig(out_dir / "compute_accuracy_vs_inference_flops.png", bbox_inches="tight")
+    plt.close(g.fig)
+
+
+def _plot_training_compute_summary(*, final_df, out_dir):
+    """Plot 4: Total training FLOPs by model config."""
+    plot_df = final_df.dropna(subset=["training_flops_total"]).copy()
+    if plot_df.empty:
+        return
+
+    plot_df["config_label"] = plot_df["model_family"]
+    fig, ax = plt.subplots(figsize=(6, 4))
+    sns.barplot(data=plot_df, x="config_label", y="training_flops_total",
+                estimator="mean", errorbar=None, ax=ax)
+    ax.set_title("Training Compute (total FLOPs)")
+    ax.set_ylabel("Training FLOPs")
+    ax.set_xlabel("")
+    fig.tight_layout()
+    fig.savefig(out_dir / "compute_training_summary.png", bbox_inches="tight")
+    plt.close(fig)
+
+
+def _plot_memory_comparison(*, final_df, out_dir):
+    """Plot 5: Estimated peak training memory by model config."""
+    records = []
+    for _, row in final_df.iterrows():
+        family = row.get("model_family")
+        n_params = row.get("n_params")
+        if pd.isna(n_params) or family is None:
+            continue
+        n_seq = row.get("n_seq", 512)
+        n_hidden = row.get("n_hidden", 256)
+        n_layers = row.get("n_layers", 4)
+        n_heads = row.get("n_heads", 8) if family == "transformer" else None
+        mem = memory_bytes_estimate(
+            int(n_params), batch_size=8, n_seq=int(n_seq),
+            n_hidden=int(n_hidden), n_layers=int(n_layers), n_heads=n_heads,
+            model_family=family,
+        )
+        records.append({
+            "model_family": family,
+            "params_GB": mem["params_bytes"] / 1e9,
+            "optimizer_GB": mem["optimizer_bytes"] / 1e9,
+            "activations_GB": mem["activations_bytes"] / 1e9,
+        })
+    if not records:
+        return
+
+    plot_df = pd.DataFrame(records).groupby("model_family", as_index=False).first()
+    long_df = plot_df.melt(
+        id_vars=["model_family"],
+        value_vars=["params_GB", "optimizer_GB", "activations_GB"],
+        var_name="component",
+        value_name="GB",
+    )
+    fig, ax = plt.subplots(figsize=(6, 4))
+    sns.barplot(data=long_df, x="model_family", y="GB", hue="component", ax=ax)
+    ax.set_title("Estimated Peak Training Memory")
+    ax.set_ylabel("GB")
+    fig.tight_layout()
+    fig.savefig(out_dir / "compute_memory_comparison.png", bbox_inches="tight")
+    plt.close(fig)
+
+
+def _plot_compute_efficiency(*, role_eval_demo_df, out_dir):
+    """Plot 6: rollout_success_rate vs n_params scatter."""
+    plot_df = role_eval_demo_df.loc[
+        (role_eval_demo_df["eval_role"] == "eval")
+        & role_eval_demo_df["n_params"].notna()
+        & role_eval_demo_df["rollout_success_rate"].notna()
+    ].copy()
+    if plot_df.empty:
+        return
+
+    fig, ax = plt.subplots(figsize=(6, 4))
+    for family, grp in plot_df.groupby("model_family"):
+        ax.scatter(
+            grp["n_params"], grp["rollout_success_rate"],
+            label=family, alpha=0.5, s=20,
+        )
+    ax.set_xlabel("Parameter count")
+    ax.set_ylabel("Rollout success rate")
+    ax.set_title("Compute Efficiency: Accuracy vs Parameters")
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(out_dir / "compute_efficiency_params.png", bbox_inches="tight")
+    plt.close(fig)
+
+
+# --- Generate compute plots ---
+_plot_param_count_comparison(final_df=final_df, out_dir=OUT_DIR)
+_plot_flops_vs_seq_len(final_df=final_df, out_dir=OUT_DIR)
+_plot_accuracy_vs_inference_flops(role_eval_demo_df=role_eval_demo_df, out_dir=OUT_DIR)
+_plot_training_compute_summary(final_df=final_df, out_dir=OUT_DIR)
+_plot_memory_comparison(final_df=final_df, out_dir=OUT_DIR)
+_plot_compute_efficiency(role_eval_demo_df=role_eval_demo_df, out_dir=OUT_DIR)
+
+print("Compute plots saved to:", OUT_DIR)
 
 # %%

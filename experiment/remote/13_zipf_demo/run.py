@@ -54,6 +54,8 @@ USE_WANDB = True
 
 EVAL_ROLES = ["train", "eval"]
 
+DEMO_DISTRIBUTION = "zipf_per_rule"
+
 SWEEP_TRAIN_ALPHA = [0, 2, 3, 4, 10]
 EVAL_ALPHA_SWEEP = [0, 1, 2, 3, 4, 10]
 
@@ -61,7 +63,8 @@ SWEEP_TRAIN_DEMO_RANKED = [True, False]
 EVAL_DEMO_RANKED_SWEEP = [True, False]
 
 TRAIN_MIN_N_DEMOS = 1
-TRAIN_MAX_N_DEMOS = 8
+SWEEP_TRAIN_MAX_N_DEMOS = [8]
+BASE_TRAIN_MAX_N_DEMOS = 8  # reference demo count for batch size scaling
 EVAL_MAX_N_DEMOS_SWEEP = [1, 2, 4, 8, 12, 16, 24, 32, 40, 48]
 SELECTION_EVAL_MAX_N_DEMOS = 8
 
@@ -131,13 +134,15 @@ MAMBA2_BONSAI_LRS = [1e-4]
 # ]
 # BATCH_SIZE = 2
 # GRAD_ACCUM_STEPS = 2
+# EFFECTIVE_BATCH_SIZE = int(BATCH_SIZE) * int(GRAD_ACCUM_STEPS)
 # TRAIN_ITERS_SWEEP = [20]
 # TEST_EVERY = 10
 # TEST_ITERS = 1
 # EVAL_ITERS_PER_ROLE = 1
 # ROLLOUT_EXAMPLES_PER_ROLE = 4
 # RUN_SPLIT = 1
-# TRAIN_MAX_N_DEMOS = 4
+# SWEEP_TRAIN_MAX_N_DEMOS = [4]
+# BASE_TRAIN_MAX_N_DEMOS = 4
 # EVAL_MAX_N_DEMOS_SWEEP = [4]
 # SELECTION_EVAL_MAX_N_DEMOS = 4
 # TRANSFORMER_LAYERS = [2]
@@ -160,6 +165,7 @@ RUN_SPLIT = len(SWEEP_TASK_SHAPES) * (
     * len(TRANSFORMER_SWIGLU)
     * len(TRAIN_ITERS_SWEEP)
     * len(SWEEP_TRAIN_ALPHA)
+    * len(SWEEP_TRAIN_MAX_N_DEMOS)
     * len(SWEEP_TRAIN_DEMO_RANKED)
     + len(MAMBA2_BONSAI_LAYERS)
     * len(MAMBA2_BONSAI_WIDTH_HEADS)
@@ -169,6 +175,7 @@ RUN_SPLIT = len(SWEEP_TASK_SHAPES) * (
     * len(MAMBA2_BONSAI_LRS)
     * len(TRAIN_ITERS_SWEEP)
     * len(SWEEP_TRAIN_ALPHA)
+    * len(SWEEP_TRAIN_MAX_N_DEMOS)
     * len(SWEEP_TRAIN_DEMO_RANKED)
 )
 
@@ -241,7 +248,7 @@ def _task_shape_tag(task_shape: dict) -> str:
     return f"mid{_task_shape_mid_pred(task_shape)}"
 
 
-def _fresh_icl_config(task_shape: dict) -> dict:
+def _fresh_icl_config(task_shape: dict, *, train_max_n_demos: int) -> dict:
     task_shape = _normalize_task_shape(task_shape)
     return {
         "base_bank_seed": BASE_BANK_SEED,
@@ -256,7 +263,7 @@ def _fresh_icl_config(task_shape: dict) -> dict:
         "k_out_max": K_OUT_MAX,
         "initial_ant_max": INITIAL_ANT_MAX,
         "constants": list(CONSTANTS),
-        "train_max_n_demos": int(TRAIN_MAX_N_DEMOS),
+        "train_max_n_demos": int(train_max_n_demos),
         "eval_max_n_demos_sweep": [int(v) for v in EVAL_MAX_N_DEMOS_SWEEP],
         "predicate_name_len": int(PREDICATE_NAME_LEN),
         "train_include_oracle": bool(TRAIN_INCLUDE_ORACLE),
@@ -362,28 +369,28 @@ def _make_layer_task(
     )
 
 
-def _estimate_eval_batch_size(
+def _estimate_batch_size(
     *,
-    eval_n_seq: int,
+    n_seq: int,
     base_n_seq: int,
     base_batch_size: int,
 ) -> int:
     """Scale batch size to keep total token count roughly constant."""
-    if eval_n_seq <= base_n_seq:
+    if n_seq <= base_n_seq:
         return base_batch_size
-    return max(1, base_batch_size * base_n_seq // eval_n_seq)
+    return max(1, base_batch_size * base_n_seq // n_seq)
 
 
-def _estimate_eval_batch_and_iters(
+def _estimate_batch_and_iters(
     *,
-    eval_n_seq: int,
+    n_seq: int,
     base_n_seq: int,
     base_batch_size: int,
     base_n_iters: int,
 ) -> tuple[int, int]:
     """Scale batch size down and iterations up to keep total samples constant."""
-    batch_size = _estimate_eval_batch_size(
-        eval_n_seq=eval_n_seq,
+    batch_size = _estimate_batch_size(
+        n_seq=n_seq,
         base_n_seq=base_n_seq,
         base_batch_size=base_batch_size,
     )
@@ -397,11 +404,13 @@ def _estimate_eval_batch_and_iters(
 def _make_task_shape_bundle(*, task_shape: dict, task_shape_idx: int) -> dict:
     task_shape = _normalize_task_shape(task_shape)
     base_bank, tokenizer = _build_base_bank_and_tokenizer(task_shape=task_shape)
-    dims_train = _compute_dims(
-        base_bank,
-        tokenizer,
-        max_n_demos_for_shapes=TRAIN_MAX_N_DEMOS,
-    )
+    all_train_demo_values = sorted(set(SWEEP_TRAIN_MAX_N_DEMOS) | {BASE_TRAIN_MAX_N_DEMOS})
+    dims_by_train_max_n_demos = {}
+    for tmd in all_train_demo_values:
+        dims_by_train_max_n_demos[int(tmd)] = _compute_dims(
+            base_bank, tokenizer, max_n_demos_for_shapes=int(tmd),
+        )
+    dims_train = dims_by_train_max_n_demos[max(SWEEP_TRAIN_MAX_N_DEMOS)]
     dims_eval = _compute_dims(
         base_bank,
         tokenizer,
@@ -431,6 +440,13 @@ def _make_task_shape_bundle(*, task_shape: dict, task_shape_idx: int) -> dict:
     eval_n_seq_raw = int(dims_eval["n_seq_ar"])
     demo_all_n_seq_raw = int(dims_demo_all["n_seq_ar"])
     model_n_seq = int(max(2, _ceil_pow2_int(max(eval_n_seq_raw, demo_all_n_seq_raw))))
+    train_n_seq_by_tmd = {}
+    for tmd in all_train_demo_values:
+        train_n_seq_by_tmd[int(tmd)] = _ceil_pow2_int(
+            int(dims_by_train_max_n_demos[int(tmd)]["n_seq_ar"])
+        )
+    all_train_n_vocab = [int(dims_by_train_max_n_demos[int(tmd)]["n_vocab"]) for tmd in all_train_demo_values]
+    n_vocab = max(*all_train_n_vocab, int(dims_eval["n_vocab"]))
     return {
         "task_shape_idx": int(task_shape_idx),
         "task_shape": task_shape,
@@ -440,12 +456,15 @@ def _make_task_shape_bundle(*, task_shape: dict, task_shape_idx: int) -> dict:
         "tokenizer": tokenizer,
         "dims": {"train": dims_train, "eval": dims_eval, "demo_all": dims_demo_all},
         "dims_by_n_demos": dims_by_n_demos,
+        "dims_by_train_max_n_demos": dims_by_train_max_n_demos,
+        "train_n_seq_by_tmd": train_n_seq_by_tmd,
+        "base_train_n_seq": int(train_n_seq_by_tmd[int(BASE_TRAIN_MAX_N_DEMOS)]),
         "train_n_seq_raw": train_n_seq_raw,
         "eval_n_seq_raw": eval_n_seq_raw,
         "train_n_seq": int(model_n_seq),
         "eval_n_seq": int(model_n_seq),
         "model_n_seq": int(model_n_seq),
-        "n_vocab": max(int(dims_train["n_vocab"]), int(dims_eval["n_vocab"])),
+        "n_vocab": n_vocab,
         "max_completion_len": int(max_completion_len),
         "dims_demo_all": dims_demo_all,
         "demo_all_n_seq": int(_ceil_pow2_int(demo_all_n_seq_raw)),
@@ -510,7 +529,7 @@ def _evaluate_role_for_demo(
     eval_max_n_demos: int,
     eval_alpha: float,
     eval_demo_ranked: bool = True,
-    demo_distribution: str = "zipf",
+    demo_distribution: str = DEMO_DISTRIBUTION,
     include_oracle: bool = False,
     demo_all: bool = False,
     batch_size: int | None = None,
@@ -732,7 +751,7 @@ for bundle in TASK_SHAPE_BUNDLES:
     eval_n_seq = int(bundle["eval_n_seq"])
     n_vocab = int(bundle["n_vocab"])
 
-    for n_layers, (n_hidden, n_heads), lr, pos_encoding, use_swiglu, train_iters, train_alpha, train_demo_ranked in itertools.product(
+    for n_layers, (n_hidden, n_heads), lr, pos_encoding, use_swiglu, train_iters, train_alpha, train_max_n_demos, train_demo_ranked in itertools.product(
         TRANSFORMER_LAYERS,
         TRANSFORMER_WIDTH_HEADS,
         TRANSFORMER_LRS,
@@ -740,8 +759,16 @@ for bundle in TASK_SHAPE_BUNDLES:
         TRANSFORMER_SWIGLU,
         TRAIN_ITERS_SWEEP,
         SWEEP_TRAIN_ALPHA,
+        SWEEP_TRAIN_MAX_N_DEMOS,
         SWEEP_TRAIN_DEMO_RANKED,
     ):
+        train_n_seq = int(bundle["train_n_seq_by_tmd"][int(train_max_n_demos)])
+        train_batch_size = _estimate_batch_size(
+            n_seq=train_n_seq,
+            base_n_seq=int(bundle["base_train_n_seq"]),
+            base_batch_size=BATCH_SIZE,
+        )
+        train_grad_accum_steps = max(1, EFFECTIVE_BATCH_SIZE // train_batch_size)
         config = TransformerConfig(
             n_vocab=n_vocab,
             n_seq=eval_n_seq,
@@ -766,13 +793,14 @@ for bundle in TASK_SHAPE_BUNDLES:
             drop_remainder=True,
             shuffle=True,
             min_n_demos=int(TRAIN_MIN_N_DEMOS),
-            max_n_demos=int(TRAIN_MAX_N_DEMOS),
+            max_n_demos=int(train_max_n_demos),
             fixed_length_mode=TRAIN_FIXED_LENGTH_MODE,
             fixed_length_n_seq=train_n_seq,
             include_oracle=bool(TRAIN_INCLUDE_ORACLE),
-            demo_distribution="zipf",
+            demo_distribution=DEMO_DISTRIBUTION,
             demo_distribution_alpha=float(train_alpha),
             demo_ranked=bool(train_demo_ranked),
+            batch_size=train_batch_size,
         )
         test_task = _make_layer_task(
             task_shape=task_shape,
@@ -781,12 +809,13 @@ for bundle in TASK_SHAPE_BUNDLES:
             drop_remainder=False,
             shuffle=True,
             min_n_demos=int(TRAIN_MIN_N_DEMOS),
-            max_n_demos=int(TRAIN_MAX_N_DEMOS),
+            max_n_demos=int(train_max_n_demos),
             fixed_length_mode=EVAL_FIXED_LENGTH_MODE,
             fixed_length_n_seq=eval_n_seq,
-            demo_distribution="zipf",
+            demo_distribution=DEMO_DISTRIBUTION,
             demo_distribution_alpha=float(train_alpha),
             demo_ranked=bool(train_demo_ranked),
+            batch_size=train_batch_size,
         )
 
         train_args = {
@@ -796,7 +825,7 @@ for bundle in TASK_SHAPE_BUNDLES:
             "train_iters": int(train_iters),
             "test_iters": TEST_ITERS,
             "test_every": TEST_EVERY,
-            "grad_accum_steps": int(GRAD_ACCUM_STEPS),
+            "grad_accum_steps": int(train_grad_accum_steps),
             "lr": warmup_cosine_schedule(lr, int(train_iters)),
         }
 
@@ -811,13 +840,13 @@ for bundle in TASK_SHAPE_BUNDLES:
             "mid_pred": int(bundle["mid_pred"]),
             "predicates_per_layer": task_shape["predicates_per_layer"],
             "rules_per_transition": task_shape["rules_per_transition"],
-            "train_max_n_demos": int(TRAIN_MAX_N_DEMOS),
+            "train_max_n_demos": int(train_max_n_demos),
             "eval_max_n_demos_sweep": [int(v) for v in EVAL_MAX_N_DEMOS_SWEEP],
             "predicate_name_len": int(PREDICATE_NAME_LEN),
             "train_include_oracle": bool(TRAIN_INCLUDE_ORACLE),
             "train_alpha": float(train_alpha),
             "train_demo_ranked": bool(train_demo_ranked),
-            "demo_distribution": "zipf",
+            "demo_distribution": DEMO_DISTRIBUTION,
             "n_layers": n_layers,
             "n_hidden": n_hidden,
             "n_heads": n_heads,
@@ -832,16 +861,17 @@ for bundle in TASK_SHAPE_BUNDLES:
             "eval_fixed_length_n_seq": eval_n_seq,
             "train_eval_profile": "light",
             "train_iters": int(train_iters),
-            "grad_accum_steps": int(GRAD_ACCUM_STEPS),
-            "microbatch_size": int(BATCH_SIZE),
-            "effective_batch_size": int(EFFECTIVE_BATCH_SIZE),
+            "grad_accum_steps": int(train_grad_accum_steps),
+            "microbatch_size": int(train_batch_size),
+            "effective_batch_size": int(train_batch_size) * int(train_grad_accum_steps),
         }
         case_name = (
             f"13_zipf_demo_{bundle['task_shape_tag']}_transformer_"
             f"l{int(n_layers)}_h{int(n_hidden)}_heads{int(n_heads)}_"
             f"lr{_lr_tag(lr)}_a{_alpha_tag(train_alpha)}_"
+            f"d{int(train_max_n_demos)}_"
             f"{'ranked' if train_demo_ranked else 'unranked'}_"
-            f"ga{int(GRAD_ACCUM_STEPS)}_ti{int(train_iters)}"
+            f"ga{int(train_grad_accum_steps)}_ti{int(train_iters)}"
         )
         train_args["wandb_cfg"] = _make_case_wandb_cfg(
             case_name=case_name,
@@ -860,7 +890,7 @@ for bundle in TASK_SHAPE_BUNDLES:
         )
         all_cases.append(case)
 
-    for n_layers, (n_hidden, n_heads), d_state, d_conv, scan_chunk_len, lr, train_iters, train_alpha, train_demo_ranked in itertools.product(
+    for n_layers, (n_hidden, n_heads), d_state, d_conv, scan_chunk_len, lr, train_iters, train_alpha, train_max_n_demos, train_demo_ranked in itertools.product(
         MAMBA2_BONSAI_LAYERS,
         MAMBA2_BONSAI_WIDTH_HEADS,
         MAMBA2_BONSAI_D_STATE,
@@ -869,8 +899,16 @@ for bundle in TASK_SHAPE_BUNDLES:
         MAMBA2_BONSAI_LRS,
         TRAIN_ITERS_SWEEP,
         SWEEP_TRAIN_ALPHA,
+        SWEEP_TRAIN_MAX_N_DEMOS,
         SWEEP_TRAIN_DEMO_RANKED,
     ):
+        train_n_seq = int(bundle["train_n_seq_by_tmd"][int(train_max_n_demos)])
+        train_batch_size = _estimate_batch_size(
+            n_seq=train_n_seq,
+            base_n_seq=int(bundle["base_train_n_seq"]),
+            base_batch_size=BATCH_SIZE,
+        )
+        train_grad_accum_steps = max(1, EFFECTIVE_BATCH_SIZE // train_batch_size)
         config = Mamba2BonsaiConfig(
             n_vocab=n_vocab,
             n_seq=eval_n_seq,
@@ -897,13 +935,14 @@ for bundle in TASK_SHAPE_BUNDLES:
             drop_remainder=True,
             shuffle=True,
             min_n_demos=int(TRAIN_MIN_N_DEMOS),
-            max_n_demos=int(TRAIN_MAX_N_DEMOS),
+            max_n_demos=int(train_max_n_demos),
             fixed_length_mode=TRAIN_FIXED_LENGTH_MODE,
             fixed_length_n_seq=train_n_seq,
             include_oracle=bool(TRAIN_INCLUDE_ORACLE),
-            demo_distribution="zipf",
+            demo_distribution=DEMO_DISTRIBUTION,
             demo_distribution_alpha=float(train_alpha),
             demo_ranked=bool(train_demo_ranked),
+            batch_size=train_batch_size,
         )
         test_task = _make_layer_task(
             task_shape=task_shape,
@@ -912,12 +951,13 @@ for bundle in TASK_SHAPE_BUNDLES:
             drop_remainder=False,
             shuffle=True,
             min_n_demos=int(TRAIN_MIN_N_DEMOS),
-            max_n_demos=int(TRAIN_MAX_N_DEMOS),
+            max_n_demos=int(train_max_n_demos),
             fixed_length_mode=EVAL_FIXED_LENGTH_MODE,
             fixed_length_n_seq=eval_n_seq,
-            demo_distribution="zipf",
+            demo_distribution=DEMO_DISTRIBUTION,
             demo_distribution_alpha=float(train_alpha),
             demo_ranked=bool(train_demo_ranked),
+            batch_size=train_batch_size,
         )
 
         train_args = {
@@ -927,7 +967,7 @@ for bundle in TASK_SHAPE_BUNDLES:
             "train_iters": int(train_iters),
             "test_iters": TEST_ITERS,
             "test_every": TEST_EVERY,
-            "grad_accum_steps": int(GRAD_ACCUM_STEPS),
+            "grad_accum_steps": int(train_grad_accum_steps),
             "lr": warmup_cosine_schedule(lr, int(train_iters)),
         }
 
@@ -942,13 +982,13 @@ for bundle in TASK_SHAPE_BUNDLES:
             "mid_pred": int(bundle["mid_pred"]),
             "predicates_per_layer": task_shape["predicates_per_layer"],
             "rules_per_transition": task_shape["rules_per_transition"],
-            "train_max_n_demos": int(TRAIN_MAX_N_DEMOS),
+            "train_max_n_demos": int(train_max_n_demos),
             "eval_max_n_demos_sweep": [int(v) for v in EVAL_MAX_N_DEMOS_SWEEP],
             "predicate_name_len": int(PREDICATE_NAME_LEN),
             "train_include_oracle": bool(TRAIN_INCLUDE_ORACLE),
             "train_alpha": float(train_alpha),
             "train_demo_ranked": bool(train_demo_ranked),
-            "demo_distribution": "zipf",
+            "demo_distribution": DEMO_DISTRIBUTION,
             "n_layers": n_layers,
             "n_hidden": n_hidden,
             "n_heads": n_heads,
@@ -964,16 +1004,17 @@ for bundle in TASK_SHAPE_BUNDLES:
             "eval_fixed_length_n_seq": eval_n_seq,
             "train_eval_profile": "light",
             "train_iters": int(train_iters),
-            "grad_accum_steps": int(GRAD_ACCUM_STEPS),
-            "microbatch_size": int(BATCH_SIZE),
-            "effective_batch_size": int(EFFECTIVE_BATCH_SIZE),
+            "grad_accum_steps": int(train_grad_accum_steps),
+            "microbatch_size": int(train_batch_size),
+            "effective_batch_size": int(train_batch_size) * int(train_grad_accum_steps),
         }
         case_name = (
             f"13_zipf_demo_{bundle['task_shape_tag']}_mamba2_bonsai_"
             f"l{int(n_layers)}_h{int(n_hidden)}_heads{int(n_heads)}_"
             f"ds{int(d_state)}_lr{_lr_tag(lr)}_a{_alpha_tag(train_alpha)}_"
+            f"d{int(train_max_n_demos)}_"
             f"{'ranked' if train_demo_ranked else 'unranked'}_"
-            f"ga{int(GRAD_ACCUM_STEPS)}_ti{int(train_iters)}"
+            f"ga{int(train_grad_accum_steps)}_ti{int(train_iters)}"
         )
         train_args["wandb_cfg"] = _make_case_wandb_cfg(
             case_name=case_name,
@@ -1019,7 +1060,7 @@ for task_shape_idx in active_task_shape_ids:
             "causal_mask_tokens": int(bundle["model_n_seq"]) * int(bundle["model_n_seq"]),
         },
     )
-    print("FRESH ICL CONFIG", _fresh_icl_config(bundle["task_shape"]))
+    print("FRESH ICL CONFIG", _fresh_icl_config(bundle["task_shape"], train_max_n_demos=max(SWEEP_TRAIN_MAX_N_DEMOS)))
 
     preview_train_task = _make_layer_task(
         task_shape=bundle["task_shape"],
@@ -1028,11 +1069,11 @@ for task_shape_idx in active_task_shape_ids:
         drop_remainder=True,
         shuffle=True,
         min_n_demos=int(TRAIN_MIN_N_DEMOS),
-        max_n_demos=int(TRAIN_MAX_N_DEMOS),
+        max_n_demos=int(max(SWEEP_TRAIN_MAX_N_DEMOS)),
         fixed_length_mode=TRAIN_FIXED_LENGTH_MODE,
         fixed_length_n_seq=int(bundle["train_n_seq"]),
         include_oracle=bool(TRAIN_INCLUDE_ORACLE),
-        demo_distribution="zipf",
+        demo_distribution=DEMO_DISTRIBUTION,
         demo_distribution_alpha=1.0,
     )
     preview_eval_task = _make_layer_task(
@@ -1042,10 +1083,10 @@ for task_shape_idx in active_task_shape_ids:
         drop_remainder=False,
         shuffle=True,
         min_n_demos=int(TRAIN_MIN_N_DEMOS),
-        max_n_demos=int(TRAIN_MAX_N_DEMOS),
+        max_n_demos=int(max(SWEEP_TRAIN_MAX_N_DEMOS)),
         fixed_length_mode=EVAL_FIXED_LENGTH_MODE,
         fixed_length_n_seq=int(bundle["eval_n_seq"]),
-        demo_distribution="zipf",
+        demo_distribution=DEMO_DISTRIBUTION,
         demo_distribution_alpha=1.0,
     )
     try:
@@ -1073,6 +1114,7 @@ for case in tqdm(all_cases, desc="cases", leave=True):
     bundle = TASK_SHAPE_BUNDLES_BY_IDX[int(case.info["task_shape_idx"])]
     train_alpha = float(case.info["train_alpha"])
     train_demo_ranked = bool(case.info["train_demo_ranked"])
+    train_max_n_demos = int(case.info["train_max_n_demos"])
     train_start = time.perf_counter()
     case.run()
     train_wall_s = time.perf_counter() - train_start
@@ -1097,9 +1139,9 @@ for case in tqdm(all_cases, desc="cases", leave=True):
         for eval_max_n_demos in EVAL_MAX_N_DEMOS_SWEEP:
             this_dims = bundle["dims_by_n_demos"][int(eval_max_n_demos)]
             this_eval_n_seq = int(_ceil_pow2_int(int(this_dims["n_seq_ar"])))
-            this_batch_size, this_n_iters = _estimate_eval_batch_and_iters(
-                eval_n_seq=this_eval_n_seq,
-                base_n_seq=int(_ceil_pow2_int(bundle["train_n_seq_raw"])),
+            this_batch_size, this_n_iters = _estimate_batch_and_iters(
+                n_seq=this_eval_n_seq,
+                base_n_seq=int(bundle["base_train_n_seq"]),
                 base_batch_size=BATCH_SIZE,
                 base_n_iters=EVAL_ITERS_PER_ROLE,
             )
@@ -1131,7 +1173,7 @@ for case in tqdm(all_cases, desc="cases", leave=True):
                         eval_max_n_demos=int(eval_max_n_demos),
                         eval_alpha=float(eval_alpha),
                         eval_demo_ranked=bool(eval_demo_ranked),
-                        demo_distribution="zipf",
+                        demo_distribution=DEMO_DISTRIBUTION,
                         batch_size=this_batch_size,
                         model_fn=model_fn,
                         shared_adapter=this_adapter,
@@ -1158,9 +1200,9 @@ for case in tqdm(all_cases, desc="cases", leave=True):
         for eval_max_n_demos in EVAL_MAX_N_DEMOS_SWEEP:
             this_dims = bundle["dims_by_n_demos"][int(eval_max_n_demos)]
             this_eval_n_seq = int(_ceil_pow2_int(int(this_dims["n_seq_ar"])))
-            this_batch_size, this_n_iters = _estimate_eval_batch_and_iters(
-                eval_n_seq=this_eval_n_seq,
-                base_n_seq=int(_ceil_pow2_int(bundle["train_n_seq_raw"])),
+            this_batch_size, this_n_iters = _estimate_batch_and_iters(
+                n_seq=this_eval_n_seq,
+                base_n_seq=int(bundle["base_train_n_seq"]),
                 base_batch_size=BATCH_SIZE,
                 base_n_iters=EVAL_ITERS_PER_ROLE,
             )
@@ -1192,7 +1234,7 @@ for case in tqdm(all_cases, desc="cases", leave=True):
                         eval_max_n_demos=int(eval_max_n_demos),
                         eval_alpha=float(eval_alpha),
                         eval_demo_ranked=bool(eval_demo_ranked),
-                        demo_distribution="zipf_headless",
+                        demo_distribution=f"{DEMO_DISTRIBUTION}_headless",
                         include_oracle=True,
                         batch_size=this_batch_size,
                         model_fn=model_fn,
@@ -1205,9 +1247,9 @@ for case in tqdm(all_cases, desc="cases", leave=True):
     needle_bar.close()
 
     # --- demo_all eval ---
-    demo_all_batch_size, demo_all_n_iters = _estimate_eval_batch_and_iters(
-        eval_n_seq=int(bundle["demo_all_n_seq"]),
-        base_n_seq=int(_ceil_pow2_int(bundle["train_n_seq_raw"])),
+    demo_all_batch_size, demo_all_n_iters = _estimate_batch_and_iters(
+        n_seq=int(bundle["demo_all_n_seq"]),
+        base_n_seq=int(bundle["base_train_n_seq"]),
         base_batch_size=BATCH_SIZE,
         base_n_iters=EVAL_ITERS_PER_ROLE,
     )
@@ -1259,6 +1301,7 @@ for case in tqdm(all_cases, desc="cases", leave=True):
         "mid_pred": int(case.info["mid_pred"]),
         "train_alpha": float(train_alpha),
         "train_demo_ranked": bool(train_demo_ranked),
+        "train_max_n_demos": int(train_max_n_demos),
         "info": case.info,
         "train_args": {
             "loss": case.train_args["loss"],
@@ -1296,7 +1339,7 @@ for case in tqdm(all_cases, desc="cases", leave=True):
             metric_name="rollout_success_rate",
         ),
         "fresh_icl_config": {
-            **_fresh_icl_config(bundle["task_shape"]),
+            **_fresh_icl_config(bundle["task_shape"], train_max_n_demos=int(train_max_n_demos)),
         },
         "dims": bundle["dims"],
         "train_wall_s": float(train_wall_s),
