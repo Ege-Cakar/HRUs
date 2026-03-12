@@ -18,7 +18,6 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-import re
 import sys
 from typing import Any
 
@@ -36,18 +35,14 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
+from task.layer_fol import FOLLayerTask
 from task.layer_fol.demos import (
     _classify_rules_by_rank,
-    _sample_demo_schemas_zipf,
-    _sample_demo_schemas_zipf_per_rule,
+    sample_ranked_demos,
 )
 from task.layer_gen.util.fol_rule_bank import (
     FOLAtom,
-    FOLLayerRule,
     FOLRuleBank,
-    build_fresh_layer0_bank,
-    build_random_fol_rule_bank,
-    generate_fresh_predicate_names,
     sample_fol_problem,
 )
 
@@ -65,18 +60,20 @@ CONFIG = {
     "step_indices": (0, 1),
     "n_banks_per_setting": 2,
     "n_prompts_per_bank": 200,
-    "bank": {
+    "task_kwargs": {
         "arity_max": 0,
+        "arity_min": 0,
         "vars_per_rule_max": 6,
         "k_in_min": 1,
         "k_in_max": 1,
         "k_out_min": 1,
         "k_out_max": 1,
-        "constants_count": 1,
+        "constants": ("c0",),
+        "initial_ant_max": 1,
+        "sample_max_attempts": 4096,
+        "max_unify_solutions": 128,
     },
-    "initial_ant_max": 1,
-    "sample_max_attempts": 4096,
-    "max_unify_solutions": 128,
+    "n_inspect_samples": 3,
     "ci_method": "bootstrap",
     "n_bootstrap": 1000,
     "bootstrap_seed_offset": 100_003,
@@ -106,15 +103,32 @@ if os.environ.get("LAYER_STATS_MID_PRED_SMOKE", "").strip():
 ### END TEST CONFIGS
 
 
-_LAYERED_PRED_RE = re.compile(r"r(\d+)_(\d+)$")
-
-
 # <codecell>
-def _layer_from_predicate(predicate: str) -> int:
-    match = _LAYERED_PRED_RE.fullmatch(str(predicate))
-    if match is None:
-        raise ValueError(f"Unsupported layered predicate name: {predicate!r}")
-    return int(match.group(1))
+def _sample_from_task(
+    task: FOLLayerTask,
+    rng: np.random.Generator,
+    step_idx: int,
+) -> tuple[FOLRuleBank, int, tuple[FOLAtom, ...], FOLAtom] | None:
+    """Sample a single prompt state using a FOLLayerTask's bank config.
+
+    Returns ``(temp_bank, src_layer, ants, goal_atom)`` or ``None`` if no
+    feasible problem could be sampled.
+    """
+    temp_bank = task.build_fresh_temp_bank(rng)
+    try:
+        sampled = sample_fol_problem(
+            bank=temp_bank,
+            distance=2,
+            initial_ant_max=task.initial_ant_max,
+            rng=rng,
+            max_attempts=task.sample_max_attempts,
+            max_unify_solutions=task.max_unify_solutions,
+        )
+    except RuntimeError:
+        return None
+    src_layer = int(sampled.step_layers[step_idx])
+    ants = tuple(sampled.step_ants[step_idx])
+    return temp_bank, src_layer, ants, sampled.goal_atom
 
 
 def _bootstrap_mean_ci(
@@ -141,13 +155,6 @@ def _bootstrap_mean_ci(
     return float(lo), float(hi)
 
 
-def _constants_from_count(count: int) -> tuple[str, ...]:
-    count = int(count)
-    if count < 1:
-        raise ValueError(f"constants_count must be >= 1, got {count}")
-    return tuple(f"c{idx}" for idx in range(count))
-
-
 def _json_safe(obj: Any) -> Any:
     if isinstance(obj, Path):
         return str(obj)
@@ -163,88 +170,9 @@ def _json_safe(obj: Any) -> Any:
 
 
 # <codecell>
-def _build_base_bank(
-    mid_pred: int,
-    base_num_pred: int,
-    bank_cfg: dict[str, Any],
-    seed: int,
-) -> FOLRuleBank:
-    """Build a 3-layer rule bank with (1, mid_pred, base_num_pred) predicates."""
-    arity_max = int(bank_cfg["arity_max"])
-    return build_random_fol_rule_bank(
-        n_layers=3,
-        predicates_per_layer=(int(base_num_pred), int(mid_pred), int(base_num_pred)),
-        rules_per_transition=(int(base_num_pred) ** 2, int(base_num_pred) ** 2),
-        # predicates_per_layer=(1, int(mid_pred), int(base_num_pred)),
-        # rules_per_transition=(int(base_num_pred), int(base_num_pred) ** 2),
-        arity_min=min(1, arity_max),
-        arity_max=arity_max,
-        vars_per_rule_max=int(bank_cfg["vars_per_rule_max"]),
-        k_in_min=int(bank_cfg["k_in_min"]),
-        k_in_max=int(bank_cfg["k_in_max"]),
-        k_out_min=int(bank_cfg["k_out_min"]),
-        k_out_max=int(bank_cfg["k_out_max"]),
-        constants=_constants_from_count(int(bank_cfg["constants_count"])),
-        rng=np.random.default_rng(int(seed)),
-    )
-
-
-def _sample_prompt_state_fresh(
-    *,
-    base_bank: FOLRuleBank,
-    bank_cfg: dict[str, Any],
-    forced_step_idx: int,
-    initial_ant_max: int,
-    sample_max_attempts: int,
-    max_unify_solutions: int,
-    rng: np.random.Generator,
-) -> tuple[FOLRuleBank, int, tuple[FOLAtom, ...], FOLAtom, int] | None:
-    """Sample a single prompt state with fresh layer-0 predicates.
-
-    Returns ``(temp_bank, src_layer, ants, goal_atom, goal_layer)`` or
-    ``None`` if no feasible problem could be sampled.
-    """
-    n_fresh = len(base_bank.predicates_for_layer(0))
-    fresh_preds = generate_fresh_predicate_names(n_fresh, rng)
-    temp_bank = build_fresh_layer0_bank(
-        base_bank=base_bank,
-        fresh_predicates=fresh_preds,
-        rules_per_transition=len(base_bank.transition_rules(0)),
-        k_in_min=int(bank_cfg["k_in_min"]),
-        k_in_max=int(bank_cfg["k_in_max"]),
-        k_out_min=int(bank_cfg["k_out_min"]),
-        k_out_max=int(bank_cfg["k_out_max"]),
-        rng=rng,
-    )
-
-    try:
-        sampled = sample_fol_problem(
-            bank=temp_bank,
-            distance=2,
-            initial_ant_max=int(initial_ant_max),
-            rng=rng,
-            max_attempts=int(sample_max_attempts),
-            max_unify_solutions=int(max_unify_solutions),
-        )
-    except RuntimeError:
-        return None
-
-    step_idx = int(forced_step_idx)
-    src_layer = int(sampled.step_layers[step_idx])
-    ants = tuple(sampled.step_ants[step_idx])
-    goal_atom = sampled.goal_atom
-    goal_layer = _layer_from_predicate(goal_atom.predicate)
-    return temp_bank, src_layer, ants, goal_atom, goal_layer
-
-
-_SAMPLER_DISPATCH = {
-    "zipf": _sample_demo_schemas_zipf,
-    "zipf_per_rule": _sample_demo_schemas_zipf_per_rule,
-}
-
-
-# <codecell>
-def run_study(cfg: dict[str, Any]) -> tuple[pd.DataFrame, pd.DataFrame]:
+def run_study(
+    cfg: dict[str, Any],
+) -> tuple[pd.DataFrame, pd.DataFrame, list[tuple[int, dict]]]:
     seed = int(cfg["seed"])
     step_indices = tuple(int(s) for s in cfg["step_indices"])
     sweep_mid_pred = [int(v) for v in cfg["sweep_mid_pred"]]
@@ -256,15 +184,14 @@ def run_study(cfg: dict[str, Any]) -> tuple[pd.DataFrame, pd.DataFrame]:
     n_banks = int(cfg["n_banks_per_setting"])
     n_prompts = int(cfg["n_prompts_per_bank"])
     base_num_pred = int(cfg["base_num_pred"])
-    initial_ant_max = int(cfg["initial_ant_max"])
-    sample_max_attempts = int(cfg["sample_max_attempts"])
-    max_unify_solutions = int(cfg["max_unify_solutions"])
+    task_kwargs = dict(cfg["task_kwargs"])
+    max_unify_solutions = int(task_kwargs["max_unify_solutions"])
+    n_inspect_samples = int(cfg.get("n_inspect_samples", 3))
     ci_method = str(cfg.get("ci_method", "bootstrap")).strip().lower()
     n_bootstrap = int(cfg.get("n_bootstrap", 1000))
     bootstrap_seed_offset = int(cfg.get("bootstrap_seed_offset", 100_003))
     save_trial_rows = bool(cfg["save_trial_rows"])
     show_progress = bool(cfg.get("show_progress", True)) and tqdm is not None
-    bank_cfg = dict(cfg["bank"])
     if ci_method != "bootstrap":
         raise ValueError(
             f"Unsupported ci_method={ci_method!r}; expected 'bootstrap'."
@@ -287,6 +214,7 @@ def run_study(cfg: dict[str, Any]) -> tuple[pd.DataFrame, pd.DataFrame]:
     n_total_rules_sum_acc: dict[AccKey, int] = {}
     n_sample_failures_acc: dict[AccKey, int] = {}
     p_good_is_valid_acc: dict[AccKey, list[float]] = {}
+    inspect_records: list[tuple[int, dict]] = []
 
     settings_total = len(sweep_mid_pred)
     settings_bar = tqdm(
@@ -309,20 +237,24 @@ def run_study(cfg: dict[str, Any]) -> tuple[pd.DataFrame, pd.DataFrame]:
         for bank_idx in range(n_banks):
             bank_seed = int(master_rng.integers(0, np.iinfo(np.int32).max))
             prompt_seed = int(master_rng.integers(0, np.iinfo(np.int32).max))
-            base_bank = _build_base_bank(mid_pred, base_num_pred, bank_cfg, seed=bank_seed)
+            task = FOLLayerTask(
+                mode="online",
+                task_split="depth3_fresh_icl",
+                distance_range=2,
+                batch_size=1,
+                seed=bank_seed,
+                predicates_per_layer=(base_num_pred, mid_pred, base_num_pred),
+                rules_per_transition=(base_num_pred ** 2, base_num_pred ** 2),
+                fresh_icl_base_bank_seed=bank_seed,
+                max_n_demos=0,
+                online_prefetch=False,
+                **task_kwargs,
+            )
             prompt_rng = np.random.default_rng(prompt_seed)
 
             for step_idx in step_indices:
                 for prompt_idx in range(n_prompts):
-                    result = _sample_prompt_state_fresh(
-                        base_bank=base_bank,
-                        bank_cfg=bank_cfg,
-                        forced_step_idx=step_idx,
-                        initial_ant_max=initial_ant_max,
-                        sample_max_attempts=sample_max_attempts,
-                        max_unify_solutions=max_unify_solutions,
-                        rng=prompt_rng,
-                    )
+                    result = _sample_from_task(task, prompt_rng, step_idx)
                     prompt_bar.update(1)
                     if result is None:
                         for demo_dist in sweep_demo_distributions:
@@ -334,7 +266,7 @@ def run_study(cfg: dict[str, Any]) -> tuple[pd.DataFrame, pd.DataFrame]:
                                     )
                         continue
 
-                    temp_bank, src_layer, ants, goal_atom, goal_layer = result
+                    temp_bank, src_layer, ants, goal_atom = result
 
                     # Classify ALL rules at src_layer into ranks 1-4
                     rules = list(temp_bank.transition_rules(src_layer))
@@ -369,7 +301,6 @@ def run_study(cfg: dict[str, Any]) -> tuple[pd.DataFrame, pd.DataFrame]:
                     ]
 
                     for demo_dist in sweep_demo_distributions:
-                        sampler_fn = _SAMPLER_DISPATCH[demo_dist]
                         for alpha_idx, alpha in enumerate(sweep_alpha):
                             demo_rng = np.random.default_rng(
                                 alpha_demo_seeds[alpha_idx]
@@ -398,14 +329,14 @@ def run_study(cfg: dict[str, Any]) -> tuple[pd.DataFrame, pd.DataFrame]:
                                 )
 
                                 # Sample demos
-                                sampled, sampled_ranks = sampler_fn(
-                                    rng=demo_rng,
+                                sampled, sampled_ranks = sample_ranked_demos(
                                     ranked_rules=ranked,
+                                    rng=demo_rng,
                                     n_demos=n_demos,
+                                    demo_distribution=demo_dist,
                                     alpha=alpha,
-                                    include_oracle=False,
-                                    oracle_rule=None,
                                     demo_ranked=False,
+                                    demo_unique=task.demo_unique
                                 )
 
                                 # P(demo good) indicator: any rank-1 rule sampled?
@@ -435,6 +366,33 @@ def run_study(cfg: dict[str, Any]) -> tuple[pd.DataFrame, pd.DataFrame]:
                                             "has_good_demo": has_good_demo,
                                         }
                                     )
+
+            task.close()
+
+        # Collect inspection samples for this mid_pred value
+        if n_inspect_samples > 0:
+            inspect_seed = int(master_rng.integers(0, np.iinfo(np.int32).max))
+            inspect_task = FOLLayerTask(
+                mode="online",
+                task_split="depth3_fresh_icl",
+                distance_range=2,
+                batch_size=1,
+                seed=inspect_seed,
+                predicates_per_layer=(base_num_pred, mid_pred, base_num_pred),
+                rules_per_transition=(base_num_pred ** 2, base_num_pred ** 2),
+                fresh_icl_base_bank_seed=inspect_seed,
+                max_n_demos=8,
+                min_n_demos=8,
+                demo_distribution="zipf",
+                demo_distribution_alpha=1.0,
+                online_prefetch=False,
+                **task_kwargs,
+            )
+            inspect_rng = np.random.default_rng(inspect_seed)
+            for _ in range(n_inspect_samples):
+                record = inspect_task._strategy.sample_record(rng=inspect_rng)
+                inspect_records.append((mid_pred, record))
+            inspect_task.close()
 
         prompt_bar.close()
         settings_bar.update(1)
@@ -519,7 +477,7 @@ def run_study(cfg: dict[str, Any]) -> tuple[pd.DataFrame, pd.DataFrame]:
             }
         )
 
-    return pd.DataFrame(summary_rows), pd.DataFrame(trial_rows)
+    return pd.DataFrame(summary_rows), pd.DataFrame(trial_rows), inspect_records
 
 
 # <codecell>
@@ -823,11 +781,45 @@ def print_console_summary(summary_df: pd.DataFrame) -> None:
     print(ordered.to_string(index=False))
 
 
+def print_inspect_samples(
+    inspect_records: list[tuple[int, dict]],
+) -> None:
+    """Print a few full task records for visual inspection."""
+    if not inspect_records:
+        return
+    print("\n=== Inspection samples ===")
+    total_per_mid = {}
+    for mid_pred, _ in inspect_records:
+        total_per_mid[mid_pred] = total_per_mid.get(mid_pred, 0) + 1
+    counter: dict[int, int] = {}
+    for mid_pred, record in inspect_records:
+        counter[mid_pred] = counter.get(mid_pred, 0) + 1
+        idx = counter[mid_pred]
+        total = total_per_mid[mid_pred]
+        print(f"--- mid_pred={mid_pred}, sample {idx}/{total} ---")
+        print(f"  src_layer: {record.get('src_layer', '?')}")
+        ctx = record.get("rule_context", {})
+        active_rules = ctx.get("active_rule_texts", [])
+        print(f"  n_active_rules: {len(active_rules)}")
+        statements = record.get("statement_texts", [])
+        if statements:
+            print(f"  answer: {statements[0]}")
+        demo_texts = ctx.get("demo_schema_texts", [])
+        demo_ranks = ctx.get("demo_ranks", [])
+        if demo_texts:
+            print(f"  demos ({len(demo_texts)}):")
+            for d_idx, text in enumerate(demo_texts):
+                rank_str = f"[rank {demo_ranks[d_idx]}] " if d_idx < len(demo_ranks) else ""
+                print(f"    {rank_str}{text}")
+    print()
+
+
 # <codecell>
-SUMMARY_DF, TRIAL_DF = run_study(CONFIG)
+SUMMARY_DF, TRIAL_DF, INSPECT_RECORDS = run_study(CONFIG)
 OUT_DIR = save_outputs(cfg=CONFIG, summary_df=SUMMARY_DF, trial_df=TRIAL_DF)
 print(f"\nSaved outputs to: {OUT_DIR}")
 print_console_summary(SUMMARY_DF)
+print_inspect_samples(INSPECT_RECORDS)
 
 # <codecell>
 1 - (1 - 0.028)**128

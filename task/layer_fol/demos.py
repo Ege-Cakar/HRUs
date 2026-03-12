@@ -539,6 +539,58 @@ def _classify_rules_by_rank(
     return ranked
 
 
+def sample_ranked_demos(
+    *,
+    ranked_rules: dict[int, list[FOLLayerRule]],
+    rng: np.random.Generator,
+    n_demos: int,
+    demo_distribution: str,
+    alpha: float,
+    include_oracle: bool = False,
+    oracle_rule: FOLLayerRule | None = None,
+    demo_ranked: bool = True,
+    demo_unique: bool = True,
+) -> tuple[list[FOLLayerRule], list[int]]:
+    """Dispatch demo sampling on pre-classified rules by distribution name.
+
+    Accepts the same rank-based distribution names as
+    ``augment_prompt_with_demos`` (``"zipf"``, ``"zipf_headless"``,
+    ``"zipf_per_rule"``, ``"zipf_per_rule_headless"``).
+
+    Returns ``(sampled_schemas, sampled_ranks)``.
+    """
+    demo_distribution = str(demo_distribution)
+    if demo_distribution in ("zipf", "zipf_headless"):
+        return _sample_demo_schemas_zipf(
+            rng=rng,
+            ranked_rules=ranked_rules,
+            n_demos=n_demos,
+            alpha=alpha,
+            include_oracle=include_oracle,
+            oracle_rule=oracle_rule,
+            headless=(demo_distribution == "zipf_headless"),
+            demo_ranked=demo_ranked,
+            demo_unique=demo_unique,
+        )
+    elif demo_distribution in ("zipf_per_rule", "zipf_per_rule_headless"):
+        return _sample_demo_schemas_zipf_per_rule(
+            rng=rng,
+            ranked_rules=ranked_rules,
+            n_demos=n_demos,
+            alpha=alpha,
+            include_oracle=include_oracle,
+            oracle_rule=oracle_rule,
+            headless=(demo_distribution == "zipf_per_rule_headless"),
+            demo_ranked=demo_ranked,
+            demo_unique=demo_unique,
+        )
+    else:
+        raise ValueError(
+            f"sample_ranked_demos does not support demo_distribution={demo_distribution!r}; "
+            f"expected 'zipf', 'zipf_headless', 'zipf_per_rule', or 'zipf_per_rule_headless'."
+        )
+
+
 def _sample_demo_schemas_zipf(
     *,
     rng: np.random.Generator,
