@@ -597,6 +597,45 @@ def _plot_demo_all_comparison(
     plt.close(fig)
 
 
+def _plot_accuracy_vs_compute_metric(
+    *, eval_df: pd.DataFrame, x_col: str, x_label: str, title: str, out_path: Path,
+) -> None:
+    """Scatter plot of rollout_success_rate vs a compute metric (FLOPs or memory)."""
+    plot_df = eval_df.loc[
+        (eval_df["eval_role"] == "eval")
+        & eval_df[x_col].notna()
+        & eval_df["rollout_success_rate"].notna()
+    ].copy()
+    if plot_df.empty:
+        return
+
+    plot_df["facet_label"] = (
+        "train_a=" + plot_df["train_alpha"].astype(str)
+        + " " + plot_df["train_demo_ranked"].map(
+            {True: "ranked", False: "unranked", None: "n/a"}
+        ).fillna("n/a")
+    )
+    g = sns.relplot(
+        data=plot_df,
+        kind="scatter",
+        x=x_col,
+        y="rollout_success_rate",
+        hue="model_family",
+        style="model_family",
+        col="facet_label",
+        col_wrap=min(3, plot_df["facet_label"].nunique()),
+        height=3.5,
+        aspect=1.3,
+    )
+    for ax in np.ravel(g.axes):
+        ax.set_xscale("log")
+    g.set_axis_labels(x_label, "Rollout success rate")
+    g.set_titles("{col_name}")
+    g.fig.suptitle(title, y=1.02)
+    g.savefig(out_path, bbox_inches="tight")
+    plt.close(g.fig)
+
+
 def _save_aggregates_for_mid_pred_and_train_iters(
     *,
     mid_pred: int,
@@ -719,6 +758,28 @@ def _save_aggregates_for_mid_pred_and_train_iters(
                     suffix=f"eval_{tag}",
                 )
 
+            # --- Compute metric scatter plots (unaggregated) ---
+            if eval_ranked_val is not None and "eval_demo_ranked" in role_slice.columns:
+                compute_sub = role_slice.loc[role_slice["eval_demo_ranked"] == eval_ranked_val]
+            else:
+                compute_sub = role_slice
+            if "forward_flops_at_eval_seq" in compute_sub.columns:
+                _plot_accuracy_vs_compute_metric(
+                    eval_df=compute_sub,
+                    x_col="forward_flops_at_eval_seq",
+                    x_label="Forward FLOPs at eval seq len (log)",
+                    title=f"Accuracy vs Inference FLOPs (mid{int(mid_pred)}, ti={int(train_iters)}, eval_{tag})",
+                    out_path=out_dir / f"eval_{tag}_accuracy_vs_inference_flops.png",
+                )
+            if "activation_memory_at_eval_seq" in compute_sub.columns:
+                _plot_accuracy_vs_compute_metric(
+                    eval_df=compute_sub,
+                    x_col="activation_memory_at_eval_seq",
+                    x_label="Activation memory bytes at eval seq len (log)",
+                    title=f"Accuracy vs Activation Memory (mid{int(mid_pred)}, ti={int(train_iters)}, eval_{tag})",
+                    out_path=out_dir / f"eval_{tag}_accuracy_vs_activation_memory.png",
+                )
+
     # --- Needle eval plots ---
     if not needle_slice.empty:
         needle_metric_cols = [
@@ -780,6 +841,28 @@ def _save_aggregates_for_mid_pred_and_train_iters(
                     suffix=f"needle_{tag}",
                 )
 
+            # --- Compute metric scatter plots (unaggregated) ---
+            if eval_ranked_val is not None and "eval_demo_ranked" in needle_slice.columns:
+                compute_sub = needle_slice.loc[needle_slice["eval_demo_ranked"] == eval_ranked_val]
+            else:
+                compute_sub = needle_slice
+            if "forward_flops_at_eval_seq" in compute_sub.columns:
+                _plot_accuracy_vs_compute_metric(
+                    eval_df=compute_sub,
+                    x_col="forward_flops_at_eval_seq",
+                    x_label="Forward FLOPs at eval seq len (log)",
+                    title=f"Needle: Accuracy vs Inference FLOPs (mid{int(mid_pred)}, ti={int(train_iters)}, needle_{tag})",
+                    out_path=out_dir / f"needle_{tag}_accuracy_vs_inference_flops.png",
+                )
+            if "activation_memory_at_eval_seq" in compute_sub.columns:
+                _plot_accuracy_vs_compute_metric(
+                    eval_df=compute_sub,
+                    x_col="activation_memory_at_eval_seq",
+                    x_label="Activation memory bytes at eval seq len (log)",
+                    title=f"Needle: Accuracy vs Activation Memory (mid{int(mid_pred)}, ti={int(train_iters)}, needle_{tag})",
+                    out_path=out_dir / f"needle_{tag}_accuracy_vs_activation_memory.png",
+                )
+
     # --- demo_all comparison ---
     if not demo_all_slice.empty:
         demo_all_slice.to_csv(out_dir / "summary_by_role_eval_demo_all_aggregated.csv", index=False)
@@ -825,9 +908,34 @@ def _compute_eval_forward_flops(row):
         return np.nan
 
 
-if "eval_dominant_seq_len" in role_eval_demo_df.columns:
-    role_eval_demo_df["forward_flops_at_eval_seq"] = role_eval_demo_df.apply(
+def _compute_eval_activation_memory(row):
+    info = _info_by_row_id.get(int(row["run_row_id"]), {})
+    seq_len = row.get("eval_dominant_seq_len")
+    if pd.isna(seq_len):
+        return np.nan
+    try:
+        metrics = compute_metrics_from_info(info, n_seq_override=int(seq_len))
+        return memory_bytes_estimate(
+            metrics["n_params"],
+            batch_size=1,
+            n_seq=int(seq_len),
+            n_hidden=int(info.get("n_hidden", 128)),
+            n_layers=int(info.get("n_layers", 2)),
+            n_heads=int(info.get("n_heads", 4)),
+            model_family=info.get("model_family", "transformer"),
+        )["activations_bytes"]
+    except (KeyError, ValueError, TypeError):
+        return np.nan
+
+
+for _eval_df in [role_eval_demo_df, role_eval_needle_df]:
+    if _eval_df.empty or "eval_dominant_seq_len" not in _eval_df.columns:
+        continue
+    _eval_df["forward_flops_at_eval_seq"] = _eval_df.apply(
         _compute_eval_forward_flops, axis=1,
+    )
+    _eval_df["activation_memory_at_eval_seq"] = _eval_df.apply(
+        _compute_eval_activation_memory, axis=1,
     )
 
 sort_cols = ["model_family", "mid_pred", "train_alpha", "train_max_n_demos"]
@@ -935,7 +1043,7 @@ def _plot_flops_vs_seq_len(*, final_df, out_dir):
     head so the comparison is fair), (b) attention/SSD component only, which
     isolates the O(S²) vs O(S) scaling story.
     """
-    seq_lens = np.array([16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192])
+    seq_lens = np.array([16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16_000, 32_000, 64_000, 128_000])
     records = []
     seen = set()
     for _, row in final_df.iterrows():
@@ -1006,45 +1114,6 @@ def _plot_flops_vs_seq_len(*, final_df, out_dir):
     fig.tight_layout()
     fig.savefig(out_dir / "compute_flops_vs_seq_len.png", bbox_inches="tight")
     plt.close(fig)
-
-
-def _plot_accuracy_vs_inference_flops(*, role_eval_demo_df, out_dir):
-    """Plot 3: rollout_success_rate vs forward FLOPs at eval sequence length."""
-    if "forward_flops_at_eval_seq" not in role_eval_demo_df.columns:
-        return
-    plot_df = role_eval_demo_df.loc[
-        (role_eval_demo_df["eval_role"] == "eval")
-        & role_eval_demo_df["forward_flops_at_eval_seq"].notna()
-        & role_eval_demo_df["rollout_success_rate"].notna()
-    ].copy()
-    if plot_df.empty:
-        return
-
-    plot_df["facet_label"] = (
-        "train_a=" + plot_df["train_alpha"].astype(str)
-        + " " + plot_df["train_demo_ranked"].map(
-            {True: "ranked", False: "unranked", None: "n/a"}
-        ).fillna("n/a")
-    )
-    g = sns.relplot(
-        data=plot_df,
-        kind="scatter",
-        x="forward_flops_at_eval_seq",
-        y="rollout_success_rate",
-        hue="model_family",
-        style="model_family",
-        col="facet_label",
-        col_wrap=min(3, plot_df["facet_label"].nunique()),
-        height=3.5,
-        aspect=1.3,
-    )
-    for ax in np.ravel(g.axes):
-        ax.set_xscale("log")
-    g.set_axis_labels("Forward FLOPs at eval seq len (log)", "Rollout success rate")
-    g.set_titles("{col_name}")
-    g.fig.suptitle("Accuracy vs Inference FLOPs", y=1.02)
-    g.savefig(out_dir / "compute_accuracy_vs_inference_flops.png", bbox_inches="tight")
-    plt.close(g.fig)
 
 
 def _plot_training_compute_summary(*, final_df, out_dir):
@@ -1135,7 +1204,6 @@ def _plot_compute_efficiency(*, role_eval_demo_df, out_dir):
 # --- Generate compute plots ---
 _plot_param_count_comparison(final_df=final_df, out_dir=OUT_DIR)
 _plot_flops_vs_seq_len(final_df=final_df, out_dir=OUT_DIR)
-_plot_accuracy_vs_inference_flops(role_eval_demo_df=role_eval_demo_df, out_dir=OUT_DIR)
 _plot_training_compute_summary(final_df=final_df, out_dir=OUT_DIR)
 _plot_memory_comparison(final_df=final_df, out_dir=OUT_DIR)
 _plot_compute_efficiency(role_eval_demo_df=role_eval_demo_df, out_dir=OUT_DIR)
