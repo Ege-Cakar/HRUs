@@ -196,6 +196,10 @@ def test_online_sample_config_round_trip() -> None:
         demo_ranked=False,
         demo_all=True,
         demo_unique=False,
+        cluster_n_samples=100,
+        cluster_k=5,
+        cluster_base_dist="zipf_per_rule",
+        cluster_unselected_rank=None,
     )
     payload = config.to_dict()
     assert isinstance(payload, dict)
@@ -223,6 +227,10 @@ def test_fresh_online_sample_config_round_trip() -> None:
         demo_ranked=True,
         demo_all=False,
         demo_unique=False,
+        cluster_n_samples=100,
+        cluster_k=5,
+        cluster_base_dist="zipf_per_rule",
+        cluster_unselected_rank=None,
         fresh_layer0_predicates=10,
         fresh_rules_per_transition=16,
         k_in_min=1,
@@ -2585,3 +2593,231 @@ def test_zipf_per_rule_include_oracle() -> None:
     non_oracle_ranks = [r for r in ranks if r != 1]
     for r in non_oracle_ranks:
         assert r in {2, 4}, f"Non-oracle demo should be rank 2 or 4, got {r}"
+
+
+# ---------------------------------------------------------------------------
+# Cluster demo distribution tests
+# ---------------------------------------------------------------------------
+
+
+def test_cluster_helpers_footrule_distance_matrix() -> None:
+    """Pairwise Spearman's footrule distance matrix matches hand computation."""
+    from task.layer_fol.demos import _spearman_footrule_distance_matrix
+
+    # Example from the plan
+    v1 = np.array([4, 3, 1, 2, 5, 5])
+    v2 = np.array([5, 3, 1, 5, 2, 4])
+    vecs = np.stack([v1, v2])
+    D = _spearman_footrule_distance_matrix(vecs)
+    assert D.shape == (2, 2)
+    assert D[0, 0] == 0
+    assert D[1, 1] == 0
+    # |4-5| + |3-3| + |1-1| + |2-5| + |5-2| + |5-4| = 1+0+0+3+3+1 = 8
+    assert D[0, 1] == 8
+    assert D[1, 0] == 8
+
+
+def test_cluster_helpers_k_medoids_basic() -> None:
+    """k-medoids picks medoids that minimize intra-cluster distance."""
+    from task.layer_fol.demos import _k_medoids
+
+    # 4 points in 2 obvious clusters
+    D = np.array([
+        [0, 1, 10, 11],
+        [1, 0, 10, 11],
+        [10, 10, 0, 1],
+        [11, 11, 1, 0],
+    ])
+    rng = np.random.default_rng(42)
+    medoids = _k_medoids(D, k=2, rng=rng)
+    medoids_set = set(int(m) for m in medoids)
+    # One medoid from each cluster
+    assert len(medoids_set & {0, 1}) == 1
+    assert len(medoids_set & {2, 3}) == 1
+
+
+def test_cluster_build_ranking_vector() -> None:
+    """Ranking vector assigns low positions to low Zipf ranks."""
+    from task.layer_fol.demos import _build_ranking_vector
+
+    # 4 rules, 3 selected demos
+    r1 = FOLLayerRule(src_layer=0, dst_layer=1, lhs=(FOLAtom("A", ()),), rhs=(FOLAtom("M", ()),))
+    r2 = FOLLayerRule(src_layer=0, dst_layer=1, lhs=(FOLAtom("B", ()),), rhs=(FOLAtom("N", ()),))
+    r3 = FOLLayerRule(src_layer=0, dst_layer=1, lhs=(FOLAtom("C", ()),), rhs=(FOLAtom("P", ()),))
+    r4 = FOLLayerRule(src_layer=0, dst_layer=1, lhs=(FOLAtom("D", ()),), rhs=(FOLAtom("Q", ()),))
+
+    rule_to_idx = {r1: 0, r2: 1, r3: 2, r4: 3}
+    rng = np.random.default_rng(42)
+
+    # Selected: r1 (rank 1), r3 (rank 3), r4 (rank 4)
+    vec = _build_ranking_vector(
+        selected_rules=[r1, r3, r4],
+        selected_ranks=[1, 3, 4],
+        rule_to_idx=rule_to_idx,
+        n_rules=4,
+        unselected_rank=4,
+        rng=rng,
+    )
+    assert vec.shape == (4,)
+    # r4 (rank 4) → position 1 (highest rank = sorted first = farthest from problem)
+    # r3 (rank 3) → position 2
+    # r1 (rank 1) → position 3 (lowest rank = closest to problem)
+    assert vec[0] == 3  # r1 position (rank 1 → low position)
+    assert vec[2] == 2  # r3 position (rank 3)
+    assert vec[3] == 1  # r4 position (rank 4)
+    assert vec[1] == 4  # r2 unselected
+
+
+def test_cluster_sample_produces_valid_output() -> None:
+    """Cluster distribution produces valid (non-empty) demo schemas and ranks."""
+    from task.layer_fol.demos import _sample_cluster
+    from task.layer_gen.util.fol_rule_bank import build_random_fol_rule_bank
+
+    rng = np.random.default_rng(42)
+    bank = build_random_fol_rule_bank(
+        n_layers=2,
+        predicates_per_layer=4,
+        rules_per_transition=8,
+        arity_max=2,
+        arity_min=1,
+        vars_per_rule_max=3,
+        constants=("a", "b", "c"),
+        k_in_min=1,
+        k_in_max=2,
+        k_out_min=1,
+        k_out_max=2,
+        rng=rng,
+    )
+    rules = list(bank.transition_rules(0))
+    assert len(rules) > 0
+    goal_atom = rules[0].rhs[0]
+    ants = rules[0].lhs
+
+    rng2 = np.random.default_rng(99)
+    schemas, ranks = _sample_cluster(
+        rule_bank=bank,
+        src_layer=0,
+        ants=ants,
+        max_unify_solutions=64,
+        rng=rng2,
+        n_demos=3,
+        include_oracle=False,
+        oracle_rule=None,
+        alpha=1.0,
+        goal_atom=goal_atom,
+        demo_ranked=True,
+        demo_unique=True,
+        cluster_n_samples=20,
+        cluster_k=3,
+        cluster_base_dist="zipf_per_rule",
+        cluster_unselected_rank=None,
+    )
+    assert len(schemas) > 0
+    assert len(schemas) == len(ranks)
+    # All returned rules should be from the bank
+    bank_rules = set(bank.transition_rules(0))
+    for s in schemas:
+        assert s in bank_rules
+
+
+def test_cluster_different_seeds_produce_different_results() -> None:
+    """Different RNG seeds produce different cluster outputs."""
+    from task.layer_fol.demos import _sample_cluster
+    from task.layer_gen.util.fol_rule_bank import build_random_fol_rule_bank
+
+    bank_rng = np.random.default_rng(42)
+    bank = build_random_fol_rule_bank(
+        n_layers=2,
+        predicates_per_layer=4,
+        rules_per_transition=8,
+        arity_max=2,
+        arity_min=1,
+        vars_per_rule_max=3,
+        constants=("a", "b", "c"),
+        k_in_min=1,
+        k_in_max=2,
+        k_out_min=1,
+        k_out_max=2,
+        rng=bank_rng,
+    )
+    rules = list(bank.transition_rules(0))
+    goal_atom = rules[0].rhs[0]
+    ants = rules[0].lhs
+
+    kwargs = dict(
+        rule_bank=bank,
+        src_layer=0,
+        ants=ants,
+        max_unify_solutions=64,
+        n_demos=3,
+        include_oracle=False,
+        oracle_rule=None,
+        alpha=1.0,
+        goal_atom=goal_atom,
+        demo_ranked=True,
+        demo_unique=True,
+        cluster_n_samples=20,
+        cluster_k=3,
+        cluster_base_dist="zipf_per_rule",
+        cluster_unselected_rank=None,
+    )
+
+    results = []
+    for seed in [1, 2, 3, 4, 5]:
+        schemas, ranks = _sample_cluster(rng=np.random.default_rng(seed), **kwargs)
+        results.append(tuple(str(s.statement_text) for s in schemas))
+    # At least 2 distinct results across 5 seeds
+    assert len(set(results)) >= 2, "Expected variation across different seeds"
+
+
+def test_cluster_end_to_end_via_augment_prompt() -> None:
+    """End-to-end: augment_prompt_with_demos with demo_distribution='cluster'."""
+    from task.layer_gen.util.fol_rule_bank import build_random_fol_rule_bank
+    from task.layer_fol.demos import augment_prompt_with_demos
+
+    bank_rng = np.random.default_rng(42)
+    bank = build_random_fol_rule_bank(
+        n_layers=2,
+        predicates_per_layer=4,
+        rules_per_transition=8,
+        arity_max=2,
+        arity_min=1,
+        vars_per_rule_max=3,
+        constants=("a", "b", "c"),
+        k_in_min=1,
+        k_in_max=2,
+        k_out_min=1,
+        k_out_max=2,
+        rng=bank_rng,
+    )
+    rules = list(bank.transition_rules(0))
+    goal_atom = rules[0].rhs[0]
+    ants = rules[0].lhs
+
+    tokenizer = tok.build_tokenizer_from_rule_bank(bank)
+    sequent = FOLSequent(ants=ants, cons=goal_atom)
+    prompt = tokenizer.tokenize_prompt(sequent)
+
+    rng = np.random.default_rng(99)
+    result = augment_prompt_with_demos(
+        prompt_tokens=prompt,
+        rule_bank=bank,
+        tokenizer=tokenizer,
+        rng=rng,
+        src_layer=0,
+        ants=ants,
+        max_n_demos=3,
+        min_n_demos=3,
+        max_unify_solutions=64,
+        demo_distribution="cluster",
+        demo_distribution_alpha=1.0,
+        goal_atom=goal_atom,
+        demo_ranked=True,
+        demo_unique=True,
+        cluster_n_samples=20,
+        cluster_k=3,
+        cluster_base_dist="zipf_per_rule",
+    )
+    assert len(result.demo_schemas) > 0
+    assert len(result.demo_schemas) == len(result.demo_ranks)
+    assert len(result.prompt_tokens) > len(prompt)

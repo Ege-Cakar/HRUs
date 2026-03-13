@@ -140,6 +140,10 @@ def _base_record(
         demo_ranked=bool(config.demo_ranked),
         demo_all=bool(config.demo_all),
         demo_unique=bool(config.demo_unique),
+        cluster_n_samples=int(config.cluster_n_samples),
+        cluster_k=int(config.cluster_k),
+        cluster_base_dist=str(config.cluster_base_dist),
+        cluster_unselected_rank=config.cluster_unselected_rank,
     )
     record = {
         "distance": int(distance),

@@ -71,6 +71,10 @@ class Depth3FreshICLSplitStrategy(FOLTaskSplitStrategy):
         demo_ranked: bool = True,
         demo_all: bool = False,
         demo_unique: bool = True,
+        cluster_n_samples: int = 100,
+        cluster_k: int = 5,
+        cluster_base_dist: str = "zipf_per_rule",
+        cluster_unselected_rank: int | None = None,
     ) -> "Depth3FreshICLSplitStrategy":
         if str(mode) != "online":
             raise ValueError("task_split='depth3_fresh_icl' requires mode='online'.")
@@ -148,6 +152,10 @@ class Depth3FreshICLSplitStrategy(FOLTaskSplitStrategy):
             demo_ranked=bool(demo_ranked),
             demo_all=bool(demo_all),
             demo_unique=bool(demo_unique),
+            cluster_n_samples=int(cluster_n_samples),
+            cluster_k=int(cluster_k),
+            cluster_base_dist=str(cluster_base_dist),
+            cluster_unselected_rank=cluster_unselected_rank,
         )
         return cls(
             rule_bank=base_bank,

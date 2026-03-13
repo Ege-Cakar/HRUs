@@ -7,6 +7,8 @@ from typing import Any, Callable
 
 import numpy as np
 
+import warnings
+
 from task.layer_gen.util import tokenize_layer_fol
 from task.layer_gen.util.fol_rule_bank import FOLAtom, FOLLayerRule, FOLRuleBank
 from .eval_inputs import extract_prompt_info_from_row_tokens
@@ -66,6 +68,10 @@ def augment_prompt_with_demos(
     demo_ranked: bool = True,
     demo_all: bool = False,
     demo_unique: bool = True,
+    cluster_n_samples: int = 100,
+    cluster_k: int = 5,
+    cluster_base_dist: str = "zipf_per_rule",
+    cluster_unselected_rank: int | None = None,
 ) -> FOLDemoAugmentationResult:
     max_n_demos = int(max_n_demos)
     min_n_demos = int(min_n_demos)
@@ -106,13 +112,13 @@ def augment_prompt_with_demos(
             demo_ranks=(),
         )
 
-    if demo_distribution not in {"uniform", "zipf", "zipf_headless", "zipf_per_rule", "zipf_per_rule_headless"}:
+    if demo_distribution not in {"uniform", "zipf", "zipf_headless", "zipf_per_rule", "zipf_per_rule_headless", "cluster"}:
         raise ValueError(
             f"demo_distribution must be 'uniform', 'zipf', 'zipf_headless', "
-            f"'zipf_per_rule', or 'zipf_per_rule_headless', "
+            f"'zipf_per_rule', 'zipf_per_rule_headless', or 'cluster', "
             f"got {demo_distribution!r}"
         )
-    if demo_distribution in {"zipf", "zipf_headless", "zipf_per_rule", "zipf_per_rule_headless"} and goal_atom is None:
+    if demo_distribution in {"zipf", "zipf_headless", "zipf_per_rule", "zipf_per_rule_headless", "cluster"} and goal_atom is None:
         raise ValueError(f"demo_distribution={demo_distribution!r} requires goal_atom.")
     if min_n_demos > max_n_demos:
         raise ValueError(
@@ -132,7 +138,26 @@ def augment_prompt_with_demos(
     if n_demos <= 0:
         return _empty
 
-    if demo_distribution == "uniform":
+    if demo_distribution == "cluster":
+        sampled_schemas, sampled_ranks = _sample_cluster(
+            rule_bank=rule_bank,
+            src_layer=int(src_layer),
+            ants=ants,
+            max_unify_solutions=int(max_unify_solutions),
+            rng=rng,
+            n_demos=n_demos,
+            include_oracle=include_oracle,
+            oracle_rule=oracle_rule,
+            alpha=demo_distribution_alpha,
+            goal_atom=goal_atom,
+            demo_ranked=demo_ranked,
+            demo_unique=demo_unique,
+            cluster_n_samples=int(cluster_n_samples),
+            cluster_k=int(cluster_k),
+            cluster_base_dist=str(cluster_base_dist),
+            cluster_unselected_rank=cluster_unselected_rank,
+        )
+    elif demo_distribution == "uniform":
         sampled_schemas, sampled_ranks = _sample_uniform(
             rule_bank=rule_bank,
             src_layer=int(src_layer),
@@ -221,6 +246,10 @@ def _augment_prompt_with_demos(
     demo_ranked: bool = True,
     demo_all: bool = False,
     demo_unique: bool = True,
+    cluster_n_samples: int = 100,
+    cluster_k: int = 5,
+    cluster_base_dist: str = "zipf_per_rule",
+    cluster_unselected_rank: int | None = None,
 ) -> list[int]:
     return augment_prompt_with_demos(
         prompt_tokens=prompt_tokens,
@@ -240,6 +269,10 @@ def _augment_prompt_with_demos(
         demo_ranked=demo_ranked,
         demo_all=demo_all,
         demo_unique=demo_unique,
+        cluster_n_samples=cluster_n_samples,
+        cluster_k=cluster_k,
+        cluster_base_dist=cluster_base_dist,
+        cluster_unselected_rank=cluster_unselected_rank,
     ).prompt_tokens
 
 
@@ -901,6 +934,174 @@ def _sample_zipf_per_rule(
     )
 
 
+def _spearman_footrule_distance_matrix(
+    ranking_vectors: np.ndarray,
+) -> np.ndarray:
+    """Pairwise Spearman's footrule: D(A,B) = sum|rank_A[i] - rank_B[i]|."""
+    return np.sum(
+        np.abs(ranking_vectors[:, None, :] - ranking_vectors[None, :, :]),
+        axis=2,
+    )
+
+
+def _k_medoids(
+    dist_matrix: np.ndarray,
+    k: int,
+    rng: np.random.Generator,
+    max_iter: int = 100,
+) -> np.ndarray:
+    """Return indices of k medoids via PAM (Partitioning Around Medoids)."""
+    n = dist_matrix.shape[0]
+    medoids = rng.choice(n, size=k, replace=False)
+    for _ in range(max_iter):
+        assignments = np.argmin(dist_matrix[medoids], axis=0)
+        changed = False
+        for ci in range(k):
+            members = np.where(assignments == ci)[0]
+            if len(members) == 0:
+                continue
+            costs = dist_matrix[np.ix_(members, members)].sum(axis=1)
+            best = members[np.argmin(costs)]
+            if best != medoids[ci]:
+                medoids[ci] = best
+                changed = True
+        if not changed:
+            break
+    return medoids
+
+
+def _build_ranking_vector(
+    *,
+    selected_rules: list[FOLLayerRule],
+    selected_ranks: list[int],
+    rule_to_idx: dict[FOLLayerRule, int],
+    n_rules: int,
+    unselected_rank: int,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    """Convert a sampled demo context to a ranking vector.
+
+    Selected rules are sorted by Zipf rank in descending order (rank 4 first,
+    rank 1 last) so that low Zipf rank corresponds to low assigned position
+    (close to the problem statement).  Ties are broken randomly.  Unselected
+    rules receive ``unselected_rank``.
+    """
+    vec = np.full(n_rules, unselected_rank, dtype=np.int64)
+    if not selected_rules:
+        return vec
+
+    # Pair each selected rule with its rank and a random tiebreaker
+    tiebreakers = rng.random(len(selected_rules))
+    paired = list(zip(selected_rules, selected_ranks, tiebreakers))
+    # Sort descending by rank (high rank = far from problem), ties broken randomly
+    paired.sort(key=lambda x: (-x[1], x[2]))
+
+    for position_0, (rule, _, _) in enumerate(paired):
+        idx = rule_to_idx.get(rule)
+        if idx is not None:
+            vec[idx] = position_0 + 1  # 1-indexed position
+    return vec
+
+
+def _sample_cluster(
+    *,
+    rule_bank: FOLRuleBank,
+    src_layer: int,
+    ants: tuple[FOLAtom, ...],
+    max_unify_solutions: int,
+    rng: np.random.Generator,
+    n_demos: int,
+    include_oracle: bool,
+    oracle_rule: FOLLayerRule | None,
+    alpha: float,
+    goal_atom: FOLAtom,
+    demo_ranked: bool,
+    demo_unique: bool,
+    cluster_n_samples: int,
+    cluster_k: int,
+    cluster_base_dist: str,
+    cluster_unselected_rank: int | None,
+) -> tuple[list[FOLLayerRule], list[int]]:
+    """Sample demos via k-medoids clustering on Spearman's footrule distance."""
+    rules = list(rule_bank.transition_rules(int(src_layer)))
+    if not rules:
+        return [], []
+
+    ranked = _classify_rules_by_rank(
+        rules=rules,
+        ants=ants,
+        goal_atom=goal_atom,
+        rule_bank=rule_bank,
+        max_unify_solutions=int(max_unify_solutions),
+    )
+
+    rule_to_idx = {rule: i for i, rule in enumerate(rules)}
+    n_rules = len(rules)
+    unselected_rank = (
+        int(cluster_unselected_rank)
+        if cluster_unselected_rank is not None
+        else n_demos + 1
+    )
+
+    effective_k = int(cluster_k)
+    if cluster_n_samples < effective_k:
+        warnings.warn(
+            f"cluster_n_samples ({cluster_n_samples}) < cluster_k ({effective_k}); "
+            f"clamping k to {cluster_n_samples}."
+        )
+        effective_k = int(cluster_n_samples)
+
+    # Sample cluster_n_samples + 1 contexts using the base distribution
+    total_samples = int(cluster_n_samples) + 1
+    all_schemas: list[list[FOLLayerRule]] = []
+    all_ranks: list[list[int]] = []
+    for _ in range(total_samples):
+        schemas_i, ranks_i = sample_ranked_demos(
+            ranked_rules=ranked,
+            rng=rng,
+            n_demos=n_demos,
+            demo_distribution=str(cluster_base_dist),
+            alpha=alpha,
+            include_oracle=include_oracle,
+            oracle_rule=oracle_rule,
+            demo_ranked=demo_ranked,
+            demo_unique=demo_unique,
+        )
+        all_schemas.append(schemas_i)
+        all_ranks.append(ranks_i)
+
+    # Convert each to a ranking vector
+    ranking_vectors = np.stack([
+        _build_ranking_vector(
+            selected_rules=all_schemas[i],
+            selected_ranks=all_ranks[i],
+            rule_to_idx=rule_to_idx,
+            n_rules=n_rules,
+            unselected_rank=unselected_rank,
+            rng=rng,
+        )
+        for i in range(total_samples)
+    ])
+
+    # Compute footrule distance matrix for the first cluster_n_samples contexts
+    candidate_vectors = ranking_vectors[:cluster_n_samples]
+    dist_matrix = _spearman_footrule_distance_matrix(candidate_vectors)
+
+    # Run k-medoids
+    medoids = _k_medoids(dist_matrix, effective_k, rng)
+
+    # Find closest medoid to the (n+1)th context
+    query_vector = ranking_vectors[cluster_n_samples]
+    medoid_vectors = candidate_vectors[medoids]
+    dists_to_medoids = np.sum(
+        np.abs(medoid_vectors - query_vector[None, :]),
+        axis=1,
+    )
+    closest_medoid_idx = medoids[int(np.argmin(dists_to_medoids))]
+
+    return all_schemas[closest_medoid_idx], all_ranks[closest_medoid_idx]
+
+
 def _instantiate_demo_schema_with_random_constants(
     *,
     rule: FOLLayerRule,
@@ -954,6 +1155,10 @@ class FOLDemoAugmentedAdapter:
         demo_ranked: bool = True,
         demo_all: bool = False,
         demo_unique: bool = True,
+        cluster_n_samples: int = 100,
+        cluster_k: int = 5,
+        cluster_base_dist: str = "zipf_per_rule",
+        cluster_unselected_rank: int | None = None,
     ) -> None:
         self.base_adapter = base_adapter
         self.rule_bank = rule_bank
@@ -967,6 +1172,13 @@ class FOLDemoAugmentedAdapter:
         self.demo_ranked = bool(demo_ranked)
         self.demo_all = bool(demo_all)
         self.demo_unique = bool(demo_unique)
+        self.cluster_n_samples = int(cluster_n_samples)
+        self.cluster_k = int(cluster_k)
+        self.cluster_base_dist = str(cluster_base_dist)
+        self.cluster_unselected_rank = (
+            None if cluster_unselected_rank is None
+            else int(cluster_unselected_rank)
+        )
         self._last_demo_rules: list[FOLLayerRule] = []
         self._oracle_rule: FOLLayerRule | None = None
 
@@ -1027,6 +1239,10 @@ class FOLDemoAugmentedAdapter:
                 demo_ranked=self.demo_ranked,
                 demo_all=self.demo_all,
                 demo_unique=self.demo_unique,
+                cluster_n_samples=self.cluster_n_samples,
+                cluster_k=self.cluster_k,
+                cluster_base_dist=self.cluster_base_dist,
+                cluster_unselected_rank=self.cluster_unselected_rank,
             )
             prompt = augmented.prompt_tokens
             self._last_demo_rules = list(augmented.demo_schemas)

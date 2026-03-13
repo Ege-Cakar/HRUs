@@ -63,6 +63,10 @@ class NoSplitStrategy(FOLTaskSplitStrategy):
         demo_ranked: bool = True,
         demo_all: bool = False,
         demo_unique: bool = True,
+        cluster_n_samples: int = 100,
+        cluster_k: int = 5,
+        cluster_base_dist: str = "zipf_per_rule",
+        cluster_unselected_rank: int | None = None,
     ) -> "NoSplitStrategy":
         if rule_bank_path is not None:
             rule_bank = load_fol_rule_bank(Path(rule_bank_path))
@@ -98,6 +102,10 @@ class NoSplitStrategy(FOLTaskSplitStrategy):
             demo_ranked=bool(demo_ranked),
             demo_all=bool(demo_all),
             demo_unique=bool(demo_unique),
+            cluster_n_samples=int(cluster_n_samples),
+            cluster_k=int(cluster_k),
+            cluster_base_dist=str(cluster_base_dist),
+            cluster_unselected_rank=cluster_unselected_rank,
         )
         return cls(
             rule_bank=rule_bank,

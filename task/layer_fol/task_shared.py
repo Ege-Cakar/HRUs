@@ -29,6 +29,10 @@ class OnlineSampleConfig:
     demo_ranked: bool
     demo_all: bool
     demo_unique: bool
+    cluster_n_samples: int
+    cluster_k: int
+    cluster_base_dist: str
+    cluster_unselected_rank: int | None
 
     def to_dict(self) -> dict:
         d = dataclasses.asdict(self)
@@ -40,6 +44,10 @@ class OnlineSampleConfig:
         p = dict(payload)
         p["distances"] = tuple(int(v) for v in p["distances"])
         p.setdefault("demo_unique", False)
+        p.setdefault("cluster_n_samples", 100)
+        p.setdefault("cluster_k", 5)
+        p.setdefault("cluster_base_dist", "zipf_per_rule")
+        p.setdefault("cluster_unselected_rank", None)
         if "fresh_layer0_predicates" in p:
             return FreshOnlineSampleConfig(**p)
         return cls(**p)

@@ -45,6 +45,8 @@ from .task_split_depth3_fresh import Depth3FreshICLSplitStrategy
 from .task_split_depth3_transfer import Depth3ICLTransferSplitStrategy
 from .task_split_none import NoSplitStrategy
 
+_SENTINEL = object()
+
 
 class FOLLayerTask:
     STATS_KEYS = ("max_token", "max_seq", "max_prompt_seq", "max_completion_seq")
@@ -97,6 +99,10 @@ class FOLLayerTask:
         demo_ranked=True,
         demo_all=False,
         demo_unique=True,
+        cluster_n_samples=100,
+        cluster_k=5,
+        cluster_base_dist="zipf_per_rule",
+        cluster_unselected_rank=None,
     ) -> None:
         self.mode = str(mode)
         if self.mode not in {"offline", "online"}:
@@ -208,10 +214,10 @@ class FOLLayerTask:
                 f"max_unify_solutions must be >= 1, got {self.max_unify_solutions}"
             )
         self.demo_distribution = str(demo_distribution)
-        if self.demo_distribution not in {"uniform", "zipf", "zipf_headless", "zipf_per_rule", "zipf_per_rule_headless"}:
+        if self.demo_distribution not in {"uniform", "zipf", "zipf_headless", "zipf_per_rule", "zipf_per_rule_headless", "cluster"}:
             raise ValueError(
                 "demo_distribution must be 'uniform', 'zipf', 'zipf_headless', "
-                "'zipf_per_rule', or 'zipf_per_rule_headless', "
+                "'zipf_per_rule', 'zipf_per_rule_headless', or 'cluster', "
                 f"got {self.demo_distribution!r}"
             )
         self.demo_distribution_alpha = float(demo_distribution_alpha)
@@ -222,6 +228,13 @@ class FOLLayerTask:
         self.demo_ranked = bool(demo_ranked)
         self.demo_all = bool(demo_all)
         self.demo_unique = bool(demo_unique)
+        self.cluster_n_samples = int(cluster_n_samples)
+        self.cluster_k = int(cluster_k)
+        self.cluster_base_dist = str(cluster_base_dist)
+        self.cluster_unselected_rank = (
+            None if cluster_unselected_rank is None
+            else int(cluster_unselected_rank)
+        )
         self._online_prefetch_requested = bool(online_prefetch)
         self._online_prefetch_backend_requested = str(online_prefetch_backend)
         self._online_prefetch_workers_requested = (
@@ -341,6 +354,10 @@ class FOLLayerTask:
                 demo_ranked=bool(self.demo_ranked),
                 demo_all=bool(self.demo_all),
                 demo_unique=bool(self.demo_unique),
+                cluster_n_samples=int(self.cluster_n_samples),
+                cluster_k=int(self.cluster_k),
+                cluster_base_dist=str(self.cluster_base_dist),
+                cluster_unselected_rank=self.cluster_unselected_rank,
             )
         if self.task_split == "depth3_icl_transfer":
             return Depth3ICLTransferSplitStrategy.build(
@@ -362,6 +379,10 @@ class FOLLayerTask:
                 demo_ranked=bool(self.demo_ranked),
                 demo_all=bool(self.demo_all),
                 demo_unique=bool(self.demo_unique),
+                cluster_n_samples=int(self.cluster_n_samples),
+                cluster_k=int(self.cluster_k),
+                cluster_base_dist=str(self.cluster_base_dist),
+                cluster_unselected_rank=self.cluster_unselected_rank,
             )
         return Depth3FreshICLSplitStrategy.build(
             mode=self.mode,
@@ -395,6 +416,10 @@ class FOLLayerTask:
             demo_ranked=bool(self.demo_ranked),
             demo_all=bool(self.demo_all),
             demo_unique=bool(self.demo_unique),
+            cluster_n_samples=int(self.cluster_n_samples),
+            cluster_k=int(self.cluster_k),
+            cluster_base_dist=str(self.cluster_base_dist),
+            cluster_unselected_rank=self.cluster_unselected_rank,
         )
 
     def _adopt_strategy_state(self, strategy: FOLTaskSplitStrategy) -> None:
@@ -653,6 +678,10 @@ class FOLLayerTask:
         demo_ranked: bool | None = None,
         demo_all: bool | None = None,
         demo_unique: bool | None = None,
+        cluster_n_samples: int | None = None,
+        cluster_k: int | None = None,
+        cluster_base_dist: str | None = None,
+        cluster_unselected_rank: int | None = _SENTINEL,
     ):
         """Create a demo-augmented adapter from this task's config.
 
@@ -673,6 +702,13 @@ class FOLLayerTask:
             demo_ranked=bool(demo_ranked if demo_ranked is not None else self.demo_ranked),
             demo_all=bool(demo_all if demo_all is not None else self.demo_all),
             demo_unique=bool(demo_unique if demo_unique is not None else self.demo_unique),
+            cluster_n_samples=int(cluster_n_samples if cluster_n_samples is not None else self.cluster_n_samples),
+            cluster_k=int(cluster_k if cluster_k is not None else self.cluster_k),
+            cluster_base_dist=str(cluster_base_dist if cluster_base_dist is not None else self.cluster_base_dist),
+            cluster_unselected_rank=(
+                self.cluster_unselected_rank if cluster_unselected_rank is _SENTINEL
+                else cluster_unselected_rank
+            ),
         )
 
     def sample_rollout_example(
