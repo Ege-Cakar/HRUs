@@ -18,6 +18,7 @@ sys.path.append(str(ROOT))
 from common import collate_dfs, set_theme
 from model.compute import (
     compute_metrics_from_info,
+    inference_activation_bytes,
     memory_bytes_estimate,
     training_flops_total,
 )
@@ -474,6 +475,9 @@ def _plot_role_metric_group(
         return
 
     eval_alpha_order = sorted(long_df["eval_alpha_label"].unique(), key=lambda s: float(s))
+    palette = dict(
+        zip(eval_alpha_order, sns.color_palette("flare", n_colors=len(eval_alpha_order)))
+    )
 
     g = sns.relplot(
         data=long_df,
@@ -492,6 +496,7 @@ def _plot_role_metric_group(
         height=3.5,
         aspect=1.3,
         hue_order=eval_alpha_order,
+        palette=palette,
     )
     for ax in np.ravel(g.axes):
         ax.set_xlim(left=0.0)
@@ -615,15 +620,34 @@ def _plot_accuracy_vs_compute_metric(
             {True: "ranked", False: "unranked", None: "n/a"}
         ).fillna("n/a")
     )
+    # Sort facets by numeric train_alpha
+    facet_order = (
+        plot_df[["train_alpha", "facet_label"]]
+        .drop_duplicates()
+        .sort_values("train_alpha")["facet_label"]
+        .tolist()
+    )
+
+    plot_df["eval_alpha_label"] = plot_df["eval_alpha"].astype(str)
+    eval_alpha_order = sorted(
+        plot_df["eval_alpha_label"].unique(), key=lambda s: float(s)
+    )
+    palette = dict(
+        zip(eval_alpha_order, sns.color_palette("flare", n_colors=len(eval_alpha_order)))
+    )
+
     g = sns.relplot(
         data=plot_df,
         kind="scatter",
         x=x_col,
         y="rollout_success_rate",
-        hue="model_family",
+        hue="eval_alpha_label",
+        hue_order=eval_alpha_order,
+        palette=palette,
         style="model_family",
         col="facet_label",
-        col_wrap=min(3, plot_df["facet_label"].nunique()),
+        col_order=facet_order,
+        col_wrap=min(3, len(facet_order)),
         height=3.5,
         aspect=1.3,
     )
@@ -632,6 +656,9 @@ def _plot_accuracy_vs_compute_metric(
     g.set_axis_labels(x_label, "Rollout success rate")
     g.set_titles("{col_name}")
     g.fig.suptitle(title, y=1.02)
+    legend = g._legend
+    if legend is not None:
+        legend.set_title("eval_alpha / family")
     g.savefig(out_path, bbox_inches="tight")
     plt.close(g.fig)
 
@@ -775,8 +802,8 @@ def _save_aggregates_for_mid_pred_and_train_iters(
                 _plot_accuracy_vs_compute_metric(
                     eval_df=compute_sub,
                     x_col="activation_memory_at_eval_seq",
-                    x_label="Activation memory bytes at eval seq len (log)",
-                    title=f"Accuracy vs Activation Memory (mid{int(mid_pred)}, ti={int(train_iters)}, eval_{tag})",
+                    x_label="Inference activation memory (bytes, log)",
+                    title=f"Accuracy vs Inference Activation Memory (mid{int(mid_pred)}, ti={int(train_iters)}, eval_{tag})",
                     out_path=out_dir / f"eval_{tag}_accuracy_vs_activation_memory.png",
                 )
 
@@ -858,8 +885,8 @@ def _save_aggregates_for_mid_pred_and_train_iters(
                 _plot_accuracy_vs_compute_metric(
                     eval_df=compute_sub,
                     x_col="activation_memory_at_eval_seq",
-                    x_label="Activation memory bytes at eval seq len (log)",
-                    title=f"Needle: Accuracy vs Activation Memory (mid{int(mid_pred)}, ti={int(train_iters)}, needle_{tag})",
+                    x_label="Inference activation memory (bytes, log)",
+                    title=f"Needle: Accuracy vs Inference Activation Memory (mid{int(mid_pred)}, ti={int(train_iters)}, needle_{tag})",
                     out_path=out_dir / f"needle_{tag}_accuracy_vs_activation_memory.png",
                 )
 
@@ -914,16 +941,19 @@ def _compute_eval_activation_memory(row):
     if pd.isna(seq_len):
         return np.nan
     try:
-        metrics = compute_metrics_from_info(info, n_seq_override=int(seq_len))
-        return memory_bytes_estimate(
-            metrics["n_params"],
-            batch_size=1,
+        model_family = info.get("model_family", "transformer")
+        kwargs = dict(
             n_seq=int(seq_len),
             n_hidden=int(info.get("n_hidden", 128)),
             n_layers=int(info.get("n_layers", 2)),
             n_heads=int(info.get("n_heads", 4)),
-            model_family=info.get("model_family", "transformer"),
-        )["activations_bytes"]
+            model_family=model_family,
+        )
+        if model_family == "mamba2_bonsai":
+            kwargs["d_state"] = int(info.get("d_state", 16))
+            kwargs["d_conv"] = int(info.get("d_conv", 4))
+            kwargs["expand"] = int(info.get("expand", 2))
+        return inference_activation_bytes(**kwargs)
     except (KeyError, ValueError, TypeError):
         return np.nan
 
@@ -1186,16 +1216,42 @@ def _plot_compute_efficiency(*, role_eval_demo_df, out_dir):
     if plot_df.empty:
         return
 
+    plot_df["eval_alpha_label"] = plot_df["eval_alpha"].astype(str)
+    eval_alpha_order = sorted(
+        plot_df["eval_alpha_label"].unique(), key=lambda s: float(s)
+    )
+    palette = dict(
+        zip(eval_alpha_order, sns.color_palette("flare", n_colors=len(eval_alpha_order)))
+    )
+
     fig, ax = plt.subplots(figsize=(6, 4))
-    for family, grp in plot_df.groupby("model_family"):
-        ax.scatter(
-            grp["n_params"], grp["rollout_success_rate"],
-            label=family, alpha=0.5, s=20,
-        )
+    for alpha_label in eval_alpha_order:
+        grp = plot_df.loc[plot_df["eval_alpha_label"] == alpha_label]
+        for family, fgrp in grp.groupby("model_family"):
+            marker = "o" if family == "mamba2_bonsai" else "x"
+            ax.scatter(
+                fgrp["n_params"], fgrp["rollout_success_rate"],
+                color=palette[alpha_label], marker=marker, alpha=0.5, s=20,
+            )
+    # Custom legend entries
+    from matplotlib.lines import Line2D
+    alpha_handles = [
+        Line2D([0], [0], marker="o", color=palette[a], linestyle="", markersize=5, label=a)
+        for a in eval_alpha_order
+    ]
+    family_handles = [
+        Line2D([0], [0], marker="o", color="gray", linestyle="", markersize=5, label="mamba2_bonsai"),
+        Line2D([0], [0], marker="x", color="gray", linestyle="", markersize=5, label="transformer"),
+    ]
+    ax.legend(
+        handles=alpha_handles + family_handles,
+        title="eval_alpha / family",
+        fontsize="small",
+        title_fontsize="small",
+    )
     ax.set_xlabel("Parameter count")
     ax.set_ylabel("Rollout success rate")
     ax.set_title("Compute Efficiency: Accuracy vs Parameters")
-    ax.legend()
     fig.tight_layout()
     fig.savefig(out_dir / "compute_efficiency_params.png", bbox_inches="tight")
     plt.close(fig)

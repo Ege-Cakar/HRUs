@@ -315,6 +315,37 @@ def memory_bytes_estimate(
     }
 
 
+def inference_activation_bytes(
+    *,
+    n_seq,
+    n_hidden,
+    n_layers,
+    n_heads,
+    model_family="transformer",
+    d_state=None,
+    d_conv=None,
+    expand=2,
+    compute_dtype_bytes=2,
+):
+    """Peak activation memory (bytes) for prefill + single next-token prediction.
+
+    Transformer: O(S²) — attention matrix materialization during prefill.
+    Mamba2: O(1) w.r.t. S — SSM recurrent state + conv state (independent of S).
+    """
+    if model_family == "transformer":
+        residual_per_layer = n_seq * n_hidden * compute_dtype_bytes
+        attn_per_layer = n_heads * n_seq * n_seq * compute_dtype_bytes
+        return n_layers * (residual_per_layer + attn_per_layer)
+    elif model_family == "mamba2_bonsai":
+        head_dim = (expand * n_hidden) // n_heads
+        ssm_per_layer = n_heads * head_dim * d_state * compute_dtype_bytes
+        conv_dim = expand * n_hidden + 2 * d_state
+        conv_per_layer = conv_dim * (d_conv - 1) * compute_dtype_bytes
+        return n_layers * (ssm_per_layer + conv_per_layer)
+    else:
+        raise ValueError(f"Unknown model_family: {model_family!r}")
+
+
 # --- Unified dispatcher ---
 
 
