@@ -145,14 +145,10 @@ def train_step(optimizer: nnx.Optimizer, batch, loss_func):
     return loss_val
 
 
-def _accumulate_grads(accum_grads, grads):
+def _accumulate_grads(accum_grads, grads, scale: float = 1.0):
     if accum_grads is None:
-        return grads
-    return jax.tree.map(lambda a, b: a + b, accum_grads, grads)
-
-
-def _scale_grads(grads, scale: float):
-    return jax.tree.map(lambda x: x * scale, grads)
+        return jax.tree.map(lambda g: g * scale, grads)
+    return jax.tree.map(lambda a, b: a + b * scale, accum_grads, grads)
 
 
 def _accumulate_loss(total_loss, loss_val):
@@ -262,16 +258,17 @@ def _resolve_grad_accum_steps(grad_accum_steps):
 def _train_with_accumulation(optimizer, train_iter, loss_func, grad_accum_steps):
     accum_grads = None
     total_loss = None
+    scale = 1.0 / float(grad_accum_steps)
 
     for _ in range(grad_accum_steps):
         batch = next(train_iter)
         x, labels = batch
         loss_val, grads = _get_grad_step(loss_func)(optimizer, x, labels)
-        accum_grads = _accumulate_grads(accum_grads, grads)
+        accum_grads = _accumulate_grads(accum_grads, grads, scale)
+        del grads
         total_loss = _accumulate_loss(total_loss, loss_val)
 
-    mean_grads = _scale_grads(accum_grads, 1.0 / float(grad_accum_steps))
-    _apply_grads_jit(optimizer, mean_grads)
+    _apply_grads_jit(optimizer, accum_grads)
     return total_loss / jnp.asarray(float(grad_accum_steps), dtype=total_loss.dtype)
 
 
