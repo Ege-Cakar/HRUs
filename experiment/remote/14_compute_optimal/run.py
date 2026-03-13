@@ -69,8 +69,8 @@ BATCH_SIZE = 32
 GRAD_ACCUM_STEPS = 1
 EFFECTIVE_BATCH_SIZE = int(BATCH_SIZE) * int(GRAD_ACCUM_STEPS)
 
-TRAIN_ITERS_SWEEP = [400, 1600, 6400, 25600, 102400]
-LR_SWEEP = [3e-4, 1e-4]
+TRAIN_ITERS_SWEEP = [6400, 25600]
+LR_SWEEP = [5e-5, 1e-4, 5e-4]
 
 TEST_ITERS = 2
 ROLLOUT_EXAMPLES_PER_ROLE = 50
@@ -96,7 +96,7 @@ INITIAL_ANT_MAX = 1
 CONSTANTS = [f"p{i}" for i in range(1)]
 SAMPLE_MAX_ATTEMPTS = 4096
 MAX_UNIFY_SOLUTIONS = 128
-BASE_BANK_SEED = 2047
+BASE_BANK_SEED = 3053
 PREDICATE_NAME_LEN = 4
 TRAIN_INCLUDE_ORACLE = False
 
@@ -107,25 +107,25 @@ EVAL_FIXED_LENGTH_MODE = "next_pow2"
 # (n_layers, n_hidden, n_heads)
 TRANSFORMER_CONFIGS = [
     (2, 128, 4),
-    (2, 256, 8),
+    # (2, 256, 8),
     (4, 256, 8),
-    (4, 512, 8),
+    # (4, 512, 8),
     (4, 1024, 16),
-    (8, 1024, 16),
+    # (8, 1024, 16),
     (8, 1536, 16),
-    (8, 2048, 32),
+    # (8, 2048, 32),
     (12, 2048, 32),
 ]
 
 MAMBA2_BONSAI_CONFIGS = [
     (2, 128, 4),
-    (2, 256, 8),
+    # (2, 256, 8),
     (4, 384, 12),
-    (4, 768, 12),
+    # (4, 768, 12),
     (4, 1536, 12),
-    (8, 1536, 12),
+    # (8, 1536, 12),
     (8, 2048, 16),
-    (12, 2048, 16),
+    # (12, 2048, 16),
     (12, 3072, 24),
 ]
 
