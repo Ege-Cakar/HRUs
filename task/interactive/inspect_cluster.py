@@ -14,7 +14,7 @@ import sys
 
 import numpy as np
 
-ROOT = Path(__file__).resolve().parents[3]
+ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
@@ -61,7 +61,7 @@ CLUSTER_CFG = {
 }
 PROBLEM_CFG = {
     "distance": 1,
-    "initial_ant_max": 2,
+    "initial_ant_max": 1,
     "max_unify_solutions": 128,
 }
 TASK_PREVIEW_CFG = {"n_examples": 5, "batch_size": 4}
