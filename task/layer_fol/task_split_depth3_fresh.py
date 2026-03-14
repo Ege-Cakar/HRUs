@@ -12,8 +12,10 @@ from task.layer_gen.util.fol_rule_bank import (
     FOLRuleBank,
     _normalize_count_spec,
     build_random_fol_rule_bank,
+    sample_fol_problem,
 )
 from .common import _build_tokenizer_for_fresh_icl
+from .demos import _classify_rules_by_rank, _precompute_cluster_candidate_rankings
 from .task_sampling import (
     _init_fol_online_worker,
     _sample_fol_online_worker_records,
@@ -35,6 +37,7 @@ class Depth3FreshICLSplitStrategy(FOLTaskSplitStrategy):
     online_forced_step_idx: int | None
     split_bundle: FOLDepth3ICLSplitBundle | None = None
     task_split: str = "depth3_fresh_icl"
+    _precomputed_cluster_candidates_by_layer: dict | None = None
 
     @classmethod
     def build(
@@ -157,13 +160,62 @@ class Depth3FreshICLSplitStrategy(FOLTaskSplitStrategy):
             cluster_base_dist=str(cluster_base_dist),
             cluster_unselected_rank=cluster_unselected_rank,
         )
-        return cls(
+        strategy = cls(
             rule_bank=base_bank,
             tokenizer=tokenizer,
             sample_config=sample_config,
             base_bank=base_bank,
             online_forced_step_idx=online_forced_step_idx,
         )
+        if str(demo_distribution) == "cluster" and int(cluster_n_samples) > 0:
+            strategy._init_cluster_precomputation(
+                seed=int(seed),
+                cluster_n_samples=int(cluster_n_samples),
+                max_unify_solutions=int(max_unify_solutions),
+                initial_ant_max=int(initial_ant_max),
+            )
+        return strategy
+
+    def _init_cluster_precomputation(
+        self,
+        *,
+        seed: int,
+        cluster_n_samples: int,
+        max_unify_solutions: int,
+        initial_ant_max: int,
+    ) -> None:
+        """Precompute cluster candidate rankings for base-bank layers.
+
+        For fresh-ICL, layers >= 1 use the base bank's transition rules
+        (shared across all temp banks).  We precompute candidate rankings
+        for these layers once and reuse them for every training sample,
+        avoiding the expensive per-sample ``_precompute_cluster_candidate_rankings``
+        call for ~50% of samples (those at src_layer >= 1).
+        """
+        if self.base_bank is None:
+            return
+        precomp_rng = np.random.default_rng(int(seed) + 7_919)
+        by_layer: dict[int, list] = {}
+        distance = int(self.sample_config.distances[0])
+        for src_layer in range(1, self.base_bank.n_layers - 1):
+            rules = list(self.base_bank.transition_rules(src_layer))
+            if not rules:
+                continue
+            # Sample a dummy problem to get a valid fallback ranked dict.
+            dummy_ranked = {1: [], 2: [], 3: [], 4: list(rules)}
+            candidates = _precompute_cluster_candidate_rankings(
+                rule_bank=self.base_bank,
+                src_layer=src_layer,
+                rules=rules,
+                actual_ranked=dummy_ranked,
+                rng=precomp_rng,
+                cluster_n_samples=cluster_n_samples,
+                max_unify_solutions=max_unify_solutions,
+                distance=distance,
+                initial_ant_max=initial_ant_max,
+            )
+            by_layer[src_layer] = candidates
+        self._precomputed_cluster_candidates_by_layer = by_layer or None
 
     def sample_record(self, *, rng: np.random.Generator) -> dict:
         if self.base_bank is None:
@@ -173,6 +225,7 @@ class Depth3FreshICLSplitStrategy(FOLTaskSplitStrategy):
             tokenizer=self.tokenizer,
             rng=rng,
             config=self.sample_config,
+            precomputed_cluster_candidates_by_layer=self._precomputed_cluster_candidates_by_layer,
         )
 
     def make_worker_spec(self) -> OnlineWorkerSpec:

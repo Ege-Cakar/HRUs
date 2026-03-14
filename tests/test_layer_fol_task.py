@@ -2638,7 +2638,7 @@ def test_cluster_helpers_k_medoids_basic() -> None:
 
 def test_cluster_build_ranking_vector() -> None:
     """Ranking vector assigns low positions to low Zipf ranks."""
-    from task.layer_fol.demos import _build_ranking_vector
+    from task.layer_fol.demos import _batch_build_ranking_vectors
 
     # 4 rules, 3 selected demos
     r1 = FOLLayerRule(src_layer=0, dst_layer=1, lhs=(FOLAtom("A", ()),), rhs=(FOLAtom("M", ()),))
@@ -2650,14 +2650,15 @@ def test_cluster_build_ranking_vector() -> None:
     rng = np.random.default_rng(42)
 
     # Selected: r1 (rank 1), r3 (rank 3), r4 (rank 4)
-    vec = _build_ranking_vector(
-        selected_rules=[r1, r3, r4],
-        selected_ranks=[1, 3, 4],
+    vecs = _batch_build_ranking_vectors(
+        all_schemas=[[r1, r3, r4]],
+        all_ranks=[[1, 3, 4]],
         rule_to_idx=rule_to_idx,
         n_rules=4,
         unselected_rank=4,
         rng=rng,
     )
+    vec = vecs[0]
     assert vec.shape == (4,)
     # r4 (rank 4) → position 1 (highest rank = sorted first = farthest from problem)
     # r3 (rank 3) → position 2
@@ -2711,6 +2712,8 @@ def test_cluster_sample_produces_valid_output() -> None:
         cluster_k=3,
         cluster_base_dist="zipf_per_rule",
         cluster_unselected_rank=None,
+        distance=1,
+        initial_ant_max=2,
     )
     assert len(schemas) > 0
     assert len(schemas) == len(ranks)
@@ -2760,6 +2763,8 @@ def test_cluster_different_seeds_produce_different_results() -> None:
         cluster_k=3,
         cluster_base_dist="zipf_per_rule",
         cluster_unselected_rank=None,
+        distance=1,
+        initial_ant_max=2,
     )
 
     results = []
@@ -2817,6 +2822,8 @@ def test_cluster_end_to_end_via_augment_prompt() -> None:
         cluster_n_samples=20,
         cluster_k=3,
         cluster_base_dist="zipf_per_rule",
+        cluster_distance=1,
+        cluster_initial_ant_max=2,
     )
     assert len(result.demo_schemas) > 0
     assert len(result.demo_schemas) == len(result.demo_ranks)

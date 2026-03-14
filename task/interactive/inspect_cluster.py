@@ -20,10 +20,11 @@ if str(ROOT) not in sys.path:
 
 from task.layer_fol.demos import (
     _classify_rules_by_rank,
-    _build_ranking_vector,
+    _batch_build_ranking_vectors,
     _spearman_footrule_distance_matrix,
     _k_medoids,
     _sample_cluster,
+    _sample_fresh_query_at_layer,
     augment_prompt_with_demos,
     sample_ranked_demos,
 )
@@ -37,8 +38,8 @@ from task.layer_gen.util.fol_rule_bank import (
 BANK_CFG = {
     "seed": 42,
     "n_layers": 3,
-    "predicates_per_layer": (2, 4, 2),
-    "rules_per_transition": (6, 4),
+    "predicates_per_layer": (3, 9, 3),
+    "rules_per_transition": (9, 9),
     "arity_max": 0,
     "arity_min": 0,
     "vars_per_rule_max": 1,
@@ -51,8 +52,8 @@ BANK_CFG = {
 CLUSTER_CFG = {
     "n_demos": 4,
     "cluster_n_samples": 8,
-    "cluster_k": 3,
-    "alpha": 1.0,
+    "cluster_k": 1,
+    "alpha": 10,
     "cluster_base_dist": "zipf_per_rule",
     "cluster_unselected_rank": None,  # defaults to n_demos + 1 = 5
     "include_oracle": True,
@@ -227,82 +228,132 @@ print("\n" + "=" * 60)
 print("CLUSTERING STEP-BY-STEP")
 print("=" * 60)
 
-# 3a: Sample N+1 demo contexts
+# 3a: Sample N fresh queries and classify each; actual query is the +1
 total_samples = cluster_n_samples + 1
 all_schemas: list[list] = []
 all_ranks: list[list] = []
-for i in range(total_samples):
+fresh_query_info: list[str] = []
+for i in range(cluster_n_samples):
+    fresh_query = _sample_fresh_query_at_layer(
+        rule_bank=bank,
+        src_layer=src_layer,
+        distance=PROBLEM_CFG["distance"],
+        initial_ant_max=PROBLEM_CFG["initial_ant_max"],
+        rng=walkthrough_rng,
+        max_unify_solutions=PROBLEM_CFG["max_unify_solutions"],
+    )
+    if fresh_query is not None:
+        fresh_ants, fresh_goal = fresh_query
+        fresh_ranked = _classify_rules_by_rank(
+            rules=rules,
+            ants=fresh_ants,
+            goal_atom=fresh_goal,
+            rule_bank=bank,
+            max_unify_solutions=PROBLEM_CFG["max_unify_solutions"],
+        )
+        fresh_query_info.append(
+            f"ants={[str(a) for a in fresh_ants]}, goal={fresh_goal}"
+        )
+    else:
+        fresh_ranked = ranked
+        fresh_query_info.append("(fallback to actual query)")
+
     schemas_i, ranks_i = sample_ranked_demos(
-        ranked_rules=ranked,
+        ranked_rules=fresh_ranked,
         rng=walkthrough_rng,
         n_demos=n_demos,
         demo_distribution=cluster_base_dist,
         alpha=alpha,
-        include_oracle=include_oracle,
-        oracle_rule=oracle_rule,
+        include_oracle=False,
+        oracle_rule=None,
         demo_ranked=demo_ranked,
         demo_unique=demo_unique,
     )
     all_schemas.append(schemas_i)
     all_ranks.append(ranks_i)
 
-print(f"\n3a: Sampled {total_samples} demo contexts (N={cluster_n_samples} candidates + 1 query)")
-for i in range(total_samples):
-    label = "QUERY" if i == cluster_n_samples else f"cand[{i}]"
+# Actual query (the +1)
+actual_schemas, actual_ranks = sample_ranked_demos(
+    ranked_rules=ranked,
+    rng=walkthrough_rng,
+    n_demos=n_demos,
+    demo_distribution=cluster_base_dist,
+    alpha=alpha,
+    include_oracle=False,
+    oracle_rule=None,
+    demo_ranked=demo_ranked,
+    demo_unique=demo_unique,
+)
+all_schemas.append(actual_schemas)
+all_ranks.append(actual_ranks)
+
+n_candidates = len(all_schemas) - 1
+print(f"\n3a: Sampled {n_candidates} candidate contexts + 1 query")
+for i in range(n_candidates):
     rule_strs = [r.statement_text for r in all_schemas[i]]
-    print(f"  {label}: rules={rule_strs}  ranks={all_ranks[i]}")
+    print(f"  cand[{i}]: query={fresh_query_info[i]}")
+    print(f"           rules={rule_strs}  ranks={all_ranks[i]}")
+query_idx = n_candidates
+rule_strs = [r.statement_text for r in all_schemas[query_idx]]
+print(f"  QUERY: rules={rule_strs}  ranks={all_ranks[query_idx]}")
 
 # 3b: Build ranking vectors
-ranking_vectors = np.stack([
-    _build_ranking_vector(
-        selected_rules=all_schemas[i],
-        selected_ranks=all_ranks[i],
-        rule_to_idx=rule_to_idx,
-        n_rules=n_rules,
-        unselected_rank=unselected_rank,
-        rng=walkthrough_rng,
-    )
-    for i in range(total_samples)
-])
+n_total = n_candidates + 1
+ranking_vectors = _batch_build_ranking_vectors(
+    all_schemas=all_schemas,
+    all_ranks=all_ranks,
+    rule_to_idx=rule_to_idx,
+    n_rules=n_rules,
+    unselected_rank=unselected_rank,
+    rng=walkthrough_rng,
+)
 
 rule_labels = [f"r{idx}" for idx in range(n_rules)]
-row_labels = [f"cand[{i}]" for i in range(cluster_n_samples)] + ["QUERY"]
+row_labels = [f"cand[{i}]" for i in range(n_candidates)] + ["QUERY"]
 print(f"\n3b: Ranking vectors (unselected_rank={unselected_rank})")
 print(format_ranking_matrix(ranking_vectors, rule_labels, row_labels))
 
 # 3c: Compute footrule distance matrix
-candidate_vectors = ranking_vectors[:cluster_n_samples]
+candidate_vectors = ranking_vectors[:n_candidates]
 dist_matrix = _spearman_footrule_distance_matrix(candidate_vectors)
 
-cand_labels = [f"c{i}" for i in range(cluster_n_samples)]
-print(f"\n3c: Spearman's footrule distance matrix ({cluster_n_samples}x{cluster_n_samples})")
+cand_labels = [f"c{i}" for i in range(n_candidates)]
+print(f"\n3c: Spearman's footrule distance matrix ({n_candidates}x{n_candidates})")
 print(format_dist_matrix(dist_matrix, cand_labels))
 print(f"  symmetric: {np.allclose(dist_matrix, dist_matrix.T)}")
 print(f"  diagonal zeros: {np.all(np.diag(dist_matrix) == 0)}")
 
 # 3d: Run k-medoids
-medoids = _k_medoids(dist_matrix, cluster_k, walkthrough_rng)
+effective_k = min(cluster_k, n_candidates)
+medoids = _k_medoids(dist_matrix, effective_k, walkthrough_rng)
 assignments = np.argmin(dist_matrix[medoids], axis=0)
 
-print(f"\n3d: k-medoids (k={cluster_k})")
+print(f"\n3d: k-medoids (k={effective_k})")
 print(f"  medoid indices: {medoids.tolist()}")
-for ci in range(cluster_k):
+for ci in range(effective_k):
     members = np.where(assignments == ci)[0]
     print(f"  cluster {ci} (medoid=cand[{medoids[ci]}]): members={members.tolist()}")
 
 # 3e: Find closest medoid for query
-query_vector = ranking_vectors[cluster_n_samples]
+query_vector = ranking_vectors[n_candidates]
 medoid_vectors = candidate_vectors[medoids]
 dists_to_medoids = np.sum(np.abs(medoid_vectors - query_vector[None, :]), axis=1)
 closest_idx = int(np.argmin(dists_to_medoids))
 closest_medoid_cand = medoids[closest_idx]
 
 print(f"\n3e: Closest medoid for query")
-for ci in range(cluster_k):
+for ci in range(effective_k):
     print(f"  dist to medoid cand[{medoids[ci]}]: {int(dists_to_medoids[ci])}")
 print(f"  -> selected medoid: cand[{closest_medoid_cand}]")
 print(f"  -> demos: {[r.statement_text for r in all_schemas[closest_medoid_cand]]}")
-print(f"  -> ranks: {all_ranks[closest_medoid_cand]}")
+print(f"  -> ranks (medoid's query): {all_ranks[closest_medoid_cand]}")
+# Re-evaluate ranks against the actual query
+actual_rank_for_rule = {}
+for rank, rule_list in ranked.items():
+    for rule in rule_list:
+        actual_rank_for_rule[rule] = rank
+manual_actual_ranks = [actual_rank_for_rule.get(s, 4) for s in all_schemas[closest_medoid_cand]]
+print(f"  -> ranks (actual query):   {manual_actual_ranks}")
 
 
 # <codecell>
@@ -340,10 +391,13 @@ verify_schemas, verify_ranks = _sample_cluster(
     cluster_k=cluster_k,
     cluster_base_dist=cluster_base_dist,
     cluster_unselected_rank=CLUSTER_CFG["cluster_unselected_rank"],
+    distance=PROBLEM_CFG["distance"],
+    initial_ant_max=PROBLEM_CFG["initial_ant_max"],
 )
 
 manual_schemas = all_schemas[closest_medoid_cand]
-manual_ranks = all_ranks[closest_medoid_cand]
+# Use actual-query ranks to match the fixed _sample_cluster behavior
+manual_ranks = manual_actual_ranks
 
 verify_texts = [r.statement_text for r in verify_schemas]
 manual_texts = [r.statement_text for r in manual_schemas]
@@ -491,6 +545,8 @@ def _collect_demo_ranks(task, dist_name, n_samples, rng):
             cluster_k=CLUSTER_CFG["cluster_k"],
             cluster_base_dist=CLUSTER_CFG["cluster_base_dist"],
             cluster_unselected_rank=CLUSTER_CFG["cluster_unselected_rank"],
+            cluster_distance=PROBLEM_CFG["distance"],
+            cluster_initial_ant_max=PROBLEM_CFG["initial_ant_max"],
         )
         for r in result.demo_ranks:
             rank_counts[int(r)] += 1

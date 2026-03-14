@@ -106,6 +106,7 @@ def _base_record(
     sampled,
     distance: int,
     config: OnlineSampleConfig,
+    precomputed_cluster_candidates_by_layer: dict | None = None,
 ) -> tuple[dict, int, tuple, tuple, tuple]:
     step_idx = pick_sampled_step_index(
         rng=rng,
@@ -121,6 +122,11 @@ def _base_record(
         sampled=sampled,
         step_idx=step_idx,
         completion_format=config.completion_format,
+    )
+    precomputed = (
+        precomputed_cluster_candidates_by_layer.get(int(src_layer))
+        if precomputed_cluster_candidates_by_layer is not None
+        else None
     )
     augmented = augment_prompt_with_demos(
         prompt_tokens=prompt,
@@ -144,6 +150,9 @@ def _base_record(
         cluster_k=int(config.cluster_k),
         cluster_base_dist=str(config.cluster_base_dist),
         cluster_unselected_rank=config.cluster_unselected_rank,
+        cluster_distance=int(distance),
+        cluster_initial_ant_max=int(config.initial_ant_max),
+        precomputed_cluster_candidates=precomputed,
     )
     record = {
         "distance": int(distance),
@@ -213,6 +222,7 @@ def sample_online_fresh_record(
     tokenizer: tokenize_layer_fol.FOLLayerTokenizer,
     rng: np.random.Generator,
     config: FreshOnlineSampleConfig,
+    precomputed_cluster_candidates_by_layer: dict | None = None,
 ) -> dict:
     distance = int(config.distances[0])
     last_err = None
@@ -252,6 +262,7 @@ def sample_online_fresh_record(
             sampled=sampled,
             distance=distance,
             config=config,
+            precomputed_cluster_candidates_by_layer=precomputed_cluster_candidates_by_layer,
         )
         record["rule_context"] = fresh_rule_context(
             base_bank=base_bank,

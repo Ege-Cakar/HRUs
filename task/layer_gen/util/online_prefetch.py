@@ -51,7 +51,7 @@ def resolve_online_prefetch_config(
 
     if workers is None:
         cpu = os.cpu_count() or 2
-        workers = max(1, min(8, cpu - 1))
+        workers = max(1, min(12, cpu - 1))
     else:
         workers = int(workers)
     if workers < 1:
