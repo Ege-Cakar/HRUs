@@ -277,6 +277,7 @@ class MultiHeadAttention(nnx.Module):
         x: jnp.ndarray,
         mask: jnp.ndarray | None = None,
         *,
+        is_causal: bool = False,
         past_key: jnp.ndarray | None = None,
         past_value: jnp.ndarray | None = None,
         pos_offset: int | jnp.ndarray = 0,
@@ -286,12 +287,14 @@ class MultiHeadAttention(nnx.Module):
         Args:
             x: Input tensor of shape (batch, seq_len, n_hidden)
             mask: Optional causal mask of shape (seq_len, seq_len)
-            
+            is_causal: If True, use native causal masking (memory-efficient
+                flash attention path). Ignored when ``mask`` is provided.
+
         Returns:
             Output tensor of shape (batch, seq_len, n_hidden)
         """
         batch_size, seq_len, _ = x.shape
-        
+
         # Project to Q, K, V
         qkv = self.qkv(x)  # (batch, seq, 3 * n_hidden)
         qkv = qkv.reshape(batch_size, seq_len, 3, self.n_heads, self.head_dim)
@@ -348,14 +351,20 @@ class MultiHeadAttention(nnx.Module):
             v_update = v if v.dtype == past_value.dtype else v.astype(past_value.dtype)
             k = jax.lax.dynamic_update_slice(past_key, k_update, (0, 0, past_len_i32, 0))
             v = jax.lax.dynamic_update_slice(past_value, v_update, (0, 0, past_len_i32, 0))
-        
+
         # Use dtype-compatible K/V tensors for attention computation when cache
         # and compute dtypes differ.
         k_attn = k if k.dtype == q.dtype else k.astype(q.dtype)
         v_attn = v if v.dtype == q.dtype else v.astype(q.dtype)
 
+        # Prefer is_causal over explicit mask when no mask is provided.
+        use_is_causal = is_causal and mask is None
+
         use_manual_attention = self.use_sow or self.dropout is not None
         if use_manual_attention:
+            if use_is_causal:
+                kv_len = k_attn.shape[2]
+                mask = jnp.tril(jnp.ones((seq_len, kv_len), dtype=bool))
             attn_weights = jnp.einsum("bhqd,bhkd->bhqk", q, k_attn) * self.scale
             if mask is not None:
                 mask_value = jnp.finfo(attn_weights.dtype).min
@@ -381,12 +390,13 @@ class MultiHeadAttention(nnx.Module):
                 q_attn,
                 k_attn,
                 v_attn,
-                mask=mask,
+                mask=None if use_is_causal else mask,
+                is_causal=use_is_causal,
                 scale=self.scale,
                 implementation=implementation,
             )
         out = out.reshape(batch_size, seq_len, self.n_hidden)
-        
+
         out = self.out_proj(out)
         if return_kv:
             return out, k, v
@@ -502,6 +512,7 @@ class TransformerBlock(nnx.Module):
         x: jnp.ndarray,
         mask: jnp.ndarray | None = None,
         *,
+        is_causal: bool = False,
         past_key: jnp.ndarray | None = None,
         past_value: jnp.ndarray | None = None,
         pos_offset: int | jnp.ndarray = 0,
@@ -515,6 +526,7 @@ class TransformerBlock(nnx.Module):
             x, new_key, new_value = self.attn(
                 x,
                 mask=mask,
+                is_causal=is_causal,
                 past_key=past_key,
                 past_value=past_value,
                 pos_offset=pos_offset,
@@ -524,6 +536,7 @@ class TransformerBlock(nnx.Module):
             x = self.attn(
                 x,
                 mask=mask,
+                is_causal=is_causal,
                 past_key=past_key,
                 past_value=past_value,
                 pos_offset=pos_offset,
@@ -748,15 +761,19 @@ class Transformer(nnx.Module):
             x = x + pos
 
         # Use precomputed causal mask (sliced to actual sequence length).
+        # When not using cache, prefer is_causal=True to avoid materializing
+        # the O(n²) attention mask, enabling memory-efficient flash attention.
         if use_cache:
             mask = jax.lax.dynamic_slice(
                 self._causal_mask,
                 (jnp.asarray(past_len, dtype=jnp.int32), 0),
                 (seq_len, config.n_seq),
             )
+            causal_flag = False
         else:
-            mask = self._causal_mask[:seq_len, :seq_len]
-        
+            mask = None
+            causal_flag = True
+
         # Apply transformer blocks
         if return_cache:
             new_keys = []
@@ -765,6 +782,7 @@ class Transformer(nnx.Module):
                 x, new_key, new_value = block(
                     x,
                     mask=mask,
+                    is_causal=causal_flag,
                     past_key=past_key,
                     past_value=past_value,
                     pos_offset=past_len,
@@ -777,6 +795,7 @@ class Transformer(nnx.Module):
                 x = block(
                     x,
                     mask=mask,
+                    is_causal=causal_flag,
                     past_key=past_key,
                     past_value=past_value,
                     pos_offset=past_len,
