@@ -202,7 +202,7 @@ class Depth3FreshICLSplitStrategy(FOLTaskSplitStrategy):
         from .cluster_precompute import ClusterPrecomputeClient
 
         repo_root = Path(__file__).resolve().parents[2]
-        n_workers = min(os.cpu_count() or 1, max(1, cluster_n_samples // 10), 12)
+        n_workers = min(os.cpu_count() or 1, max(1, cluster_n_samples // 10), 24)
 
         precomp_rng = np.random.default_rng(int(seed) + 7_919)
         by_layer: dict[int, list] = {}

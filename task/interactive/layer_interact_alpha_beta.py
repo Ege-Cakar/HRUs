@@ -28,10 +28,10 @@ from task.layer_gen.util.fol_rule_bank import (
 
 # <codecell>  Configuration (inline editable)
 ALPHA_VALUES = [0.0, 0.5, 1.0, 2.0, 5.0, 10.0]
-BETA_VALUES = [0.0, 0.25, 0.5, 1.0, 2.0, 5.0, float('inf')]
+BETA_VALUES = [0.0, 0.1, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3, 4, 5.0, float('inf')]
 N_SAMPLES = 200
 N_DEMOS = 32
-SEED = 42
+SEED = 43
 DEMO_DISTRIBUTION = "zipf_per_rule"
 
 # Rule bank config
@@ -118,17 +118,18 @@ for alpha in ALPHA_VALUES:
             tau, _ = kendalltau(ideal, ranks)
             taus.append(tau)
 
-        mean_tau = float(np.mean(taus)) if taus else float('nan')
-        std_tau = float(np.std(taus)) if taus else float('nan')
+        mean_tau = float(np.nanmean(taus)) if taus else float('nan')
+        std_tau = float(np.nanstd(taus)) if taus else float('nan')
+        n_valid = int(np.sum(np.isfinite(taus))) if taus else 0
         results.append({
             "alpha": alpha,
             "beta": beta,
             "mean_tau": mean_tau,
             "std_tau": std_tau,
-            "n": len(taus),
+            "n": n_valid,
         })
         beta_str = "inf" if not np.isfinite(beta) else f"{beta:.2f}"
-        print(f"  alpha={alpha:.1f}  beta={beta_str:>5s}  tau={mean_tau:+.3f} ± {std_tau:.3f}  (n={len(taus)})")
+        print(f"  alpha={alpha:.1f}  beta={beta_str:>5s}  tau={mean_tau:+.3f} ± {std_tau:.3f}  (n={n_valid})")
 
 # <codecell>  Display: pandas pivot table of mean Kendall tau
 import pandas as pd
@@ -212,7 +213,8 @@ try:
     import matplotlib.pyplot as plt
 
     fig, ax = plt.subplots(figsize=(10, 6))
-    beta_labels = [("inf" if not np.isfinite(b) else f"{b:.2f}") for b in BETA_VALUES]
+    alpha_labels = [f"{a:.1f}" for a in pivot.index]
+    beta_labels = [("inf" if not np.isfinite(b) else f"{b:.2f}") for b in pivot.columns]
     im = ax.imshow(
         pivot.values,
         aspect="auto",
@@ -222,17 +224,19 @@ try:
     )
     ax.set_xticks(range(len(beta_labels)))
     ax.set_xticklabels(beta_labels)
-    ax.set_yticks(range(len(ALPHA_VALUES)))
-    ax.set_yticklabels([f"{a:.1f}" for a in ALPHA_VALUES])
+    ax.set_yticks(range(len(alpha_labels)))
+    ax.set_yticklabels(alpha_labels)
     ax.set_xlabel("beta (ranking strength)")
     ax.set_ylabel("alpha (retrieval quality)")
     ax.set_title("Mean Kendall tau: demo order vs ideal descending rank")
     fig.colorbar(im, ax=ax, label="Kendall tau")
 
-    for i in range(len(ALPHA_VALUES)):
-        for j in range(len(BETA_VALUES)):
+    n_rows, n_cols = pivot.values.shape
+    for i in range(n_rows):
+        for j in range(n_cols):
             val = pivot.values[i, j]
-            ax.text(j, i, f"{val:+.2f}", ha="center", va="center", fontsize=8)
+            label = f"{val:+.2f}" if np.isfinite(val) else "NaN"
+            ax.text(j, i, label, ha="center", va="center", fontsize=8)
 
     out_path = Path(__file__).parent / "set" / "alpha_beta_tau_heatmap.png"
     out_path.parent.mkdir(parents=True, exist_ok=True)

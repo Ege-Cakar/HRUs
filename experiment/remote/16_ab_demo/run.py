@@ -59,13 +59,12 @@ DEMO_DISTRIBUTION = "zipf_per_rule"
 SWEEP_TRAIN_ALPHA = [0, 2, 10]
 EVAL_ALPHA_SWEEP = [0, 1, 2, 3, 4, 10]
 
-SWEEP_TRAIN_BETA = [0.0, 1.0, float('inf')]
-EVAL_BETA_SWEEP = [0.0, 0.25, 0.5, 1.0, 2.0, 5.0, float('inf')]
+SWEEP_TRAIN_BETA = [0.0, 0.5, 1.0, float('inf')]
+EVAL_BETA_SWEEP = [0.0, 0.25, 0.5, 1.0, 2.0, float('inf')]
 
 TRAIN_MIN_N_DEMOS = 1
-SWEEP_TRAIN_MAX_N_DEMOS = [64, 224]
+SWEEP_TRAIN_MAX_N_DEMOS = [64]
 BASE_TRAIN_MAX_N_DEMOS = 32  # reference demo count for batch size scaling
-# EVAL_MAX_N_DEMOS_SWEEP = [1, 2, 4, 8, 12, 16, 24, 32, 40, 48, 60, 72, 84, 96, 108, 120]
 EVAL_MAX_N_DEMOS_SWEEP = [1, 2, 4, 8, 16, 32, 48, 64, 96, 128, 160, 192, 224]
 SELECTION_EVAL_MAX_N_DEMOS = 8
 
