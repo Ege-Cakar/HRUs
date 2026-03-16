@@ -565,6 +565,36 @@ def _is_applicable(
     )
 
 
+def _reachable_predicates_from_rule(
+    rule: FOLLayerRule,
+    rule_bank: FOLRuleBank,
+) -> frozenset[str]:
+    """Compute predicate names reachable from rule's RHS through the rule bank."""
+    available_preds = _rhs_predicates(rule)
+    current_src = int(rule.dst_layer)
+    while True:
+        next_rules = rule_bank.transition_rules(current_src)
+        if not next_rules:
+            break
+        next_preds: set[str] = set()
+        for t in next_rules:
+            if _lhs_predicates(t).issubset(available_preds):
+                next_preds.update(_rhs_predicates(t))
+        if not next_preds:
+            break
+        available_preds = next_preds
+        current_src += 1
+    return frozenset(available_preds)
+
+
+def _precompute_reachable_sets(
+    rules: list[FOLLayerRule],
+    rule_bank: FOLRuleBank,
+) -> dict[FOLLayerRule, frozenset[str]]:
+    """Precompute reachable predicate sets for all rules at a layer."""
+    return {rule: _reachable_predicates_from_rule(rule, rule_bank) for rule in rules}
+
+
 def _classify_rules_by_rank(
     *,
     rules: list[FOLLayerRule],
@@ -572,11 +602,15 @@ def _classify_rules_by_rank(
     goal_atom: FOLAtom,
     rule_bank: FOLRuleBank,
     max_unify_solutions: int,
+    reachable_sets: dict[FOLLayerRule, frozenset[str]] | None = None,
 ) -> dict[int, list[FOLLayerRule]]:
     ranked: dict[int, list[FOLLayerRule]] = {1: [], 2: [], 3: [], 4: []}
     for rule in rules:
         applicable = _is_applicable(rule, ants, max_unify_solutions)
-        reachable = _is_goal_reachable_from_rule_rhs(rule, goal_atom, rule_bank)
+        if reachable_sets is not None:
+            reachable = goal_atom.predicate in reachable_sets[rule]
+        else:
+            reachable = _is_goal_reachable_from_rule_rhs(rule, goal_atom, rule_bank)
         if applicable and reachable:
             ranked[1].append(rule)
         elif applicable and not reachable:
@@ -1058,6 +1092,7 @@ def _precompute_cluster_candidate_rankings(
     max_unify_solutions: int = 64,
     distance: int | None = None,
     initial_ant_max: int | None = None,
+    server=None,
 ) -> list[dict[int, list[FOLLayerRule]]]:
     """Precompute ranked-rule dicts for cluster candidate queries.
 
@@ -1069,8 +1104,28 @@ def _precompute_cluster_candidate_rankings(
     This is the expensive part of ``_sample_cluster`` that is independent of
     ``alpha``, ``n_demos``, and ``cluster_k``, and can therefore be computed
     once and reused across those sweep dimensions.
+
+    When *server* is provided (a ``ClusterPrecomputeClient``), computation
+    is offloaded to a subprocess pool for parallelism.
     """
     can_sample_fresh = (distance is not None and initial_ant_max is not None)
+
+    # If a server is available and we can sample fresh queries, offload.
+    if server is not None and can_sample_fresh:
+        seed = int(rng.integers(1 << 63))
+        return server.precompute(
+            rule_bank=rule_bank,
+            src_layer=src_layer,
+            cluster_n_samples=cluster_n_samples,
+            seed=seed,
+            max_unify_solutions=max_unify_solutions,
+            distance=distance,
+            initial_ant_max=initial_ant_max,
+            fallback_ranked=actual_ranked,
+        )
+
+    # Sequential path with reachability caching.
+    reachable_sets = _precompute_reachable_sets(rules, rule_bank) if can_sample_fresh else None
     candidate_rankings: list[dict[int, list[FOLLayerRule]]] = []
 
     for _ in range(int(cluster_n_samples)):
@@ -1092,6 +1147,7 @@ def _precompute_cluster_candidate_rankings(
                     goal_atom=fresh_goal,
                     rule_bank=rule_bank,
                     max_unify_solutions=int(max_unify_solutions),
+                    reachable_sets=reachable_sets,
                 )
         candidate_rankings.append(
             fresh_ranked if fresh_ranked is not None else actual_ranked

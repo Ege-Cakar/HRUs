@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 
@@ -194,27 +196,49 @@ class Depth3FreshICLSplitStrategy(FOLTaskSplitStrategy):
         """
         if self.base_bank is None:
             return
+
+        from .cluster_precompute import ClusterPrecomputeClient
+
+        repo_root = Path(__file__).resolve().parents[2]
+        n_workers = min(os.cpu_count() or 1, max(1, cluster_n_samples // 10), 12)
+
         precomp_rng = np.random.default_rng(int(seed) + 7_919)
         by_layer: dict[int, list] = {}
         distance = int(self.sample_config.distances[0])
-        for src_layer in range(1, self.base_bank.n_layers - 1):
-            rules = list(self.base_bank.transition_rules(src_layer))
-            if not rules:
-                continue
-            # Sample a dummy problem to get a valid fallback ranked dict.
-            dummy_ranked = {1: [], 2: [], 3: [], 4: list(rules)}
-            candidates = _precompute_cluster_candidate_rankings(
-                rule_bank=self.base_bank,
-                src_layer=src_layer,
-                rules=rules,
-                actual_ranked=dummy_ranked,
-                rng=precomp_rng,
-                cluster_n_samples=cluster_n_samples,
-                max_unify_solutions=max_unify_solutions,
-                distance=distance,
-                initial_ant_max=initial_ant_max,
-            )
-            by_layer[src_layer] = candidates
+
+        server = None
+        if n_workers > 1 and cluster_n_samples >= 20:
+            try:
+                server = ClusterPrecomputeClient(
+                    n_workers=n_workers, cwd=repo_root,
+                )
+            except Exception:
+                server = None
+
+        try:
+            for src_layer in range(1, self.base_bank.n_layers - 1):
+                rules = list(self.base_bank.transition_rules(src_layer))
+                if not rules:
+                    continue
+                # Sample a dummy problem to get a valid fallback ranked dict.
+                dummy_ranked = {1: [], 2: [], 3: [], 4: list(rules)}
+                candidates = _precompute_cluster_candidate_rankings(
+                    rule_bank=self.base_bank,
+                    src_layer=src_layer,
+                    rules=rules,
+                    actual_ranked=dummy_ranked,
+                    rng=precomp_rng,
+                    cluster_n_samples=cluster_n_samples,
+                    max_unify_solutions=max_unify_solutions,
+                    distance=distance,
+                    initial_ant_max=initial_ant_max,
+                    server=server,
+                )
+                by_layer[src_layer] = candidates
+        finally:
+            if server is not None:
+                server.close()
+
         self._precomputed_cluster_candidates_by_layer = by_layer or None
 
     def sample_record(self, *, rng: np.random.Generator) -> dict:

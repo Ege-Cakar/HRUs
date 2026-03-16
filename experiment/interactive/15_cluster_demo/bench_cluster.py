@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parents[3]
 sys.path.append(str(ROOT))
 
 from task.layer_fol import FOLLayerTask
+from task.layer_fol.cluster_precompute import ClusterPrecomputeClient
 from task.layer_fol.demos import (
     _classify_rules_by_rank,
     _precompute_cluster_candidate_rankings,
@@ -281,6 +282,70 @@ for dist_name in ["zipf_per_rule", "cluster"]:
     time_fn(lambda t=task: next(t), n_calls=n,
             label=f"next() [{dist_name}] train (batch=4, random step)")
     task.close()
+
+
+# ── 4b. _precompute_cluster_candidate_rankings (parallel via server) ──
+print("\n4b. _precompute_cluster_candidate_rankings (PARALLEL via server)")
+import os
+n_workers = min(os.cpu_count() or 1, 12)
+print(f"   Using {n_workers} workers")
+
+with ClusterPrecomputeClient(n_workers=n_workers, cwd=ROOT) as server:
+    for src_layer, rules, ranked in [(src_layer_0, rules_0, ranked_0),
+                                       (src_layer_1, rules_1, ranked_1)]:
+        def _do_precompute_parallel(sl=src_layer, r=rules, rk=ranked, s=server):
+            return _precompute_cluster_candidate_rankings(
+                rule_bank=temp_bank, src_layer=sl, rules=r, actual_ranked=rk,
+                rng=np.random.default_rng(rng.integers(1 << 31)),
+                cluster_n_samples=CLUSTER_N_SAMPLES,
+                max_unify_solutions=MAX_UNIFY_SOLUTIONS,
+                distance=2, initial_ant_max=INITIAL_ANT_MAX,
+                server=s,
+            )
+
+        n = 3 if src_layer == 0 else 10
+        time_fn(_do_precompute_parallel, n_calls=n,
+                label=f"precompute_candidates PARALLEL src_layer={src_layer} (n_samples={CLUSTER_N_SAMPLES})")
+
+
+# ── 5b. Full _sample_cluster using server-precomputed candidates ──
+print("\n5b. Full _sample_cluster with server-precomputed candidates")
+from task.layer_fol.demos import _sample_cluster_from_precomputed
+
+with ClusterPrecomputeClient(n_workers=n_workers, cwd=ROOT) as server:
+    for src_layer, ants, rules, ranked in [
+        (src_layer_0, ants_0, rules_0, ranked_0),
+        (src_layer_1, ants_1, rules_1, ranked_1),
+    ]:
+        rule_to_idx = {rule: i for i, rule in enumerate(rules)}
+
+        def _do_cluster_parallel(sl=src_layer, a=ants, r=rules, rk=ranked, ri=rule_to_idx, s=server):
+            candidates = _precompute_cluster_candidate_rankings(
+                rule_bank=temp_bank, src_layer=sl, rules=r, actual_ranked=rk,
+                rng=np.random.default_rng(rng.integers(1 << 31)),
+                cluster_n_samples=CLUSTER_N_SAMPLES,
+                max_unify_solutions=MAX_UNIFY_SOLUTIONS,
+                distance=2, initial_ant_max=INITIAL_ANT_MAX,
+                server=s,
+            )
+            return _sample_cluster_from_precomputed(
+                candidate_rankings=candidates,
+                actual_ranked=rk,
+                rules=r,
+                rule_to_idx=ri,
+                rng=np.random.default_rng(rng.integers(1 << 31)),
+                n_demos=64,
+                alpha=2.0,
+                cluster_k=5,
+                cluster_base_dist="zipf_per_rule",
+                cluster_unselected_rank=None,
+                demo_ranked=True,
+                demo_unique=True,
+            )
+
+        n = 3 if src_layer == 0 else 10
+        time_fn(_do_cluster_parallel, n_calls=n,
+                label=f"_sample_cluster PARALLEL src_layer={src_layer}")
 
 
 # ── 8. Projected training time ──

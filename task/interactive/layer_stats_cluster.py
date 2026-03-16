@@ -36,6 +36,7 @@ if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
 from task.layer_fol import FOLLayerTask
+from task.layer_fol.cluster_precompute import ClusterPrecomputeClient
 from task.layer_fol.demos import (
     _batch_cluster_select,
     _classify_rules_by_rank,
@@ -210,6 +211,16 @@ def run_study(
     summary_rows: list[dict[str, Any]] = []
     trial_rows: list[dict[str, Any]] = []
 
+    # Launch parallel precompute server for cluster candidate rankings.
+    max_cns = max(sweep_cluster_n_samples) if sweep_cluster_n_samples else 0
+    n_server_workers = min(os.cpu_count() or 1, max(1, max_cns // 10), 12)
+    server: ClusterPrecomputeClient | None = None
+    if n_server_workers > 1 and max_cns >= 20:
+        try:
+            server = ClusterPrecomputeClient(n_workers=n_server_workers, cwd=ROOT)
+        except Exception:
+            server = None
+
     # Accumulator key: (cluster_k, cluster_n_samples, mid_pred, alpha, n_demos, step_idx)
     AccKey = tuple[int, int, int, float, int, int]
     p_demo_good_acc: dict[AccKey, list[float]] = {}
@@ -328,6 +339,7 @@ def run_study(
                             max_unify_solutions=max_unify_solutions,
                             distance=2,
                             initial_ant_max=int(task_kwargs["initial_ant_max"]),
+                            server=server,
                         )
 
                         # Batch select: vectorised weights, shared distance
@@ -432,6 +444,9 @@ def run_study(
         prompt_bar.close()
         settings_bar.update(1)
     settings_bar.close()
+
+    if server is not None:
+        server.close()
 
     # Build summary rows
     for key in sorted(p_demo_good_acc.keys()):
