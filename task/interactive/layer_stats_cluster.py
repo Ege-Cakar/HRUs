@@ -56,10 +56,10 @@ CONFIG = {
     "out_dir": ROOT / "task" / "interactive" / "set" / "layer_stats_cluster",
     "base_num_pred": 16,
     "sweep_mid_pred": [256],
-    "sweep_alpha": [0, 2, 3, 10],
-    "exact_n_demos_values": [1, 4, 8, 16, 32, 48, 64],
-    "sweep_cluster_k": [1, 10, 50],
-    "sweep_cluster_n_samples": [50],
+    "sweep_alpha": [0, 2, 4, 10],
+    "exact_n_demos_values": [1, 8, 16, 32, 64],
+    "sweep_cluster_k": [1, 10, 500],
+    "sweep_cluster_n_samples": [500],
     "cluster_base_dist": "zipf_per_rule",
     "cluster_unselected_rank": None,
     "step_indices": (0, 1),
@@ -213,7 +213,7 @@ def run_study(
 
     # Launch parallel precompute server for cluster candidate rankings.
     max_cns = max(sweep_cluster_n_samples) if sweep_cluster_n_samples else 0
-    n_server_workers = min(os.cpu_count() or 1, max(1, max_cns // 10), 12)
+    n_server_workers = min(os.cpu_count() or 1, max(1, max_cns // 10), 16)
     server: ClusterPrecomputeClient | None = None
     if n_server_workers > 1 and max_cns >= 20:
         try:
