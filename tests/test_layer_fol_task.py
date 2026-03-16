@@ -194,6 +194,7 @@ def test_online_sample_config_round_trip() -> None:
         demo_distribution="zipf",
         demo_distribution_alpha=1.5,
         demo_ranked=False,
+        demo_ranking_beta=0.0,
         demo_all=True,
         demo_unique=False,
         cluster_n_samples=100,
@@ -225,6 +226,7 @@ def test_fresh_online_sample_config_round_trip() -> None:
         demo_distribution="uniform",
         demo_distribution_alpha=1.0,
         demo_ranked=True,
+        demo_ranking_beta=float('inf'),
         demo_all=False,
         demo_unique=False,
         cluster_n_samples=100,
@@ -2828,3 +2830,149 @@ def test_cluster_end_to_end_via_augment_prompt() -> None:
     assert len(result.demo_schemas) > 0
     assert len(result.demo_schemas) == len(result.demo_ranks)
     assert len(result.prompt_tokens) > len(prompt)
+
+
+# ---------- _rank_order_demos unit tests ----------
+
+
+def test_rank_order_demos_beta_inf() -> None:
+    """beta=inf produces non-increasing (descending) rank order."""
+    from task.layer_fol.demos import _rank_order_demos
+
+    r1 = FOLLayerRule(src_layer=0, dst_layer=1, lhs=(FOLAtom("A", ()),), rhs=(FOLAtom("X", ()),))
+    r2 = FOLLayerRule(src_layer=0, dst_layer=1, lhs=(FOLAtom("B", ()),), rhs=(FOLAtom("Y", ()),))
+    r3 = FOLLayerRule(src_layer=0, dst_layer=1, lhs=(FOLAtom("C", ()),), rhs=(FOLAtom("Z", ()),))
+    r4 = FOLLayerRule(src_layer=0, dst_layer=1, lhs=(FOLAtom("D", ()),), rhs=(FOLAtom("W", ()),))
+
+    schemas = [r1, r2, r3, r4]
+    ranks = [3, 1, 4, 2]
+    rng = np.random.default_rng(0)
+    out_schemas, out_ranks = _rank_order_demos(schemas, ranks, rng, float('inf'))
+    assert out_ranks == sorted(out_ranks, reverse=True)
+    assert len(out_schemas) == 4
+
+
+def test_rank_order_demos_beta_zero() -> None:
+    """beta=0 produces shuffled order (not always sorted) over multiple seeds."""
+    from task.layer_fol.demos import _rank_order_demos
+
+    r1 = FOLLayerRule(src_layer=0, dst_layer=1, lhs=(FOLAtom("A", ()),), rhs=(FOLAtom("X", ()),))
+    r2 = FOLLayerRule(src_layer=0, dst_layer=1, lhs=(FOLAtom("B", ()),), rhs=(FOLAtom("Y", ()),))
+    r3 = FOLLayerRule(src_layer=0, dst_layer=1, lhs=(FOLAtom("C", ()),), rhs=(FOLAtom("Z", ()),))
+    r4 = FOLLayerRule(src_layer=0, dst_layer=1, lhs=(FOLAtom("D", ()),), rhs=(FOLAtom("W", ()),))
+
+    schemas = [r1, r2, r3, r4]
+    ranks = [4, 3, 2, 1]
+    found_different = False
+    for seed in range(30):
+        rng = np.random.default_rng(seed)
+        _, out_ranks = _rank_order_demos(schemas, ranks, rng, 0.0)
+        if out_ranks != [4, 3, 2, 1]:
+            found_different = True
+            break
+    assert found_different, "beta=0 should shuffle at least sometimes"
+
+
+def test_rank_order_demos_empty_and_single() -> None:
+    """Edge cases: empty and single-element inputs are returned unchanged."""
+    from task.layer_fol.demos import _rank_order_demos
+
+    rng = np.random.default_rng(0)
+    assert _rank_order_demos([], [], rng, 1.0) == ([], [])
+
+    r1 = FOLLayerRule(src_layer=0, dst_layer=1, lhs=(FOLAtom("A", ()),), rhs=(FOLAtom("X", ()),))
+    out_s, out_r = _rank_order_demos([r1], [1], rng, 1.0)
+    assert out_s == [r1]
+    assert out_r == [1]
+
+
+def test_demo_ranking_beta_intermediate_partial_order() -> None:
+    """beta=1.0 produces rank correlation between 0 and 1 (noisy partial order)."""
+    from scipy.stats import kendalltau
+    from task.layer_fol.demos import _rank_order_demos
+
+    rules = [
+        FOLLayerRule(
+            src_layer=0, dst_layer=1,
+            lhs=(FOLAtom(f"P{i}", ()),),
+            rhs=(FOLAtom(f"Q{i}", ()),),
+        )
+        for i in range(10)
+    ]
+    ranks = list(range(1, 11))  # 1..10
+    ideal = list(range(10, 0, -1))  # descending
+
+    taus = []
+    for seed in range(200):
+        rng = np.random.default_rng(seed)
+        _, out_ranks = _rank_order_demos(rules, ranks, rng, 1.0)
+        tau, _ = kendalltau(ideal, out_ranks)
+        taus.append(tau)
+
+    mean_tau = float(np.mean(taus))
+    assert 0.1 < mean_tau < 0.95, (
+        f"Expected intermediate Kendall tau for beta=1.0, got mean={mean_tau:.3f}"
+    )
+    assert not all(t == 1.0 for t in taus), "Should not always be perfectly sorted"
+    assert not all(abs(t) < 0.05 for t in taus), "Should not always be near-random"
+
+
+def test_demo_ranking_beta_overrides_demo_ranked() -> None:
+    """demo_ranking_beta=0.0 overrides demo_ranked=True (shuffles despite ranked=True)."""
+    from task.layer_fol.demos import _sample_demo_schemas_zipf
+
+    r1 = FOLLayerRule(src_layer=0, dst_layer=1, lhs=(FOLAtom("A", ()),), rhs=(FOLAtom("M", ()),))
+    r2 = FOLLayerRule(src_layer=0, dst_layer=1, lhs=(FOLAtom("B", ()),), rhs=(FOLAtom("N", ()),))
+    r3 = FOLLayerRule(src_layer=0, dst_layer=1, lhs=(FOLAtom("C", ()),), rhs=(FOLAtom("P", ()),))
+    r4 = FOLLayerRule(src_layer=0, dst_layer=1, lhs=(FOLAtom("D", ()),), rhs=(FOLAtom("Q", ()),))
+
+    ranked = {1: [r1], 2: [r2], 3: [r3], 4: [r4]}
+    found_unsorted = False
+    for seed in range(50):
+        rng = np.random.default_rng(seed)
+        _, ranks = _sample_demo_schemas_zipf(
+            rng=rng,
+            ranked_rules=ranked,
+            n_demos=8,
+            alpha=0.0,
+            include_oracle=True,
+            oracle_rule=r1,
+            demo_ranked=True,
+            demo_ranking_beta=0.0,
+        )
+        if ranks != sorted(ranks, reverse=True):
+            found_unsorted = True
+            break
+    assert found_unsorted, "demo_ranking_beta=0.0 should override demo_ranked=True"
+
+
+def test_layer_fol_task_demo_ranking_beta() -> None:
+    """FOLLayerTask with demo_ranking_beta=1.0 produces valid batches."""
+    task = FOLLayerTask(
+        mode="online",
+        task_split="depth3_fresh_icl",
+        distance_range=(2, 2),
+        batch_size=4,
+        seed=700,
+        predicates_per_layer=4,
+        rules_per_transition=8,
+        arity_max=3,
+        vars_per_rule_max=4,
+        constants=("a", "b", "c"),
+        k_in_max=2,
+        k_out_max=2,
+        initial_ant_max=3,
+        max_n_demos=5,
+        min_n_demos=3,
+        include_oracle=True,
+        demo_distribution="zipf_per_rule",
+        demo_distribution_alpha=1.0,
+        demo_ranked=True,
+        demo_ranking_beta=1.0,
+        online_prefetch=False,
+    )
+    try:
+        xs, ys = next(task)
+        assert xs.shape[0] == 4
+    finally:
+        task.close()

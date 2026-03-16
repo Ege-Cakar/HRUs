@@ -97,6 +97,7 @@ class FOLLayerTask:
         demo_distribution="uniform",
         demo_distribution_alpha=1.0,
         demo_ranked=True,
+        demo_ranking_beta=None,
         demo_all=False,
         demo_unique=True,
         cluster_n_samples=100,
@@ -226,6 +227,14 @@ class FOLLayerTask:
                 f"demo_distribution_alpha must be >= 0, got {self.demo_distribution_alpha}"
             )
         self.demo_ranked = bool(demo_ranked)
+        if demo_ranking_beta is not None:
+            self.demo_ranking_beta = float(demo_ranking_beta)
+        else:
+            self.demo_ranking_beta = float('inf') if self.demo_ranked else 0.0
+        if self.demo_ranking_beta < 0:
+            raise ValueError(
+                f"demo_ranking_beta must be >= 0, got {self.demo_ranking_beta}"
+            )
         self.demo_all = bool(demo_all)
         self.demo_unique = bool(demo_unique)
         self.cluster_n_samples = int(cluster_n_samples)
@@ -352,6 +361,7 @@ class FOLLayerTask:
                 demo_distribution=str(self.demo_distribution),
                 demo_distribution_alpha=float(self.demo_distribution_alpha),
                 demo_ranked=bool(self.demo_ranked),
+                demo_ranking_beta=float(self.demo_ranking_beta),
                 demo_all=bool(self.demo_all),
                 demo_unique=bool(self.demo_unique),
                 cluster_n_samples=int(self.cluster_n_samples),
@@ -377,6 +387,7 @@ class FOLLayerTask:
                 demo_distribution=str(self.demo_distribution),
                 demo_distribution_alpha=float(self.demo_distribution_alpha),
                 demo_ranked=bool(self.demo_ranked),
+                demo_ranking_beta=float(self.demo_ranking_beta),
                 demo_all=bool(self.demo_all),
                 demo_unique=bool(self.demo_unique),
                 cluster_n_samples=int(self.cluster_n_samples),
@@ -414,6 +425,7 @@ class FOLLayerTask:
             demo_distribution=str(self.demo_distribution),
             demo_distribution_alpha=float(self.demo_distribution_alpha),
             demo_ranked=bool(self.demo_ranked),
+            demo_ranking_beta=float(self.demo_ranking_beta),
             demo_all=bool(self.demo_all),
             demo_unique=bool(self.demo_unique),
             cluster_n_samples=int(self.cluster_n_samples),
@@ -676,6 +688,7 @@ class FOLLayerTask:
         demo_distribution: str | None = None,
         demo_distribution_alpha: float | None = None,
         demo_ranked: bool | None = None,
+        demo_ranking_beta: float | None = None,
         demo_all: bool | None = None,
         demo_unique: bool | None = None,
         cluster_n_samples: int | None = None,
@@ -700,6 +713,10 @@ class FOLLayerTask:
             demo_distribution=str(demo_distribution if demo_distribution is not None else self.demo_distribution),
             demo_distribution_alpha=float(demo_distribution_alpha if demo_distribution_alpha is not None else self.demo_distribution_alpha),
             demo_ranked=bool(demo_ranked if demo_ranked is not None else self.demo_ranked),
+            demo_ranking_beta=(
+                float(demo_ranking_beta) if demo_ranking_beta is not None
+                else float(self.demo_ranking_beta)
+            ),
             demo_all=bool(demo_all if demo_all is not None else self.demo_all),
             demo_unique=bool(demo_unique if demo_unique is not None else self.demo_unique),
             cluster_n_samples=int(cluster_n_samples if cluster_n_samples is not None else self.cluster_n_samples),

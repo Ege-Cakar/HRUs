@@ -81,6 +81,7 @@ def augment_prompt_with_demos(
     cluster_distance: int | None = None,
     cluster_initial_ant_max: int | None = None,
     precomputed_cluster_candidates: list | None = None,
+    demo_ranking_beta: float | None = None,
 ) -> FOLDemoAugmentationResult:
     max_n_demos = int(max_n_demos)
     min_n_demos = int(min_n_demos)
@@ -90,6 +91,8 @@ def augment_prompt_with_demos(
     demo_ranked = bool(demo_ranked)
     demo_all = bool(demo_all)
     demo_unique = bool(demo_unique)
+    if demo_ranking_beta is None:
+        demo_ranking_beta = float('inf') if demo_ranked else 0.0
 
     _empty = FOLDemoAugmentationResult(
         prompt_tokens=list(int(tok) for tok in prompt_tokens),
@@ -168,6 +171,7 @@ def augment_prompt_with_demos(
             distance=cluster_distance,
             initial_ant_max=cluster_initial_ant_max,
             precomputed_cluster_candidates=precomputed_cluster_candidates,
+            demo_ranking_beta=demo_ranking_beta,
         )
     elif demo_distribution == "uniform":
         sampled_schemas, sampled_ranks = _sample_uniform(
@@ -196,6 +200,7 @@ def augment_prompt_with_demos(
             headless=(demo_distribution == "zipf_per_rule_headless"),
             demo_ranked=demo_ranked,
             demo_unique=demo_unique,
+            demo_ranking_beta=demo_ranking_beta,
         )
     else:
         sampled_schemas, sampled_ranks = _sample_zipf(
@@ -212,6 +217,7 @@ def augment_prompt_with_demos(
             headless=(demo_distribution == "zipf_headless"),
             demo_ranked=demo_ranked,
             demo_unique=demo_unique,
+            demo_ranking_beta=demo_ranking_beta,
         )
 
     if not sampled_schemas:
@@ -264,6 +270,7 @@ def _augment_prompt_with_demos(
     cluster_unselected_rank: int | None = None,
     cluster_distance: int | None = None,
     cluster_initial_ant_max: int | None = None,
+    demo_ranking_beta: float | None = None,
 ) -> list[int]:
     return augment_prompt_with_demos(
         prompt_tokens=prompt_tokens,
@@ -289,6 +296,7 @@ def _augment_prompt_with_demos(
         cluster_unselected_rank=cluster_unselected_rank,
         cluster_distance=cluster_distance,
         cluster_initial_ant_max=cluster_initial_ant_max,
+        demo_ranking_beta=demo_ranking_beta,
     ).prompt_tokens
 
 
@@ -493,6 +501,7 @@ def _sample_zipf(
     headless: bool = False,
     demo_ranked: bool = True,
     demo_unique: bool = False,
+    demo_ranking_beta: float | None = None,
 ) -> tuple[list[FOLLayerRule], list[int]]:
     rules = list(rule_bank.transition_rules(int(src_layer)))
     ranked = _classify_rules_by_rank(
@@ -512,6 +521,7 @@ def _sample_zipf(
         oracle_rule=oracle_rule,
         demo_ranked=demo_ranked,
         demo_unique=demo_unique,
+        demo_ranking_beta=demo_ranking_beta,
     )
 
 
@@ -622,6 +632,32 @@ def _classify_rules_by_rank(
     return ranked
 
 
+def _rank_order_demos(
+    schemas: list[FOLLayerRule],
+    ranks: list[int],
+    rng: np.random.Generator,
+    beta: float,
+) -> tuple[list[FOLLayerRule], list[int]]:
+    """Reorder demos using a Plackett-Luce (Gumbel noise) ranking model.
+
+    - ``beta = 0`` → random shuffle (equivalent to ``demo_ranked=False``)
+    - ``beta = inf`` → deterministic descending sort (equivalent to ``demo_ranked=True``)
+    - Intermediate ``beta`` → noisy partial ordering via ``rank + Gumbel / beta``
+    """
+    n = len(schemas)
+    if n <= 1:
+        return schemas, ranks
+    if beta == 0.0:
+        order = rng.permutation(n)
+    elif not np.isfinite(beta):
+        paired = sorted(zip(ranks, schemas), key=lambda x: x[0], reverse=True)
+        return [s for _, s in paired], [r for r, _ in paired]
+    else:
+        noisy = np.array(ranks, dtype=np.float64) + rng.gumbel(size=n) / beta
+        order = np.argsort(-noisy)
+    return [schemas[int(i)] for i in order], [ranks[int(i)] for i in order]
+
+
 def sample_ranked_demos(
     *,
     ranked_rules: dict[int, list[FOLLayerRule]],
@@ -633,6 +669,7 @@ def sample_ranked_demos(
     oracle_rule: FOLLayerRule | None = None,
     demo_ranked: bool = True,
     demo_unique: bool = True,
+    demo_ranking_beta: float | None = None,
 ) -> tuple[list[FOLLayerRule], list[int]]:
     """Dispatch demo sampling on pre-classified rules by distribution name.
 
@@ -643,6 +680,8 @@ def sample_ranked_demos(
     Returns ``(sampled_schemas, sampled_ranks)``.
     """
     demo_distribution = str(demo_distribution)
+    if demo_ranking_beta is None:
+        demo_ranking_beta = float('inf') if demo_ranked else 0.0
     if demo_distribution in ("zipf", "zipf_headless"):
         return _sample_demo_schemas_zipf(
             rng=rng,
@@ -654,6 +693,7 @@ def sample_ranked_demos(
             headless=(demo_distribution == "zipf_headless"),
             demo_ranked=demo_ranked,
             demo_unique=demo_unique,
+            demo_ranking_beta=demo_ranking_beta,
         )
     elif demo_distribution in ("zipf_per_rule", "zipf_per_rule_headless"):
         return _sample_demo_schemas_zipf_per_rule(
@@ -666,6 +706,7 @@ def sample_ranked_demos(
             headless=(demo_distribution == "zipf_per_rule_headless"),
             demo_ranked=demo_ranked,
             demo_unique=demo_unique,
+            demo_ranking_beta=demo_ranking_beta,
         )
     else:
         raise ValueError(
@@ -685,10 +726,14 @@ def _sample_demo_schemas_zipf(
     headless: bool = False,
     demo_ranked: bool = True,
     demo_unique: bool = False,
+    demo_ranking_beta: float | None = None,
 ) -> tuple[list[FOLLayerRule], list[int]]:
     non_empty_ranks = sorted(k for k, v in ranked_rules.items() if v)
     if not non_empty_ranks:
         return [], []
+
+    if demo_ranking_beta is None:
+        demo_ranking_beta = float('inf') if demo_ranked else 0.0
 
     if headless:
         sampling_ranks = [k for k in non_empty_ranks if k != 1]
@@ -727,14 +772,9 @@ def _sample_demo_schemas_zipf(
                 rule = pool[int(rng.integers(0, len(pool)))]
                 sampled_schemas.append(rule)
                 sampled_ranks.append(rank)
-        if demo_ranked:
-            paired = sorted(
-                zip(sampled_ranks, sampled_schemas),
-                key=lambda x: x[0],
-                reverse=True,
-            )
-            sampled_schemas = [s for _, s in paired]
-            sampled_ranks = [r for r, _ in paired]
+        sampled_schemas, sampled_ranks = _rank_order_demos(
+            sampled_schemas, sampled_ranks, rng, demo_ranking_beta,
+        )
         return sampled_schemas, sampled_ranks
 
     if oracle_rule is None:
@@ -794,18 +834,9 @@ def _sample_demo_schemas_zipf(
                 sampled_schemas.append(rule)
                 sampled_ranks.append(rank)
 
-    if demo_ranked:
-        paired = sorted(
-            zip(sampled_ranks, sampled_schemas),
-            key=lambda x: x[0],
-            reverse=True,
-        )
-        sampled_schemas = [s for _, s in paired]
-        sampled_ranks = [r for r, _ in paired]
-    else:
-        order = rng.permutation(len(sampled_schemas))
-        sampled_schemas = [sampled_schemas[int(i)] for i in order]
-        sampled_ranks = [sampled_ranks[int(i)] for i in order]
+    sampled_schemas, sampled_ranks = _rank_order_demos(
+        sampled_schemas, sampled_ranks, rng, demo_ranking_beta,
+    )
     return sampled_schemas, sampled_ranks
 
 
@@ -839,10 +870,14 @@ def _sample_demo_schemas_zipf_per_rule(
     headless: bool = False,
     demo_ranked: bool = True,
     demo_unique: bool = False,
+    demo_ranking_beta: float | None = None,
 ) -> tuple[list[FOLLayerRule], list[int]]:
     non_empty_ranks = sorted(k for k, v in ranked_rules.items() if v)
     if not non_empty_ranks:
         return [], []
+
+    if demo_ranking_beta is None:
+        demo_ranking_beta = float('inf') if demo_ranked else 0.0
 
     if not include_oracle:
         pool, weights = _build_per_rule_pool_and_weights(
@@ -863,14 +898,9 @@ def _sample_demo_schemas_zipf_per_rule(
                 rule, rank = pool[idx]
                 sampled_schemas.append(rule)
                 sampled_ranks.append(rank)
-        if demo_ranked:
-            paired = sorted(
-                zip(sampled_ranks, sampled_schemas),
-                key=lambda x: x[0],
-                reverse=True,
-            )
-            sampled_schemas = [s for _, s in paired]
-            sampled_ranks = [r for r, _ in paired]
+        sampled_schemas, sampled_ranks = _rank_order_demos(
+            sampled_schemas, sampled_ranks, rng, demo_ranking_beta,
+        )
         return sampled_schemas, sampled_ranks
 
     if oracle_rule is None:
@@ -932,18 +962,9 @@ def _sample_demo_schemas_zipf_per_rule(
                     sampled_schemas.append(rule)
                     sampled_ranks.append(rank)
 
-    if demo_ranked:
-        paired = sorted(
-            zip(sampled_ranks, sampled_schemas),
-            key=lambda x: x[0],
-            reverse=True,
-        )
-        sampled_schemas = [s for _, s in paired]
-        sampled_ranks = [r for r, _ in paired]
-    else:
-        order = rng.permutation(len(sampled_schemas))
-        sampled_schemas = [sampled_schemas[int(i)] for i in order]
-        sampled_ranks = [sampled_ranks[int(i)] for i in order]
+    sampled_schemas, sampled_ranks = _rank_order_demos(
+        sampled_schemas, sampled_ranks, rng, demo_ranking_beta,
+    )
     return sampled_schemas, sampled_ranks
 
 
@@ -962,6 +983,7 @@ def _sample_zipf_per_rule(
     headless: bool = False,
     demo_ranked: bool = True,
     demo_unique: bool = False,
+    demo_ranking_beta: float | None = None,
 ) -> tuple[list[FOLLayerRule], list[int]]:
     rules = list(rule_bank.transition_rules(int(src_layer)))
     ranked = _classify_rules_by_rank(
@@ -981,6 +1003,7 @@ def _sample_zipf_per_rule(
         oracle_rule=oracle_rule,
         demo_ranked=demo_ranked,
         demo_unique=demo_unique,
+        demo_ranking_beta=demo_ranking_beta,
     )
 
 
@@ -1172,6 +1195,7 @@ def _sample_cluster_from_precomputed(
     demo_unique: bool,
     include_oracle: bool = False,
     oracle_rule: FOLLayerRule | None = None,
+    demo_ranking_beta: float | None = None,
 ) -> tuple[list[FOLLayerRule], list[int]]:
     """Sample demos using precomputed candidate rankings.
 
@@ -1292,14 +1316,13 @@ def _sample_cluster_from_precomputed(
             else:
                 selected_schemas.append(oracle_schema)
                 selected_ranks.append(1)
-        if demo_ranked:
-            paired = sorted(
-                zip(selected_ranks, selected_schemas),
-                key=lambda x: x[0],
-                reverse=True,
-            )
-            selected_schemas = [s for _, s in paired]
-            selected_ranks = [r for r, _ in paired]
+        if demo_ranking_beta is None:
+            _beta = float('inf') if demo_ranked else 0.0
+        else:
+            _beta = demo_ranking_beta
+        selected_schemas, selected_ranks = _rank_order_demos(
+            selected_schemas, selected_ranks, rng, _beta,
+        )
 
     return selected_schemas, selected_ranks
 
@@ -1473,6 +1496,7 @@ def _sample_cluster(
     distance: int | None = None,
     initial_ant_max: int | None = None,
     precomputed_cluster_candidates: list | None = None,
+    demo_ranking_beta: float | None = None,
 ) -> tuple[list[FOLLayerRule], list[int]]:
     """Sample demos via k-medoids clustering on Spearman's footrule distance.
 
@@ -1533,6 +1557,7 @@ def _sample_cluster(
         demo_unique=demo_unique,
         include_oracle=include_oracle,
         oracle_rule=oracle_rule,
+        demo_ranking_beta=demo_ranking_beta,
     )
 
 
@@ -1595,6 +1620,7 @@ class FOLDemoAugmentedAdapter:
         cluster_unselected_rank: int | None = None,
         cluster_distance: int | None = None,
         cluster_initial_ant_max: int | None = None,
+        demo_ranking_beta: float | None = None,
     ) -> None:
         self.base_adapter = base_adapter
         self.rule_bank = rule_bank
@@ -1608,6 +1634,10 @@ class FOLDemoAugmentedAdapter:
         self.demo_ranked = bool(demo_ranked)
         self.demo_all = bool(demo_all)
         self.demo_unique = bool(demo_unique)
+        if demo_ranking_beta is None:
+            self.demo_ranking_beta = float('inf') if demo_ranked else 0.0
+        else:
+            self.demo_ranking_beta = float(demo_ranking_beta)
         self.cluster_n_samples = int(cluster_n_samples)
         self.cluster_k = int(cluster_k)
         self.cluster_base_dist = str(cluster_base_dist)
@@ -1689,6 +1719,7 @@ class FOLDemoAugmentedAdapter:
                 cluster_unselected_rank=self.cluster_unselected_rank,
                 cluster_distance=self.cluster_distance,
                 cluster_initial_ant_max=self.cluster_initial_ant_max,
+                demo_ranking_beta=self.demo_ranking_beta,
             )
             prompt = augmented.prompt_tokens
             self._last_demo_rules = list(augmented.demo_schemas)

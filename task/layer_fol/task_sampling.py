@@ -144,6 +144,7 @@ def _base_record(
         demo_distribution_alpha=float(config.demo_distribution_alpha),
         goal_atom=sampled.goal_atom,
         demo_ranked=bool(config.demo_ranked),
+        demo_ranking_beta=float(config.demo_ranking_beta),
         demo_all=bool(config.demo_all),
         demo_unique=bool(config.demo_unique),
         cluster_n_samples=int(config.cluster_n_samples),

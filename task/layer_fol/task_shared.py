@@ -27,6 +27,7 @@ class OnlineSampleConfig:
     demo_distribution: str
     demo_distribution_alpha: float
     demo_ranked: bool
+    demo_ranking_beta: float
     demo_all: bool
     demo_unique: bool
     cluster_n_samples: int
@@ -44,6 +45,10 @@ class OnlineSampleConfig:
         p = dict(payload)
         p["distances"] = tuple(int(v) for v in p["distances"])
         p.setdefault("demo_unique", False)
+        p.setdefault(
+            "demo_ranking_beta",
+            float('inf') if p.get('demo_ranked', True) else 0.0,
+        )
         p.setdefault("cluster_n_samples", 100)
         p.setdefault("cluster_k", 5)
         p.setdefault("cluster_base_dist", "zipf_per_rule")
