@@ -17,7 +17,6 @@ sys.path.append(str(ROOT))
 
 from scipy.stats import kendalltau
 from task.layer_fol.demos import (
-    _build_per_rule_pool_and_weights,
     _classify_rules_by_rank,
     sample_ranked_demos,
 )
@@ -36,18 +35,18 @@ SEED = 42
 DEMO_DISTRIBUTION = "zipf_per_rule"
 
 # Rule bank config
-N_LAYERS = 2
-PREDICATES_PER_LAYER = 8
-RULES_PER_TRANSITION = 32
-ARITY_MIN = 1
-ARITY_MAX = 3
-VARS_PER_RULE_MAX = 4
+N_LAYERS = 3
+PREDICATES_PER_LAYER = [8, 64, 8]
+RULES_PER_TRANSITION = [64, 64]
+ARITY_MIN = 0
+ARITY_MAX = 0
+VARS_PER_RULE_MAX = 1
 CONSTANTS = ("a", "b", "c", "d")
 K_IN_MIN = 1
-K_IN_MAX = 3
+K_IN_MAX = 1
 K_OUT_MIN = 1
-K_OUT_MAX = 3
-INITIAL_ANT_MAX = 3
+K_OUT_MAX = 1
+INITIAL_ANT_MAX = 1
 MAX_UNIFY_SOLUTIONS = 128
 
 # <codecell>  Build rule bank, sample a problem, classify rules by rank
@@ -143,6 +142,68 @@ pivot = df.pivot_table(
 )
 print("\n=== Mean Kendall tau (alpha × beta) ===")
 print(pivot.to_string(float_format=lambda x: f"{x:+.3f}"))
+
+# <codecell>  Preview samples at representative (alpha, beta) points
+from task.layer_fol.demos import (
+    augment_prompt_with_demos,
+)
+from task.layer_gen.util import tokenize_layer_fol as tok
+from task.layer_gen.util.fol_rule_bank import FOLSequent
+
+PREVIEW_POINTS = [
+    # (alpha, beta, label)
+    (1.0, 0.0, "uniform retrieval, random order"),
+    (1.0, 1.0, "uniform retrieval, noisy order"),
+    (1.0, float('inf'), "uniform retrieval, perfect order"),
+    (5.0, 0.0, "strong retrieval, random order"),
+    (5.0, 1.0, "strong retrieval, noisy order"),
+    (5.0, float('inf'), "strong retrieval, perfect order"),
+]
+PREVIEW_N_DEMOS = min(8, len(rules))
+PREVIEW_N_SAMPLES = 3
+
+tokenizer = tok.build_tokenizer_from_rule_bank(bank)
+sequent = FOLSequent(ants=ants, cons=goal_atom)
+
+print("\n" + "=" * 70)
+print("SAMPLE PREVIEWS")
+print("=" * 70)
+print(f"\nQuery: {sequent.text}")
+print(f"Oracle rule: {sampled.step_rules[0].statement_text}")
+print(f"Layer {src_layer}, {len(rules)} candidate rules")
+
+for p_alpha, p_beta, label in PREVIEW_POINTS:
+    beta_str = "inf" if not np.isfinite(p_beta) else f"{p_beta:.1f}"
+    print(f"\n--- alpha={p_alpha}, beta={beta_str}  ({label}) ---")
+
+    for trial in range(PREVIEW_N_SAMPLES):
+        preview_rng = np.random.default_rng(SEED * 100 + trial)
+        result = augment_prompt_with_demos(
+            prompt_tokens=tokenizer.tokenize_prompt(sequent),
+            rule_bank=bank,
+            tokenizer=tokenizer,
+            rng=preview_rng,
+            src_layer=int(src_layer),
+            ants=ants,
+            max_n_demos=PREVIEW_N_DEMOS,
+            min_n_demos=PREVIEW_N_DEMOS,
+            max_unify_solutions=MAX_UNIFY_SOLUTIONS,
+            include_oracle=False,
+            oracle_rule=sampled.step_rules[0],
+            demo_distribution=DEMO_DISTRIBUTION,
+            demo_distribution_alpha=p_alpha,
+            goal_atom=goal_atom,
+            demo_ranked=True,
+            demo_unique=True,
+            demo_ranking_beta=p_beta,
+        )
+        rank_str = " ".join(f"{r}" for r in result.demo_ranks)
+        print(f"  sample {trial}: ranks=[{rank_str}]")
+        for d_idx, (schema, inst, rank) in enumerate(
+            zip(result.demo_schemas, result.demo_instances, result.demo_ranks)
+        ):
+            oracle_tag = " *oracle*" if schema == sampled.step_rules[0] else ""
+            print(f"    [{rank}] {schema.statement_text}  ->  {inst}{oracle_tag}")
 
 # <codecell>  Optional: matplotlib heatmap
 try:
