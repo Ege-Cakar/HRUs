@@ -322,7 +322,7 @@ def sample_ranked_demos(
 
     Accepts the same rank-based distribution names as
     ``augment_prompt_with_demos`` (``"zipf"``, ``"zipf_headless"``,
-    ``"zipf_per_rule"``, ``"zipf_per_rule_headless"``).
+    ``"zipf_per_rule"``, ``"zipf_per_rule_headless"``, ``"full_rank"``).
 
     Returns ``(sampled_schemas, sampled_ranks)``.
     """
@@ -353,10 +353,21 @@ def sample_ranked_demos(
             demo_unique=demo_unique,
             demo_ranking_beta=demo_ranking_beta,
         )
+    elif demo_distribution == "full_rank":
+        beta = _resolve_demo_ranking_beta(demo_ranking_beta, demo_ranked)
+        return _sample_demo_schemas_full_rank(
+            ranked_rules=ranked_rules,
+            n_demos=n_demos,
+            rng=rng,
+            demo_ranking_beta=beta,
+            include_oracle=include_oracle,
+            oracle_rule=oracle_rule,
+        )
     else:
         raise ValueError(
             f"sample_ranked_demos does not support demo_distribution={demo_distribution!r}; "
-            f"expected 'zipf', 'zipf_headless', 'zipf_per_rule', or 'zipf_per_rule_headless'."
+            f"expected 'zipf', 'zipf_headless', 'zipf_per_rule', 'zipf_per_rule_headless', "
+            f"or 'full_rank'."
         )
 
 
@@ -437,4 +448,114 @@ def _sample_zipf_ranked(
         demo_ranked=demo_ranked,
         demo_unique=demo_unique,
         demo_ranking_beta=demo_ranking_beta,
+    )
+
+
+# ------------------------------------------------------------------
+# Full-rank Plackett-Luce sampling
+# ------------------------------------------------------------------
+
+def _sample_demo_schemas_full_rank(
+    *,
+    ranked_rules: dict[int, list[FOLLayerRule]],
+    n_demos: int,
+    rng: np.random.Generator,
+    demo_ranking_beta: float,
+    include_oracle: bool,
+    oracle_rule: FOLLayerRule | None,
+) -> tuple[list[FOLLayerRule], list[int]]:
+    """Order all rules via Plackett-Luce on inverted ranks, take top k.
+
+    Scores are ``5 - rank`` so rank-1 rules get score 4 (best).
+    The PL ordering IS the final presentation order — no separate
+    ``_rank_order_demos`` call is needed.
+
+    - ``beta = 0`` → random permutation
+    - ``beta = inf`` → deterministic best-first
+    - Intermediate ``beta`` → noisy: ``score + Gumbel(0,1) / beta``
+    """
+    # Flatten all rules with their ranks
+    pool: list[tuple[FOLLayerRule, int]] = []
+    for rank in sorted(ranked_rules):
+        for rule in ranked_rules[rank]:
+            pool.append((rule, rank))
+    if not pool:
+        return [], []
+
+    n = len(pool)
+    k = min(int(n_demos), n)
+    if k <= 0:
+        return [], []
+
+    scores = np.array([5 - rank for _, rank in pool], dtype=np.float64)
+
+    # Plackett-Luce via Gumbel trick
+    if demo_ranking_beta == 0.0:
+        order = rng.permutation(n)
+    elif not np.isfinite(demo_ranking_beta):
+        # Deterministic: sort by score descending (stable to preserve
+        # within-rank order from the sorted ranked_rules iteration)
+        order = np.argsort(-scores, kind="stable")
+    else:
+        noisy = scores + rng.gumbel(size=n) / demo_ranking_beta
+        order = np.argsort(-noisy)
+
+    # Take top k positions (preserving PL order)
+    selected_indices = list(order[:k])
+
+    # Oracle injection
+    if include_oracle:
+        if oracle_rule is None:
+            raise ValueError("include_oracle=True requires oracle_rule.")
+        oracle_schema = _find_oracle_schema_or_raise(ranked_rules, oracle_rule)
+        # Find oracle's position in pool
+        oracle_pool_idx = None
+        for i, (rule, _) in enumerate(pool):
+            if rule is oracle_schema:
+                oracle_pool_idx = i
+                break
+        if oracle_pool_idx is not None and oracle_pool_idx not in selected_indices:
+            # Replace weakest selected item (last position) with oracle
+            selected_indices[-1] = oracle_pool_idx
+            # Re-sort selected positions to preserve PL order
+            # (sort by their position in the PL ordering)
+            order_list = list(order)
+            selected_indices.sort(key=lambda idx: order_list.index(idx))
+
+    schemas = [pool[i][0] for i in selected_indices]
+    ranks = [pool[i][1] for i in selected_indices]
+    return schemas, ranks
+
+
+def _sample_full_rank(
+    *,
+    rule_bank: FOLRuleBank,
+    src_layer: int,
+    ants: tuple[FOLAtom, ...],
+    max_unify_solutions: int,
+    rng: np.random.Generator,
+    n_demos: int,
+    include_oracle: bool,
+    oracle_rule: FOLLayerRule | None,
+    goal_atom: FOLAtom,
+    demo_ranked: bool = True,
+    demo_ranking_beta: float | None = None,
+) -> tuple[list[FOLLayerRule], list[int]]:
+    """Classify rules then sample with full_rank Plackett-Luce distribution."""
+    beta = _resolve_demo_ranking_beta(demo_ranking_beta, demo_ranked)
+    rules = list(rule_bank.transition_rules(int(src_layer)))
+    ranked = _classify_rules_by_rank(
+        rules=rules,
+        ants=ants,
+        goal_atom=goal_atom,
+        rule_bank=rule_bank,
+        max_unify_solutions=int(max_unify_solutions),
+    )
+    return _sample_demo_schemas_full_rank(
+        ranked_rules=ranked,
+        n_demos=n_demos,
+        rng=rng,
+        demo_ranking_beta=beta,
+        include_oracle=include_oracle,
+        oracle_rule=oracle_rule,
     )

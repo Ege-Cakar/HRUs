@@ -16,6 +16,7 @@ from ._ranking import _classify_rules_by_rank
 from ._sampling import (
     _resolve_demo_ranking_beta,
     _sample_demo_schemas,
+    _sample_full_rank,
     _sample_uniform,
     _sample_zipf_ranked,
     sample_ranked_demos,
@@ -134,13 +135,13 @@ def augment_prompt_with_demos(
             demo_ranks=(),
         )
 
-    if demo_distribution not in {"uniform", "zipf", "zipf_headless", "zipf_per_rule", "zipf_per_rule_headless", "cluster"}:
+    if demo_distribution not in {"uniform", "zipf", "zipf_headless", "zipf_per_rule", "zipf_per_rule_headless", "cluster", "full_rank"}:
         raise ValueError(
             f"demo_distribution must be 'uniform', 'zipf', 'zipf_headless', "
-            f"'zipf_per_rule', 'zipf_per_rule_headless', or 'cluster', "
+            f"'zipf_per_rule', 'zipf_per_rule_headless', 'cluster', or 'full_rank', "
             f"got {demo_distribution!r}"
         )
-    if demo_distribution in {"zipf", "zipf_headless", "zipf_per_rule", "zipf_per_rule_headless", "cluster"} and goal_atom is None:
+    if demo_distribution in {"zipf", "zipf_headless", "zipf_per_rule", "zipf_per_rule_headless", "cluster", "full_rank"} and goal_atom is None:
         raise ValueError(f"demo_distribution={demo_distribution!r} requires goal_atom.")
     if min_n_demos > max_n_demos:
         raise ValueError(
@@ -194,6 +195,20 @@ def augment_prompt_with_demos(
             include_oracle=include_oracle,
             oracle_rule=oracle_rule,
             demo_unique=demo_unique,
+        )
+    elif demo_distribution == "full_rank":
+        sampled_schemas, sampled_ranks = _sample_full_rank(
+            rule_bank=rule_bank,
+            src_layer=int(src_layer),
+            ants=ants,
+            max_unify_solutions=int(max_unify_solutions),
+            rng=rng,
+            n_demos=n_demos,
+            include_oracle=include_oracle,
+            oracle_rule=oracle_rule,
+            goal_atom=goal_atom,
+            demo_ranked=demo_ranked,
+            demo_ranking_beta=demo_ranking_beta,
         )
     else:
         per_rule = demo_distribution in {"zipf_per_rule", "zipf_per_rule_headless"}
