@@ -471,7 +471,7 @@ def _sample_demo_schemas_full_rank(
     ``_rank_order_demos`` call is needed.
 
     - ``beta = 0`` → random permutation
-    - ``beta = inf`` → deterministic best-first
+    - ``beta = inf`` → deterministic worst-first, best-last (best closest to query)
     - Intermediate ``beta`` → noisy: ``score + Gumbel(0,1) / beta``
     """
     # Flatten all rules with their ranks
@@ -522,6 +522,7 @@ def _sample_demo_schemas_full_rank(
             order_list = list(order)
             selected_indices.sort(key=lambda idx: order_list.index(idx))
 
+    selected_indices = selected_indices[::-1]
     schemas = [pool[i][0] for i in selected_indices]
     ranks = [pool[i][1] for i in selected_indices]
     return schemas, ranks
