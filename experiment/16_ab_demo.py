@@ -555,6 +555,73 @@ def _plot_role_metric_group(
     plt.close(g.fig)
 
 
+def _plot_rollout_success_rate_tiled(
+    *,
+    role_eval_demo_df: pd.DataFrame,
+    eval_role: str,
+    out_path: Path,
+    title: str,
+    train_max_n_demos: int | None = None,
+) -> None:
+    """Tiled figure showing rollout_success_rate per (train_alpha, train_beta)."""
+    plot_df = role_eval_demo_df.loc[role_eval_demo_df["eval_role"] == str(eval_role)].copy()
+    if plot_df.empty or "rollout_success_rate" not in plot_df.columns:
+        return
+    plot_df = plot_df.dropna(subset=["rollout_success_rate"])
+    if plot_df.empty:
+        return
+
+    plot_df["facet_label"] = (
+        "train_a=" + plot_df["train_alpha"].astype(str)
+        + " train_b=" + plot_df["train_beta"].apply(_beta_display)
+    )
+    plot_df["eval_alpha_label"] = plot_df["eval_alpha"].astype(str)
+
+    facet_order = (
+        plot_df[["train_alpha", "train_beta", "facet_label"]]
+        .drop_duplicates()
+        .sort_values(["train_alpha", "train_beta"])["facet_label"]
+        .tolist()
+    )
+    eval_alpha_order = sorted(plot_df["eval_alpha_label"].unique(), key=lambda s: float(s))
+    palette = dict(
+        zip(eval_alpha_order, sns.color_palette("flare", n_colors=len(eval_alpha_order)))
+    )
+
+    g = sns.relplot(
+        data=plot_df,
+        kind="line",
+        x="eval_max_n_demos",
+        y="rollout_success_rate",
+        hue="eval_alpha_label",
+        style="model_family",
+        col="facet_label",
+        col_order=facet_order,
+        col_wrap=min(3, len(facet_order)),
+        dashes=MODEL_FAMILY_DASHES,
+        markers=True,
+        estimator="mean",
+        errorbar=None,
+        height=3.5,
+        aspect=1.3,
+        hue_order=eval_alpha_order,
+        palette=palette,
+    )
+    for ax in np.ravel(g.axes):
+        ax.set_xlim(left=0.0)
+        ax.set_ylim(0, 1)
+        if train_max_n_demos is not None:
+            ax.axvline(train_max_n_demos, color="gray", linestyle="--", linewidth=0.8, alpha=0.6)
+    g.set_axis_labels("Eval max_n_demos", "Rollout success rate")
+    g.set_titles("{col_name}")
+    legend = g._legend
+    if legend is not None:
+        legend.set_title("eval_alpha / family")
+    g.fig.suptitle(title, y=1.02)
+    g.savefig(out_path, bbox_inches="tight")
+    plt.close(g.fig)
+
+
 def _plot_heatmap(
     *,
     role_eval_demo_df: pd.DataFrame,
@@ -812,6 +879,18 @@ def _save_aggregates_for_mid_pred_and_train_iters(
                         sharey=bool(group["sharey"]),
                         train_max_n_demos=int(train_max_n_demos),
                     )
+
+            for eval_role in ("eval",):
+                _plot_rollout_success_rate_tiled(
+                    role_eval_demo_df=sub,
+                    eval_role=eval_role,
+                    out_path=out_dir / f"rollout_success_rate_tiled_{tag}_{eval_role}.png",
+                    title=(
+                        f"{str(eval_role).capitalize()}: Rollout success rate "
+                        f"(mid{int(mid_pred)}, ti={int(train_iters)}, eval_{tag})"
+                    ),
+                    train_max_n_demos=int(train_max_n_demos),
+                )
 
             for model_family in sub["model_family"].unique():
                 _plot_heatmap(

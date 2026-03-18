@@ -24,7 +24,14 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT))
 
 from scipy.stats import kendalltau
-from task.layer_fol.common import _build_tokenizer_for_fresh_icl
+from task.layer_fol import (
+    FOLLayerTask,
+    _build_tokenizer_for_fresh_icl,
+    _fresh_predicate_sentinels,
+    compute_fol_dims,
+    print_task_preview,
+    split_prompt_row_segments,
+)
 from task.layer_fol.demos import (
     _classify_rules_by_rank,
     augment_prompt_with_demos,
@@ -297,6 +304,126 @@ for p_beta, label in [(1.0, "noisy"), (float('inf'), "deterministic")]:
         rank_str = " ".join(f"{r}" for r in result.demo_ranks)
         has_oracle = any(s == sampled.step_rules[0] for s in result.demo_schemas)
         print(f"  sample {trial}: ranks=[{rank_str}]  oracle_present={has_oracle}")
+
+# <codecell>  FOLLayerTask-level oracle preview
+#
+# The sections above used the low-level `augment_prompt_with_demos` API.
+# This section creates fully initialized FOLLayerTask instances with
+# include_oracle=True so we can see exactly where the oracle ends up in
+# the final tokenized prompt after passing through the complete task pipeline.
+
+TASK_ORACLE_BETA_POINTS = [0.0, 1.0, float('inf')]
+TASK_ORACLE_N_PREVIEW = 10
+TASK_ORACLE_N_DEMOS = 8
+
+sentinels = _fresh_predicate_sentinels(name_len=PREDICATE_NAME_LEN)
+extra_arities = {s: int(base_bank.arity_max) for s in sentinels}
+
+_task_dims = compute_fol_dims(
+    rule_banks=[base_bank],
+    tokenizer=tokenizer,
+    initial_ant_max=INITIAL_ANT_MAX,
+    max_n_demos=TASK_ORACLE_N_DEMOS,
+    extra_predicate_arities=extra_arities,
+    fresh_k_in_max=K_IN_MAX,
+    fresh_k_out_max=K_OUT_MAX,
+)
+
+
+def _ceil_pow2(n: int) -> int:
+    n = int(n)
+    if n <= 1:
+        return 1
+    return 1 << (n - 1).bit_length()
+
+
+_task_n_seq = max(2, _ceil_pow2(int(_task_dims["n_seq_ar"])))
+
+print("\n" + "=" * 70)
+print("FOLLayerTask ORACLE POSITION PREVIEW (depth3_fresh_icl, include_oracle=True)")
+print("=" * 70)
+
+for p_beta in TASK_ORACLE_BETA_POINTS:
+    beta_str = "inf" if not np.isfinite(p_beta) else f"{p_beta:.1f}"
+    print(f"\n--- beta={beta_str} ---")
+
+    task = FOLLayerTask(
+        mode="online",
+        task_split="depth3_fresh_icl",
+        split_role="train",
+        seed=SEED + 1,
+        distance_range=(2, 2),
+        batch_size=1,
+        initial_ant_max=INITIAL_ANT_MAX,
+        prediction_objective="autoregressive",
+        fixed_length_mode="next_pow2",
+        fixed_length_n_seq=_task_n_seq,
+        n_layers=N_LAYERS,
+        predicates_per_layer=PREDICATES_PER_LAYER,
+        rules_per_transition=RULES_PER_TRANSITION,
+        fresh_icl_base_bank_seed=BASE_BANK_SEED,
+        arity_min=ARITY_MIN,
+        arity_max=ARITY_MAX,
+        vars_per_rule_max=VARS_PER_RULE_MAX,
+        constants=CONSTANTS,
+        k_in_max=K_IN_MAX,
+        k_out_max=K_OUT_MAX,
+        predicate_name_len=PREDICATE_NAME_LEN,
+        sample_max_attempts=4096,
+        max_unify_solutions=MAX_UNIFY_SOLUTIONS,
+        min_n_demos=TASK_ORACLE_N_DEMOS,
+        max_n_demos=TASK_ORACLE_N_DEMOS,
+        include_oracle=True,
+        demo_distribution=DEMO_DISTRIBUTION,
+        demo_ranking_beta=p_beta,
+        online_prefetch=False,
+    )
+
+    for i in range(TASK_ORACLE_N_PREVIEW):
+        record = task._sample_online_record()
+        rule_context = record.get("rule_context", {})
+        prompt = np.asarray(record["prompt"], dtype=np.int32)
+        src_layer = int(record["src_layer"])
+        gt_statements = record["statement_texts"]
+
+        demo_segments, main_segment = split_prompt_row_segments(
+            prompt, tokenizer=task.tokenizer,
+        )
+        sequent = task.tokenizer.decode_prompt(main_segment.tolist())
+
+        # Decode each demo to text
+        demo_texts = []
+        for demo in demo_segments:
+            demo_text = task.tokenizer.decode_completion_texts(
+                list(demo) + [int(task.tokenizer.eot_token_id)]
+            )[0]
+            demo_texts.append(demo_text)
+
+        # Identify which demo slots contain the oracle rule.
+        # Use exact equality to avoid substring false positives
+        # (e.g. "r1_2" matching inside "r1_21").
+        oracle_positions = []
+        for idx, dt in enumerate(demo_texts):
+            for gt in gt_statements:
+                if dt == gt:
+                    oracle_positions.append(idx)
+                    break
+
+        n_demos = len(demo_segments)
+        oracle_pos_str = (
+            ", ".join(str(p) for p in oracle_positions) if oracle_positions else "absent"
+        )
+        print(
+            f"  sample {i}: n_demos={n_demos}  "
+            f"oracle_at=[{oracle_pos_str}] (0=first shown, {n_demos - 1}=closest to query)"
+        )
+        print(f"    query: {sequent.text}")
+        print(f"    gt:    {gt_statements}")
+        for d_idx, dt in enumerate(demo_texts):
+            tag = " <-- ORACLE" if d_idx in oracle_positions else ""
+            print(f"    demo[{d_idx}]: {dt}{tag}")
+
+    task.close()
 
 # <codecell>  Optional: matplotlib tau-vs-beta curve
 try:

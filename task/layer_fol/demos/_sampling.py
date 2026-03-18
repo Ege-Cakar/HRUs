@@ -515,12 +515,15 @@ def _sample_demo_schemas_full_rank(
                 oracle_pool_idx = i
                 break
         if oracle_pool_idx is not None and oracle_pool_idx not in selected_indices:
-            # Replace weakest selected item (last position) with oracle
-            selected_indices[-1] = oracle_pool_idx
-            # Re-sort selected positions to preserve PL order
-            # (sort by their position in the PL ordering)
+            # Drop the weakest selected item to make room for the oracle
+            selected_indices.pop(-1)
+            # Re-sort remaining positions to preserve PL order
             order_list = list(order)
             selected_indices.sort(key=lambda idx: order_list.index(idx))
+            # Insert oracle at a uniformly random position so its
+            # placement is unbiased (not pinned to one end).
+            insert_pos = int(rng.integers(0, len(selected_indices) + 1))
+            selected_indices.insert(insert_pos, oracle_pool_idx)
 
     selected_indices = selected_indices[::-1]
     schemas = [pool[i][0] for i in selected_indices]
