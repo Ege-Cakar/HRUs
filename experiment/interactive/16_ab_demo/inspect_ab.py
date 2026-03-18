@@ -1,9 +1,10 @@
 # <codecell>
-"""Interactive inspection script for experiment 17 full-rank demo ordering.
+"""Interactive inspection script for experiment 16 alpha-beta demo ordering.
 
-Uses depth3_fresh_icl tasks with demo_distribution="full_rank" and
-configurable demo_ranking_beta.  Trains a small Transformer locally and
-inspects decoded model outputs, including per-step reachability checks.
+Uses depth3_fresh_icl tasks with demo_distribution="zipf_per_rule" and
+configurable demo_distribution_alpha + demo_ranking_beta.  Trains a small
+Transformer locally and inspects decoded model outputs, including per-step
+reachability checks.
 """
 
 from __future__ import annotations
@@ -43,14 +44,15 @@ from train import train, warmup_cosine_schedule
 
 # <codecell>
 # --- Configuration ---
-SET_DIR = ROOT / "experiment" / "interactive" / "17_rank_demo" / "set"
+SET_DIR = ROOT / "experiment" / "interactive" / "16_ab_demo" / "set"
 SET_DIR.mkdir(parents=True, exist_ok=True)
 
 # Demo distribution settings (top-level for easy tweaking)
-DEMO_DISTRIBUTION = "full_rank"
+DEMO_DISTRIBUTION = "zipf_per_rule"
+TRAIN_ALPHA = 10
 TRAIN_BETA = float('inf')
 
-# Fresh-ICL bank parameters (matching experiment 17)
+# Fresh-ICL bank parameters (matching experiment 16)
 FRESH_ICL_CFG = {
     "seed": 2048,
     "predicates_per_layer": (8, 64, 8),
@@ -64,7 +66,7 @@ FRESH_ICL_CFG = {
     "predicate_name_len": 4,
 }
 
-# Task parameters (matching experiment 17)
+# Task parameters (matching experiment 16)
 TASK_CFG = {
     "distance_range": (2, 2),
     "initial_ant_max": 1,
@@ -172,6 +174,7 @@ _common_task_kwargs = dict(
     sample_max_attempts=int(TASK_CFG["sample_max_attempts"]),
     max_unify_solutions=int(TASK_CFG["max_unify_solutions"]),
     demo_distribution=DEMO_DISTRIBUTION,
+    demo_distribution_alpha=TRAIN_ALPHA,
     demo_ranking_beta=TRAIN_BETA,
 )
 
@@ -428,6 +431,7 @@ def preview_rollout(
                 temp_bank,
                 min_n_demos=int(TASK_CFG["eval_max_n_demos"]),
                 max_n_demos=int(TASK_CFG["eval_max_n_demos"]),
+                demo_distribution_alpha=TRAIN_ALPHA,
                 demo_ranking_beta=TRAIN_BETA,
             )
         else:

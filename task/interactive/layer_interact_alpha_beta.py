@@ -159,6 +159,7 @@ PREVIEW_POINTS = [
     (5.0, 0.0, "strong retrieval, random order"),
     (5.0, 1.0, "strong retrieval, noisy order"),
     (5.0, float('inf'), "strong retrieval, perfect order"),
+    (10, float('inf'), "perfect retrieval, perfect order"),
 ]
 PREVIEW_N_DEMOS = min(8, len(rules))
 PREVIEW_N_SAMPLES = 3
