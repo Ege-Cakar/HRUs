@@ -10,7 +10,7 @@ import pytest
 from flax import nnx
 
 from common import split_cases
-from model.mlp import Mixer, MixerConfig
+from model.transformer import Transformer, TransformerConfig
 from train import (
     Case,
     _train_with_accumulation,
@@ -131,7 +131,7 @@ class TestCreateOptimizer:
     """Tests for create_optimizer function."""
 
     def test_basic(self):
-        config = MixerConfig(n_vocab=100, n_hidden=64, n_seq=10, n_layers=1)
+        config = TransformerConfig(n_vocab=100, n_hidden=64, n_seq=10, n_layers=1, n_heads=4)
         rngs = nnx.Rngs(42)
         model = config.to_model(rngs=rngs)
         
@@ -141,7 +141,7 @@ class TestCreateOptimizer:
         assert optimizer.model is model
 
     def test_with_clip(self):
-        config = MixerConfig(n_vocab=100, n_hidden=64, n_seq=10, n_layers=1)
+        config = TransformerConfig(n_vocab=100, n_hidden=64, n_seq=10, n_layers=1, n_heads=4)
         rngs = nnx.Rngs(42)
         model = config.to_model(rngs=rngs)
         
@@ -150,7 +150,7 @@ class TestCreateOptimizer:
         assert isinstance(optimizer, nnx.Optimizer)
 
     def test_custom_optimizer(self):
-        config = MixerConfig(n_vocab=100, n_hidden=64, n_seq=10, n_layers=1)
+        config = TransformerConfig(n_vocab=100, n_hidden=64, n_seq=10, n_layers=1, n_heads=4)
         rngs = nnx.Rngs(42)
         model = config.to_model(rngs=rngs)
 
@@ -159,7 +159,7 @@ class TestCreateOptimizer:
         assert isinstance(optimizer, nnx.Optimizer)
 
     def test_with_schedule(self):
-        config = MixerConfig(n_vocab=100, n_hidden=64, n_seq=10, n_layers=1)
+        config = TransformerConfig(n_vocab=100, n_hidden=64, n_seq=10, n_layers=1, n_heads=4)
         rngs = nnx.Rngs(42)
         model = config.to_model(rngs=rngs)
 
@@ -173,7 +173,7 @@ class TestTrainStep:
     """Tests for train_step function."""
 
     def test_basic(self):
-        config = MixerConfig(n_vocab=100, n_hidden=64, n_seq=10, n_layers=1, n_out=1)
+        config = TransformerConfig(n_vocab=100, n_hidden=64, n_seq=10, n_layers=1, n_heads=4, n_out=1)
         rngs = nnx.Rngs(42)
         model = config.to_model(rngs=rngs)
         optimizer = create_optimizer(model, lr=1e-3)
@@ -200,7 +200,7 @@ class TestLossAndAcc:
     """Tests for loss_and_acc function."""
 
     def test_binary_classification(self):
-        config = MixerConfig(n_vocab=100, n_hidden=64, n_seq=10, n_layers=1, n_out=1)
+        config = TransformerConfig(n_vocab=100, n_hidden=64, n_seq=10, n_layers=1, n_heads=4, n_out=1)
         rngs = nnx.Rngs(42)
         model = config.to_model(rngs=rngs)
         optimizer = create_optimizer(model, lr=1e-3)
@@ -216,7 +216,7 @@ class TestLossAndAcc:
         assert 0 <= float(result['acc']) <= 1
 
     def test_multiclass_classification(self):
-        config = MixerConfig(n_vocab=100, n_hidden=64, n_seq=10, n_layers=1, n_out=5)
+        config = TransformerConfig(n_vocab=100, n_hidden=64, n_seq=10, n_layers=1, n_heads=4, n_out=5)
         rngs = nnx.Rngs(42)
         model = config.to_model(rngs=rngs)
         optimizer = create_optimizer(model, lr=1e-3)
@@ -300,7 +300,7 @@ class TestTrain:
     """Tests for the main train function."""
 
     def test_basic_training(self):
-        config = MixerConfig(n_vocab=100, n_hidden=32, n_seq=10, n_layers=1, n_out=1)
+        config = TransformerConfig(n_vocab=100, n_hidden=32, n_seq=10, n_layers=1, n_heads=2, n_out=1)
         
         x = jnp.ones((8, 10), dtype=jnp.int32)
         y = jnp.array([0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0])
@@ -321,7 +321,7 @@ class TestTrain:
         assert len(hist['train']) == 2  # Evaluated at step 5 and 10
 
     def test_with_existing_optimizer(self):
-        config = MixerConfig(n_vocab=100, n_hidden=32, n_seq=10, n_layers=1, n_out=1)
+        config = TransformerConfig(n_vocab=100, n_hidden=32, n_seq=10, n_layers=1, n_heads=2, n_out=1)
         rngs = nnx.Rngs(42)
         model = config.to_model(rngs=rngs)
         initial_optimizer = create_optimizer(model, lr=1e-3)
@@ -341,7 +341,7 @@ class TestTrain:
         assert optimizer is initial_optimizer
 
     def test_training_with_schedule(self):
-        config = MixerConfig(n_vocab=100, n_hidden=32, n_seq=10, n_layers=1, n_out=1)
+        config = TransformerConfig(n_vocab=100, n_hidden=32, n_seq=10, n_layers=1, n_heads=2, n_out=1)
 
         x = jnp.ones((8, 10), dtype=jnp.int32)
         y = jnp.array([0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0])
@@ -362,7 +362,7 @@ class TestTrain:
         assert len(hist['train']) == 2
 
     def test_gradient_accumulation_matches_large_batch_update(self):
-        config = MixerConfig(n_vocab=64, n_hidden=16, n_seq=6, n_layers=1, n_out=1)
+        config = TransformerConfig(n_vocab=64, n_hidden=16, n_seq=6, n_layers=1, n_heads=2, n_out=1)
 
         x1 = jnp.array([[1, 2, 3, 4, 5, 6], [2, 3, 4, 5, 6, 7]], dtype=jnp.int32)
         y1 = jnp.array([0.0, 1.0], dtype=jnp.float32)
@@ -426,7 +426,7 @@ class TestTrain:
             np.testing.assert_allclose(lhs, rhs, rtol=1e-5, atol=1e-5)
 
     def test_gradient_accumulation_counts_optimizer_steps(self):
-        config = MixerConfig(n_vocab=100, n_hidden=32, n_seq=10, n_layers=1, n_out=1)
+        config = TransformerConfig(n_vocab=100, n_hidden=32, n_seq=10, n_layers=1, n_heads=2, n_out=1)
         batch = (
             jnp.ones((8, 10), dtype=jnp.int32),
             jnp.array([0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0], dtype=jnp.float32),
@@ -456,7 +456,7 @@ class TestTrain:
         assert test_iter.count == 2
 
     def test_gradient_accumulation_returns_device_scalar_loss(self):
-        config = MixerConfig(n_vocab=100, n_hidden=32, n_seq=10, n_layers=1, n_out=1)
+        config = TransformerConfig(n_vocab=100, n_hidden=32, n_seq=10, n_layers=1, n_heads=2, n_out=1)
         rngs = nnx.Rngs(42)
         model = config.to_model(rngs=rngs)
         optimizer = create_optimizer(model, lr=1e-3)
@@ -476,7 +476,7 @@ class TestTrain:
         assert loss_val.shape == ()
 
     def test_gradient_accumulation_rejects_invalid_steps(self):
-        config = MixerConfig(n_vocab=100, n_hidden=32, n_seq=10, n_layers=1, n_out=1)
+        config = TransformerConfig(n_vocab=100, n_hidden=32, n_seq=10, n_layers=1, n_heads=2, n_out=1)
         x = jnp.ones((8, 10), dtype=jnp.int32)
         y = jnp.array([0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0])
 
@@ -491,7 +491,7 @@ class TestTrain:
             )
 
     def test_wandb_disabled_does_not_import_module(self, monkeypatch, tmp_path):
-        config = MixerConfig(n_vocab=100, n_hidden=32, n_seq=10, n_layers=1, n_out=1)
+        config = TransformerConfig(n_vocab=100, n_hidden=32, n_seq=10, n_layers=1, n_heads=2, n_out=1)
         x = jnp.ones((8, 10), dtype=jnp.int32)
         y = jnp.array([0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0])
 
@@ -520,7 +520,7 @@ class TestTrain:
         assert len(hist['train']) == 2
 
     def test_wandb_logs_train_test_and_summary_metrics(self, monkeypatch, tmp_path):
-        config = MixerConfig(n_vocab=100, n_hidden=32, n_seq=10, n_layers=1, n_out=1)
+        config = TransformerConfig(n_vocab=100, n_hidden=32, n_seq=10, n_layers=1, n_heads=2, n_out=1)
         x = jnp.ones((8, 10), dtype=jnp.int32)
         y = jnp.array([0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0])
         key_path = tmp_path / "wandb.txt"
@@ -634,7 +634,7 @@ class TestCase:
     """Tests for the Case dataclass."""
 
     def test_case_init(self):
-        config = MixerConfig(n_vocab=100, n_hidden=32, n_seq=10, n_layers=1)
+        config = TransformerConfig(n_vocab=100, n_hidden=32, n_seq=10, n_layers=1, n_heads=2)
         
         x = jnp.ones((8, 10), dtype=jnp.int32)
         y = jnp.array([0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0])
@@ -652,7 +652,7 @@ class TestCase:
         assert case.optimizer is None
 
     def test_case_run(self):
-        config = MixerConfig(n_vocab=100, n_hidden=32, n_seq=10, n_layers=1)
+        config = TransformerConfig(n_vocab=100, n_hidden=32, n_seq=10, n_layers=1, n_heads=2)
         
         x = jnp.ones((8, 10), dtype=jnp.int32)
         y = jnp.array([0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0])
@@ -671,7 +671,7 @@ class TestCase:
         assert case.hist is not None
 
     def test_case_eval(self):
-        config = MixerConfig(n_vocab=100, n_hidden=32, n_seq=10, n_layers=1)
+        config = TransformerConfig(n_vocab=100, n_hidden=32, n_seq=10, n_layers=1, n_heads=2)
         
         x = jnp.ones((8, 10), dtype=jnp.int32)
         y = jnp.array([0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0])

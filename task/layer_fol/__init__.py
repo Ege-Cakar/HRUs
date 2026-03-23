@@ -1,6 +1,6 @@
 """Facade exports for layered first-order logic task utilities."""
 
-from task.layer import AutoregressiveLogitsAdapter, CompletionLogitsAdapter
+from model.eval_adapters import AutoregressiveLogitsAdapter, CompletionLogitsAdapter
 
 from .common import (
     _build_tokenizer_for_fresh_icl,
