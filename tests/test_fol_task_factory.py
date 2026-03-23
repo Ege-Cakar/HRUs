@@ -8,6 +8,8 @@ import numpy as np
 import pytest
 
 from task.fol_task_factory import (
+    CurriculumTaskManager,
+    DepthCurriculum,
     FOLConditionDims,
     FOLTaskFactory,
     ICLConfig,
@@ -329,3 +331,93 @@ class TestPersistenceAndSummary:
         assert s["n_vocab"] == factory.n_vocab
         assert s["n_seq_internalized"] == factory.dims_internalized.n_seq_ar
         assert s["n_seq_icl"] == factory.dims_icl.n_seq_ar
+
+
+# ---------------------------------------------------------------------------
+# Depth curriculum
+# ---------------------------------------------------------------------------
+
+class TestDepthCurriculum:
+    def test_linear_schedule(self):
+        c = DepthCurriculum.linear(d_start=1, d_max=4, steps_per_depth=100)
+        assert c.max_depth(0) == 1
+        assert c.max_depth(99) == 1
+        assert c.max_depth(100) == 2
+        assert c.max_depth(200) == 3
+        assert c.max_depth(300) == 4
+        assert c.max_depth(9999) == 4  # stays at max
+
+    def test_exponential_schedule(self):
+        c = DepthCurriculum.exponential(
+            d_start=1, d_max=4, steps_per_depth=100, growth_factor=2.0
+        )
+        assert c.max_depth(0) == 1
+        assert c.max_depth(100) == 2     # +100
+        assert c.max_depth(300) == 3     # +200
+        assert c.max_depth(700) == 4     # +400
+
+    def test_manual_schedule(self):
+        c = DepthCurriculum.manual([(0, 2), (500, 4), (2000, 8)])
+        assert c.max_depth(0) == 2
+        assert c.max_depth(499) == 2
+        assert c.max_depth(500) == 4
+        assert c.max_depth(1999) == 4
+        assert c.max_depth(2000) == 8
+
+    def test_to_dict(self):
+        c = DepthCurriculum.linear(d_start=1, d_max=3, steps_per_depth=50)
+        d = c.to_dict()
+        assert "phases" in d
+        assert len(d["phases"]) == 3
+        assert d["phases"][0] == {"start_step": 0, "d_max": 1}
+
+    def test_rejects_missing_step_zero(self):
+        import pytest
+        with pytest.raises(ValueError, match="step 0"):
+            DepthCurriculum.manual([(100, 2)])
+
+
+class TestCurriculumTaskManager:
+    def test_produces_batches_online(self):
+        factory = _small_factory()
+        curriculum = DepthCurriculum.linear(d_start=1, d_max=3, steps_per_depth=10)
+        manager = CurriculumTaskManager(
+            factory=factory,
+            curriculum=curriculum,
+            condition="internalized",
+            batch_size=2,
+        )
+        xs, ys = manager.next_batch(0)
+        assert xs.shape[0] == 2
+        assert manager.current_d_max == 1
+
+    def test_depth_increases_over_steps(self):
+        factory = _small_factory()
+        curriculum = DepthCurriculum.linear(d_start=1, d_max=3, steps_per_depth=10)
+        manager = CurriculumTaskManager(
+            factory=factory,
+            curriculum=curriculum,
+            condition="internalized",
+            batch_size=2,
+        )
+        manager.next_batch(0)
+        assert manager.current_d_max == 1
+        manager.next_batch(10)
+        assert manager.current_d_max == 2
+        manager.next_batch(20)
+        assert manager.current_d_max == 3
+        # Stays at 3
+        manager.next_batch(999)
+        assert manager.current_d_max == 3
+
+    def test_icl_condition(self):
+        factory = _small_factory()
+        curriculum = DepthCurriculum.linear(d_start=1, d_max=2, steps_per_depth=10)
+        manager = CurriculumTaskManager(
+            factory=factory,
+            curriculum=curriculum,
+            condition="icl",
+            batch_size=2,
+        )
+        xs, ys = manager.next_batch(0)
+        assert xs.shape[0] == 2

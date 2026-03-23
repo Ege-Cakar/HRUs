@@ -125,6 +125,271 @@ class FOLConditionDims:
 
 
 # ---------------------------------------------------------------------------
+# Depth curriculum
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class DepthCurriculumPhase:
+    """A single phase of the depth curriculum."""
+
+    start_step: int
+    d_max: int
+
+
+class DepthCurriculum:
+    """Depth curriculum that increases max derivation depth over training.
+
+    Supports three scheduling modes:
+
+    - **linear**: ``d_max`` increases by 1 every ``steps_per_depth`` steps.
+    - **exponential**: ``d_max`` increases by 1 at exponentially growing
+      intervals (``steps_per_depth * growth_factor^k`` for the k-th increase).
+    - **manual**: Explicit list of ``(start_step, d_max)`` phases.
+
+    Usage::
+
+        # Linear: start at D=1, add 1 depth every 5000 steps, cap at D=8
+        curriculum = DepthCurriculum.linear(
+            d_start=1, d_max=8, steps_per_depth=5000,
+        )
+
+        # In training loop:
+        current_d = curriculum.max_depth(step)
+        if current_d != prev_d:
+            task = factory.make_internalized_task(distance_range=(1, current_d))
+
+    Parameters
+    ----------
+    phases : list[DepthCurriculumPhase]
+        Ordered list of phases. Each phase specifies the training step at
+        which it begins and the max depth for that phase.
+    """
+
+    def __init__(self, phases: list[DepthCurriculumPhase]) -> None:
+        if not phases:
+            raise ValueError("Curriculum must have at least one phase.")
+        self.phases = sorted(phases, key=lambda p: p.start_step)
+        if self.phases[0].start_step != 0:
+            raise ValueError("First phase must start at step 0.")
+
+    def max_depth(self, step: int) -> int:
+        """Return the max derivation depth for the given training step."""
+        result = self.phases[0].d_max
+        for phase in self.phases:
+            if step >= phase.start_step:
+                result = phase.d_max
+            else:
+                break
+        return result
+
+    def phase_boundaries(self) -> list[tuple[int, int]]:
+        """Return ``[(start_step, d_max), ...]`` for all phases."""
+        return [(p.start_step, p.d_max) for p in self.phases]
+
+    @classmethod
+    def linear(
+        cls,
+        *,
+        d_start: int = 1,
+        d_max: int,
+        steps_per_depth: int,
+    ) -> "DepthCurriculum":
+        """Create a linear curriculum: add 1 depth every ``steps_per_depth`` steps.
+
+        Parameters
+        ----------
+        d_start : int
+            Starting max depth (default 1).
+        d_max : int
+            Final max depth.
+        steps_per_depth : int
+            Training steps before increasing depth by 1.
+        """
+        phases = []
+        for d in range(d_start, d_max + 1):
+            start_step = (d - d_start) * steps_per_depth
+            phases.append(DepthCurriculumPhase(start_step=start_step, d_max=d))
+        return cls(phases)
+
+    @classmethod
+    def exponential(
+        cls,
+        *,
+        d_start: int = 1,
+        d_max: int,
+        steps_per_depth: int,
+        growth_factor: float = 2.0,
+    ) -> "DepthCurriculum":
+        """Create an exponential curriculum: intervals grow by ``growth_factor``.
+
+        The k-th depth increase happens after
+        ``steps_per_depth * growth_factor^k`` steps from the previous increase.
+
+        Parameters
+        ----------
+        d_start : int
+            Starting max depth.
+        d_max : int
+            Final max depth.
+        steps_per_depth : int
+            Steps for the first depth increase.
+        growth_factor : float
+            Multiplicative factor for subsequent intervals.
+        """
+        phases = []
+        cumulative = 0
+        for k, d in enumerate(range(d_start, d_max + 1)):
+            phases.append(DepthCurriculumPhase(start_step=int(cumulative), d_max=d))
+            cumulative += steps_per_depth * (growth_factor ** k)
+        return cls(phases)
+
+    @classmethod
+    def manual(
+        cls,
+        phases: list[tuple[int, int]],
+    ) -> "DepthCurriculum":
+        """Create a curriculum from explicit ``(start_step, d_max)`` pairs.
+
+        Parameters
+        ----------
+        phases : list[tuple[int, int]]
+            List of ``(start_step, d_max)`` pairs. Must include step 0.
+        """
+        return cls([
+            DepthCurriculumPhase(start_step=int(s), d_max=int(d))
+            for s, d in phases
+        ])
+
+    def to_dict(self) -> dict:
+        """Serialize for W&B / JSON logging."""
+        return {
+            "phases": [
+                {"start_step": p.start_step, "d_max": p.d_max}
+                for p in self.phases
+            ],
+        }
+
+    def __repr__(self) -> str:
+        phase_strs = [f"step {p.start_step}: D≤{p.d_max}" for p in self.phases]
+        return f"DepthCurriculum([{', '.join(phase_strs)}])"
+
+
+class CurriculumTaskManager:
+    """Manages task lifecycle under a depth curriculum.
+
+    Wraps a factory + curriculum + offline ``ds_path``. On each call to
+    ``step()``, checks whether the current max depth has changed. If so,
+    closes the old task and creates a new one with the updated distance
+    range — pointing at the **same** pre-generated offline shards (which
+    contain all depths up to ``d_eval_max``).
+
+    Usage::
+
+        curriculum = DepthCurriculum.linear(d_start=1, d_max=8, steps_per_depth=5000)
+        manager = CurriculumTaskManager(
+            factory=factory,
+            curriculum=curriculum,
+            condition="internalized",       # or "icl", "hybrid_icl"
+            ds_path="data/fol_seed42/internalized",
+            batch_size=64,
+        )
+
+        for step in range(total_steps):
+            xs, ys = manager.next_batch(step)
+            # ... train ...
+
+    Parameters
+    ----------
+    factory : FOLTaskFactory
+        The task factory (provides rule bank, tokenizer, dims).
+    curriculum : DepthCurriculum
+        Depth schedule mapping step → max depth.
+    condition : str
+        Task condition: ``"internalized"``, ``"icl"``, or
+        ``"hybrid_icl"`` (with ``eval_mode`` kwarg).
+    ds_path : str | Path | None
+        Path to offline shards. If None, uses online mode.
+    batch_size : int
+        Batch size for the task iterator.
+    **task_kwargs
+        Additional kwargs passed to the factory's ``make_*_task()`` method
+        (e.g. ``icl_config``, ``eval_mode``, ``hybrid_config``).
+    """
+
+    def __init__(
+        self,
+        *,
+        factory: "FOLTaskFactory",
+        curriculum: DepthCurriculum,
+        condition: str = "internalized",
+        ds_path: str | Path | None = None,
+        batch_size: int = 64,
+        **task_kwargs: Any,
+    ) -> None:
+        self.factory = factory
+        self.curriculum = curriculum
+        self.condition = str(condition)
+        self.ds_path = ds_path
+        self.batch_size = int(batch_size)
+        self.task_kwargs = task_kwargs
+
+        self._current_d_max: int | None = None
+        self._task: Any = None  # FOLLayerTask or HybridICLTask
+
+    @property
+    def current_d_max(self) -> int | None:
+        """The current maximum depth, or None if no step has been taken."""
+        return self._current_d_max
+
+    def next_batch(self, step: int) -> tuple[np.ndarray, np.ndarray]:
+        """Get the next batch for the given training step.
+
+        Rebuilds the task if the curriculum's max depth has changed.
+        """
+        d_max = self.curriculum.max_depth(step)
+        if d_max != self._current_d_max:
+            self._rebuild_task(d_max)
+        return next(self._task)
+
+    def _rebuild_task(self, d_max: int) -> None:
+        """Close the current task and create a new one with updated depth."""
+        if self._task is not None and hasattr(self._task, "close"):
+            self._task.close()
+
+        mode = "offline" if self.ds_path is not None else "online"
+        common = dict(
+            batch_size=self.batch_size,
+            distance_range=(1, d_max),
+            mode=mode,
+            ds_path=self.ds_path,
+        )
+        common.update(self.task_kwargs)
+
+        if self.condition == "internalized":
+            self._task = self.factory.make_internalized_task(**common)
+        elif self.condition == "icl":
+            self._task = self.factory.make_icl_task(**common)
+        elif self.condition.startswith("hybrid_icl"):
+            self._task = self.factory.make_hybrid_icl_task(**common)
+        else:
+            raise ValueError(f"Unknown condition: {self.condition!r}")
+
+        self._current_d_max = d_max
+
+    def close(self) -> None:
+        """Close the current task and release resources."""
+        if self._task is not None and hasattr(self._task, "close"):
+            self._task.close()
+            self._task = None
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
+
+
+# ---------------------------------------------------------------------------
 # Factory
 # ---------------------------------------------------------------------------
 

@@ -92,7 +92,7 @@ Facts flow naturally between fresh and internalized transitions because standard
 
 | File | Change |
 |------|--------|
-| `task/fol_task_factory.py` | Added `HybridICLConfig`, `HybridICLTask` iterator, `make_hybrid_icl_task()`, `make_hybrid_icl_eval_tasks()`, `from_rule_bank_path()`, mode/ds_path params |
+| `task/fol_task_factory.py` | Added `HybridICLConfig`, `HybridICLTask` iterator, `make_hybrid_icl_task()`, `make_hybrid_icl_eval_tasks()`, `from_rule_bank_path()`, mode/ds_path params, `DepthCurriculum` (linear/exponential/manual), `CurriculumTaskManager` |
 | `task/layer_gen/util/fol_rule_bank/__init__.py` | Export hybrid ICL types |
 | `task/layer_fol/__init__.py` | Fixed broken import (eval_adapters) |
 | `tests/test_fol_task_factory.py` | Added `test_from_rule_bank_path`, fixed tokenizer test |
@@ -147,12 +147,60 @@ data/fol_seed42/
 
 ```
 194 passed in 9.57s (0 failures, 0 regressions)
-  - test_fol_task_factory.py:     24 tests
+  - test_fol_task_factory.py:     32 tests (incl. curriculum)
   - test_hybrid_icl.py:           21 tests
   - test_layer_fol_task.py:       56 tests
   - test_fol_rule_bank.py:        19 tests
   - test_layer_fol_eval.py:       74 tests
 ```
+
+## Depth Curriculum
+
+Added `DepthCurriculum` and `CurriculumTaskManager` to support training with progressively increasing derivation depth. This is motivated by both the recursive transformer literature (Huginn, Ouro use curriculum over recurrence count) and the length generalization evaluation design: train on depths 1..D, evaluate on depths 1..2D.
+
+### Three scheduling modes
+
+**Linear**: Depth increases by 1 every `steps_per_depth` steps.
+```python
+curriculum = DepthCurriculum.linear(d_start=1, d_max=8, steps_per_depth=5000)
+# step 0: D≤1, step 5000: D≤2, ..., step 35000: D≤8
+```
+
+**Exponential**: Intervals grow geometrically — spend more time at higher depths.
+```python
+curriculum = DepthCurriculum.exponential(d_start=1, d_max=8, steps_per_depth=1000, growth_factor=2.0)
+# step 0: D≤1, step 1000: D≤2, step 3000: D≤3, step 7000: D≤4, ...
+```
+
+**Manual**: Explicit phase boundaries for full control.
+```python
+curriculum = DepthCurriculum.manual([(0, 1), (5000, 3), (20000, 6), (50000, 8)])
+```
+
+### CurriculumTaskManager
+
+Wraps a factory + curriculum + pre-generated offline shards. At each training step, checks if the max depth has changed. If so, rebuilds the task with the new `distance_range` pointing at the **same `ds_path`** (which contains shards for all depths up to `d_eval_max`). No data regeneration needed — the curriculum just controls which depth range is sampled from.
+
+```python
+manager = CurriculumTaskManager(
+    factory=factory,
+    curriculum=DepthCurriculum.linear(d_start=1, d_max=8, steps_per_depth=5000),
+    condition="internalized",
+    ds_path="data/fol_seed42/internalized",
+    batch_size=64,
+)
+for step in range(total_steps):
+    xs, ys = manager.next_batch(step)
+    # depth range automatically expands at phase boundaries
+```
+
+### Length generalization evaluation
+
+The evaluation design follows directly from the curriculum:
+- **In-distribution**: Eval at depths 1..D (same range as final training phase).
+- **Length generalization**: Eval at depths D+1..2D (beyond training). Recursive models should degrade gracefully here because they can iterate the core extra times. Standard models should collapse because they have no mechanism to extend computation.
+
+The per-depth eval tasks (`factory.make_internalized_eval_tasks(depths=range(1, 2*D+1))`) are already generated for all depths up to `d_eval_max` in the offline shards.
 
 ## Key Design Decisions
 
