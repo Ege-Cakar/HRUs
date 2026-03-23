@@ -37,6 +37,18 @@ from ._sampling import (
     sample_fol_problem,
 )
 
+from ._hybrid_icl import (
+    HybridICLBank,
+    build_hybrid_icl_bank,
+    load_hybrid_icl_bank,
+    save_hybrid_icl_bank,
+)
+
+from ._hybrid_icl_sampling import (
+    HybridICLSampledProblem,
+    sample_hybrid_icl_problem,
+)
+
 __all__ = [
     # Data classes
     "FOLAtom",
@@ -62,6 +74,13 @@ __all__ = [
     "load_fol_depth3_icl_split_bundle",
     # Sampling
     "sample_fol_problem",
+    # Hybrid ICL
+    "HybridICLBank",
+    "HybridICLSampledProblem",
+    "build_hybrid_icl_bank",
+    "save_hybrid_icl_bank",
+    "load_hybrid_icl_bank",
+    "sample_hybrid_icl_problem",
     # Private re-exports (used externally)
     "_normalize_count_spec",
     "_FRESH_PREDICATE_CHARSET",

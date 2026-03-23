@@ -33,14 +33,26 @@ from typing import Any
 
 import numpy as np
 
-from task.layer_fol.common import compute_fol_dims
+from task.layer_fol.common import compute_fol_dims, _build_tokenizer_for_fresh_icl
 from task.layer_fol.task import FOLLayerTask
 from task.layer_gen.util import tokenize_layer_fol
 from task.layer_gen.util.fol_rule_bank import (
     FOLRuleBank,
+    HybridICLBank,
+    HybridICLSampledProblem,
+    build_hybrid_icl_bank,
     build_random_fol_rule_bank,
     load_fol_rule_bank,
+    sample_hybrid_icl_problem,
     save_fol_rule_bank,
+    save_hybrid_icl_bank,
+    FOLSequent,
+)
+from task.layer_gen.util.fol_completion import sampled_completion_texts
+from task.layer_fol.demos._core import (
+    augment_prompt_with_demos,
+    _prepend_demo_statements_to_prompt,
+    _instantiate_demo_schema_with_random_constants,
 )
 
 
@@ -77,6 +89,26 @@ class ICLConfig:
     demo_ranked: bool = True
     demo_ranking_beta: float = float("inf")
     demo_all: bool = False
+    demo_unique: bool = True
+    include_oracle: bool = False
+
+
+@dataclass(frozen=True)
+class HybridICLConfig:
+    """Parameters for the hybrid ICL condition."""
+
+    fresh_predicates_per_layer: int = 8
+    fresh_rules_per_transition: int = 8
+    pred_train_frac: float = 0.5
+    p_fresh: float = 0.5
+    predicate_name_len: int = 4
+    # Demo distribution for the in-context demonstrations.
+    max_n_demos: int = 16
+    min_n_demos: int = 1
+    demo_distribution: str = "zipf_per_rule"
+    demo_distribution_alpha: float = 1.0
+    demo_ranked: bool = True
+    demo_ranking_beta: float = float("inf")
     demo_unique: bool = True
     include_oracle: bool = False
 
@@ -438,6 +470,124 @@ class FOLTaskFactory:
             )
         return tasks
 
+    # -- Hybrid ICL condition -----------------------------------------------
+
+    def _get_or_build_hybrid_bank(
+        self,
+        hybrid_config: HybridICLConfig | None = None,
+    ) -> HybridICLBank:
+        """Build a HybridICLBank from the base bank."""
+        if hybrid_config is None:
+            hybrid_config = HybridICLConfig()
+        return build_hybrid_icl_bank(
+            base_bank=self._rule_bank,
+            fresh_predicates_per_layer=hybrid_config.fresh_predicates_per_layer,
+            fresh_rules_per_transition=hybrid_config.fresh_rules_per_transition,
+            pred_train_frac=hybrid_config.pred_train_frac,
+            p_fresh=hybrid_config.p_fresh,
+            predicate_name_len=hybrid_config.predicate_name_len,
+            rng=np.random.default_rng(self.rule_bank_seed + 5000),
+        )
+
+    def make_hybrid_icl_task(
+        self,
+        *,
+        batch_size: int = 64,
+        distance_range: tuple[int, int] | None = None,
+        eval_mode: str = "train",
+        hybrid_config: HybridICLConfig | None = None,
+        hybrid_bank: HybridICLBank | None = None,
+        seed: int | None = None,
+        **overrides: Any,
+    ) -> "HybridICLTask":
+        """Create a hybrid ICL task (internalized + in-context rules).
+
+        Parameters
+        ----------
+        batch_size : int
+            Batch size for the task iterator.
+        distance_range : tuple[int, int] | None
+            ``(min_depth, max_depth)`` for sampling. Defaults to
+            ``(1, d_train_max)``.
+        eval_mode : str
+            ``"train"``, ``"rule_gen"``, or ``"pred_gen"``.
+        hybrid_config : HybridICLConfig | None
+            Config for hybrid bank construction. Defaults to
+            ``HybridICLConfig()``.
+        hybrid_bank : HybridICLBank | None
+            Pre-built hybrid bank. If provided, ``hybrid_config`` is
+            ignored for bank construction (but still used for demo params).
+        seed : int | None
+            RNG seed. Defaults to ``rule_bank_seed + 3``.
+        """
+        if hybrid_config is None:
+            hybrid_config = HybridICLConfig()
+        if distance_range is None:
+            distance_range = (1, self.d_train_max)
+        if seed is None:
+            seed = self.rule_bank_seed + 3
+        if hybrid_bank is None:
+            hybrid_bank = self._get_or_build_hybrid_bank(hybrid_config)
+
+        # Build an extended tokenizer that covers fresh predicate chars.
+        hybrid_tokenizer = _build_tokenizer_for_fresh_icl(
+            base_bank=self._rule_bank,
+            predicate_name_len=hybrid_config.predicate_name_len,
+        )
+
+        return HybridICLTask(
+            hybrid_bank=hybrid_bank,
+            tokenizer=hybrid_tokenizer,
+            batch_size=batch_size,
+            distance_range=distance_range,
+            eval_mode=eval_mode,
+            seed=seed,
+            initial_ant_max=self.bank_config.initial_ant_max,
+            sample_max_attempts=self.sample_max_attempts,
+            max_unify_solutions=self.max_unify_solutions,
+            max_n_demos=hybrid_config.max_n_demos,
+            min_n_demos=hybrid_config.min_n_demos,
+            demo_distribution=hybrid_config.demo_distribution,
+            demo_distribution_alpha=hybrid_config.demo_distribution_alpha,
+            demo_ranked=hybrid_config.demo_ranked,
+            demo_ranking_beta=hybrid_config.demo_ranking_beta,
+            demo_unique=hybrid_config.demo_unique,
+            include_oracle=hybrid_config.include_oracle,
+            completion_format=self.icl_completion_format,
+        )
+
+    def make_hybrid_icl_eval_tasks(
+        self,
+        *,
+        batch_size: int = 64,
+        depths: list[int] | None = None,
+        eval_mode: str = "train",
+        hybrid_config: HybridICLConfig | None = None,
+        hybrid_bank: HybridICLBank | None = None,
+        **overrides: Any,
+    ) -> dict[int, "HybridICLTask"]:
+        """Create per-depth eval tasks for the hybrid ICL condition."""
+        if depths is None:
+            depths = list(range(1, self.d_eval_max + 1))
+        if hybrid_config is None:
+            hybrid_config = HybridICLConfig()
+        if hybrid_bank is None:
+            hybrid_bank = self._get_or_build_hybrid_bank(hybrid_config)
+
+        tasks: dict[int, HybridICLTask] = {}
+        for d in depths:
+            eval_seed = self.rule_bank_seed + 3000 + d
+            tasks[d] = self.make_hybrid_icl_task(
+                batch_size=batch_size,
+                distance_range=(d, d),
+                eval_mode=eval_mode,
+                hybrid_config=hybrid_config,
+                hybrid_bank=hybrid_bank,
+                seed=eval_seed,
+                **overrides,
+            )
+        return tasks
+
     # -- Persistence --------------------------------------------------------
 
     def save_rule_bank(self, path: str | Path) -> Path:
@@ -546,6 +696,189 @@ class FOLTaskFactory:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Hybrid ICL task iterator
+# ---------------------------------------------------------------------------
+
+class HybridICLTask:
+    """Online iterator for hybrid ICL problems (internalized + fresh rules).
+
+    Each ``next()`` call samples a batch of hybrid ICL problems, tokenizes
+    them with fresh-rule demos prepended, and returns ``(xs, ys)`` arrays.
+
+    This is a standalone iterator (not a ``FOLLayerTask``) because the
+    sampling logic is fundamentally different — it mixes two rule pools
+    per-transition rather than using a single bank.
+    """
+
+    def __init__(
+        self,
+        *,
+        hybrid_bank: HybridICLBank,
+        tokenizer: tokenize_layer_fol.FOLLayerTokenizer,
+        batch_size: int,
+        distance_range: tuple[int, int],
+        eval_mode: str,
+        seed: int,
+        initial_ant_max: int,
+        sample_max_attempts: int,
+        max_unify_solutions: int,
+        max_n_demos: int,
+        min_n_demos: int,
+        demo_distribution: str,
+        demo_distribution_alpha: float,
+        demo_ranked: bool,
+        demo_ranking_beta: float,
+        demo_unique: bool,
+        include_oracle: bool,
+        completion_format: str,
+    ) -> None:
+        self.hybrid_bank = hybrid_bank
+        self.tokenizer = tokenizer
+        self.batch_size = int(batch_size)
+        self.eval_mode = str(eval_mode)
+        self.initial_ant_max = int(initial_ant_max)
+        self.sample_max_attempts = int(sample_max_attempts)
+        self.max_unify_solutions = int(max_unify_solutions)
+        self.max_n_demos = int(max_n_demos)
+        self.min_n_demos = int(min_n_demos)
+        self.demo_distribution = str(demo_distribution)
+        self.demo_distribution_alpha = float(demo_distribution_alpha)
+        self.demo_ranked = bool(demo_ranked)
+        self.demo_ranking_beta = float(demo_ranking_beta)
+        self.demo_unique = bool(demo_unique)
+        self.include_oracle = bool(include_oracle)
+        self.completion_format = str(completion_format)
+
+        # Parse distance range.
+        if isinstance(distance_range, (list, tuple)) and len(distance_range) == 2:
+            self._distances = list(range(int(distance_range[0]), int(distance_range[1]) + 1))
+        else:
+            self._distances = [int(d) for d in distance_range]
+
+        self._rng = np.random.default_rng(seed)
+
+    def __iter__(self):
+        return self
+
+    def __next__(self) -> tuple[np.ndarray, np.ndarray]:
+        import numpy as np
+
+        records = []
+        for _ in range(self.batch_size):
+            record = self._sample_one()
+            records.append(record)
+
+        # Batch: pad to max length in batch.
+        max_len = max(
+            len(r["prompt"]) + len(r["completion"]) - 1
+            for r in records
+        )
+
+        xs = np.zeros((self.batch_size, max_len), dtype=np.int32)
+        ys = np.zeros((self.batch_size, max_len), dtype=np.int32)
+
+        for i, r in enumerate(records):
+            prompt = r["prompt"]
+            completion = r["completion"]
+            seq_len = len(prompt) + len(completion) - 1
+            # AR format: xs = prompt + completion[:-1], ys = prompt[1:] + completion
+            # But the standard convention is:
+            # xs[prompt_len-1:prompt_len-1+comp_len] = completion tokens
+            # ys shifts by 1
+            full_seq = list(prompt) + list(completion)
+            # xs = full_seq[:-1], ys = full_seq[1:]
+            xs_seq = full_seq[:-1]
+            ys_seq = full_seq[1:]
+            xs[i, :len(xs_seq)] = xs_seq
+            ys[i, :len(ys_seq)] = ys_seq
+
+        return xs, ys
+
+    def _sample_one(self) -> dict:
+        """Sample one hybrid ICL problem and tokenize it."""
+        distance = int(self._rng.choice(self._distances))
+
+        problem = sample_hybrid_icl_problem(
+            hybrid_bank=self.hybrid_bank,
+            distance=distance,
+            eval_mode=self.eval_mode,
+            initial_ant_max=self.initial_ant_max,
+            rng=self._rng,
+            max_attempts=self.sample_max_attempts,
+            max_unify_solutions=self.max_unify_solutions,
+        )
+
+        # Pick a random step to predict.
+        step_idx = int(self._rng.integers(0, len(problem.step_rules)))
+        src_layer = problem.step_layers[step_idx]
+        ants = problem.step_ants[step_idx]
+        sequent = FOLSequent(ants=ants, cons=problem.goal_atom)
+
+        # Tokenize prompt and completion.
+        prompt = self.tokenizer.tokenize_prompt(sequent)
+        completion_texts = sampled_completion_texts(
+            sampled=problem.to_fol_sampled_problem(),
+            step_idx=step_idx,
+            completion_format=self.completion_format,
+        )
+        completion = self.tokenizer.encode_completion_texts(completion_texts)
+
+        # Build demo statements: fresh rules used + noise from base bank.
+        demo_statements: list[str] = []
+
+        # 1. Required fresh rule demos (instantiated with random constants).
+        for rule in problem.fresh_rules_used:
+            demo_statements.append(
+                _instantiate_demo_schema_with_random_constants(
+                    rule=rule,
+                    constants=self.hybrid_bank.base_bank.constants,
+                    rng=self._rng,
+                )
+            )
+
+        # 2. Additional noise demos from base bank via augment_prompt_with_demos.
+        remaining_demos = max(0, self.max_n_demos - len(demo_statements))
+        if remaining_demos > 0:
+            augmented = augment_prompt_with_demos(
+                prompt_tokens=prompt,
+                rule_bank=self.hybrid_bank.base_bank,
+                tokenizer=self.tokenizer,
+                rng=self._rng,
+                src_layer=int(src_layer),
+                ants=ants,
+                max_n_demos=remaining_demos,
+                min_n_demos=0,
+                max_unify_solutions=self.max_unify_solutions,
+                include_oracle=False,
+                demo_distribution=self.demo_distribution,
+                demo_distribution_alpha=self.demo_distribution_alpha,
+                goal_atom=problem.goal_atom,
+                demo_ranked=self.demo_ranked,
+                demo_ranking_beta=self.demo_ranking_beta,
+                demo_unique=self.demo_unique,
+            )
+            # Extract the noise demo statements from the augmented prompt.
+            for inst_text in augmented.demo_instances:
+                demo_statements.append(str(inst_text))
+
+        # Prepend all demos to the prompt.
+        if demo_statements:
+            prompt = _prepend_demo_statements_to_prompt(
+                prompt_tokens=prompt,
+                demo_statements=demo_statements,
+                tokenizer=self.tokenizer,
+            )
+
+        return {
+            "prompt": prompt,
+            "completion": completion,
+            "distance": distance,
+            "transition_sources": problem.transition_sources,
+            "n_fresh_rules": len(problem.fresh_rules_used),
+        }
+
 
 def _dict_to_dims(d: dict[str, int]) -> FOLConditionDims:
     return FOLConditionDims(

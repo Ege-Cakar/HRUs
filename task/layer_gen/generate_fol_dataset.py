@@ -61,7 +61,19 @@ from task.layer_gen.util.fol_rule_bank import (
     save_fol_rule_bank,
 )
 from task.layer_gen.util import tokenize_layer_fol
-from task.layer_fol.demos._core import augment_prompt_with_demos
+from task.layer_fol.demos._core import (
+    augment_prompt_with_demos,
+    _prepend_demo_statements_to_prompt,
+    _instantiate_demo_schema_with_random_constants,
+)
+from task.layer_gen.util.fol_rule_bank import (
+    HybridICLBank,
+    build_hybrid_icl_bank,
+    sample_hybrid_icl_problem,
+    save_hybrid_icl_bank,
+)
+# Re-import FOLSequent explicitly (already via generate_layer_fol but cleaner).
+from task.layer_gen.util.fol_completion import sampled_completion_texts as _sampled_completion_texts
 
 
 # ── Argument parsing ─────────────────────────────────────────────────────────
@@ -79,7 +91,7 @@ def _parse_args() -> argparse.Namespace:
         "--conditions",
         type=str,
         default="internalized,icl",
-        help="Comma-separated list of conditions to generate (internalized, icl).",
+        help="Comma-separated list: internalized, icl, hybrid_icl_train, hybrid_icl_rule_gen, hybrid_icl_pred_gen.",
     )
 
     # Rule bank
@@ -118,6 +130,13 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--demo-unique", action="store_true", default=True)
     p.add_argument("--include-oracle", action="store_true", default=False)
 
+    # Hybrid ICL-specific
+    p.add_argument("--fresh-predicates-per-layer", type=int, default=8)
+    p.add_argument("--fresh-rules-per-transition", type=int, default=8)
+    p.add_argument("--pred-train-frac", type=float, default=0.5)
+    p.add_argument("--p-fresh", type=float, default=0.5)
+    p.add_argument("--fresh-predicate-name-len", type=int, default=4)
+
     # Writer
     p.add_argument(
         "--arrayrecord-options",
@@ -132,11 +151,19 @@ def _parse_constants(raw: str) -> tuple[str, ...]:
     return tuple(tok.strip() for tok in str(raw).split(",") if tok.strip())
 
 
+_VALID_CONDITIONS = {
+    "internalized", "icl",
+    "hybrid_icl_train", "hybrid_icl_rule_gen", "hybrid_icl_pred_gen",
+}
+
+
 def _parse_conditions(raw: str) -> list[str]:
     conditions = [c.strip() for c in raw.split(",") if c.strip()]
     for c in conditions:
-        if c not in ("internalized", "icl"):
-            raise ValueError(f"Unknown condition: {c!r}. Must be 'internalized' or 'icl'.")
+        if c not in _VALID_CONDITIONS:
+            raise ValueError(
+                f"Unknown condition: {c!r}. Must be one of {sorted(_VALID_CONDITIONS)}."
+            )
     return conditions
 
 
@@ -340,6 +367,151 @@ def _generate_icl_distance(
     )
 
 
+# ── Hybrid ICL generation ─────────────────────────────────────────────────────
+
+def _generate_hybrid_icl_distance(
+    *,
+    out_dir: str,
+    distance: int,
+    examples_per_distance: int,
+    examples_per_shard: int,
+    writer_options: str,
+    initial_ant_max: int,
+    sample_max_attempts: int,
+    max_unify_solutions: int,
+    seed: int,
+    hybrid_bank_payload: dict,
+    bank_payload: dict,
+    completion_format: str,
+    eval_mode: str,
+    # Demo params
+    max_n_demos: int,
+    min_n_demos: int,
+    demo_distribution: str,
+    demo_distribution_alpha: float,
+    demo_ranked: bool,
+    demo_ranking_beta: float | None,
+    demo_unique: bool,
+    fresh_predicate_name_len: int,
+) -> _DistanceResult:
+    """Generate shards for one distance — hybrid ICL condition."""
+    from task.layer_fol.common import _build_tokenizer_for_fresh_icl
+
+    rng = np.random.default_rng(seed)
+    hybrid_bank = HybridICLBank.from_dict(hybrid_bank_payload)
+    base_bank = FOLRuleBank.from_dict(bank_payload)
+    tokenizer = _build_tokenizer_for_fresh_icl(
+        base_bank=base_bank,
+        predicate_name_len=fresh_predicate_name_len,
+    )
+    writer = ArrayRecordShardWriter(
+        out_dir=Path(out_dir) / f"distance_{distance:03d}",
+        examples_per_shard=examples_per_shard,
+        writer_options=writer_options,
+    )
+    stats = _AutoregStats()
+    examples = 0
+
+    try:
+        for _ in range(examples_per_distance):
+            problem = sample_hybrid_icl_problem(
+                hybrid_bank=hybrid_bank,
+                distance=distance,
+                eval_mode=eval_mode,
+                initial_ant_max=initial_ant_max,
+                rng=rng,
+                max_attempts=sample_max_attempts,
+                max_unify_solutions=max_unify_solutions,
+            )
+
+            # Pick a random step.
+            step_idx = int(rng.integers(0, len(problem.step_rules)))
+            src_layer = problem.step_layers[step_idx]
+            ants = problem.step_ants[step_idx]
+            sequent = FOLSequent(ants=ants, cons=problem.goal_atom)
+
+            prompt = tokenizer.tokenize_prompt(sequent)
+            fol_problem = problem.to_fol_sampled_problem()
+            completion_texts = _sampled_completion_texts(
+                sampled=fol_problem,
+                step_idx=step_idx,
+                completion_format=completion_format,
+            )
+            completion = tokenizer.encode_completion_texts(completion_texts)
+
+            # Build demos: required fresh rules + noise.
+            demo_statements = []
+            for rule in problem.fresh_rules_used:
+                demo_statements.append(
+                    _instantiate_demo_schema_with_random_constants(
+                        rule=rule,
+                        constants=hybrid_bank.base_bank.constants,
+                        rng=rng,
+                    )
+                )
+            remaining = max(0, max_n_demos - len(demo_statements))
+            if remaining > 0:
+                augmented = augment_prompt_with_demos(
+                    prompt_tokens=prompt,
+                    rule_bank=hybrid_bank.base_bank,
+                    tokenizer=tokenizer,
+                    rng=rng,
+                    src_layer=int(src_layer),
+                    ants=ants,
+                    max_n_demos=remaining,
+                    min_n_demos=0,
+                    max_unify_solutions=max_unify_solutions,
+                    include_oracle=False,
+                    demo_distribution=demo_distribution,
+                    demo_distribution_alpha=demo_distribution_alpha,
+                    goal_atom=problem.goal_atom,
+                    demo_ranked=demo_ranked,
+                    demo_ranking_beta=demo_ranking_beta,
+                    demo_unique=demo_unique,
+                )
+                for inst_text in augmented.demo_instances:
+                    demo_statements.append(str(inst_text))
+
+            if demo_statements:
+                prompt = _prepend_demo_statements_to_prompt(
+                    prompt_tokens=prompt,
+                    demo_statements=demo_statements,
+                    tokenizer=tokenizer,
+                )
+
+            payload = pickle.dumps(
+                {
+                    "condition": f"hybrid_icl_{eval_mode}",
+                    "distance": int(problem.distance),
+                    "start_layer": int(problem.start_layer),
+                    "src_layer": int(src_layer),
+                    "step_idx": int(step_idx),
+                    "goal_atom": problem.goal_atom.text,
+                    "prompt": np.asarray(prompt, dtype=np.int32),
+                    "completions": [np.asarray(completion, dtype=np.int32)],
+                    "statement_texts": list(completion_texts),
+                    "completion_format": str(completion_format),
+                    "transition_sources": list(problem.transition_sources),
+                    "n_fresh_rules": len(problem.fresh_rules_used),
+                    "demo_count": len(demo_statements),
+                },
+                protocol=5,
+            )
+            writer.write(payload)
+            _update_autoreg_stats(stats, prompt, completion)
+            examples += 1
+    finally:
+        writer.close()
+
+    return _DistanceResult(
+        distance=distance,
+        examples=examples,
+        records=writer.total_records,
+        shards=writer.shard_count,
+        stats=stats,
+    )
+
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 def _build_or_load_bank(args, rng) -> FOLRuleBank:
@@ -371,12 +543,19 @@ def _run_condition(
     bank_payload: dict,
     tokenizer: tokenize_layer_fol.FOLLayerTokenizer,
     max_workers: int,
+    hybrid_bank_payload: dict | None = None,
 ) -> dict[int, _DistanceResult]:
     """Generate all distances for one condition."""
     condition_dir = out_dir / condition
     condition_dir.mkdir(parents=True, exist_ok=True)
 
-    condition_salt = 0 if condition == "internalized" else 7_000_000
+    _condition_salts = {
+        "internalized": 0, "icl": 7_000_000,
+        "hybrid_icl_train": 10_000_000,
+        "hybrid_icl_rule_gen": 13_000_000,
+        "hybrid_icl_pred_gen": 16_000_000,
+    }
+    condition_salt = _condition_salts.get(condition, hash(condition) % 10_000_000)
     total = len(distances) * args.examples_per_distance
 
     # Choose executor.
@@ -417,7 +596,7 @@ def _run_condition(
                         _generate_internalized_distance,
                         **common_kwargs,
                     )
-                else:
+                elif condition == "icl":
                     future = pool.submit(
                         _generate_icl_distance,
                         **common_kwargs,
@@ -430,6 +609,24 @@ def _run_condition(
                         demo_unique=args.demo_unique,
                         include_oracle=args.include_oracle,
                     )
+                elif condition.startswith("hybrid_icl_"):
+                    eval_mode = condition.removeprefix("hybrid_icl_")
+                    future = pool.submit(
+                        _generate_hybrid_icl_distance,
+                        **common_kwargs,
+                        hybrid_bank_payload=hybrid_bank_payload,
+                        eval_mode=eval_mode,
+                        max_n_demos=args.max_n_demos,
+                        min_n_demos=args.min_n_demos,
+                        demo_distribution=args.demo_distribution,
+                        demo_distribution_alpha=args.demo_alpha,
+                        demo_ranked=args.demo_ranked,
+                        demo_ranking_beta=args.demo_ranking_beta,
+                        demo_unique=args.demo_unique,
+                        fresh_predicate_name_len=args.fresh_predicate_name_len,
+                    )
+                else:
+                    raise ValueError(f"Unknown condition: {condition!r}")
                 futures[future] = d
 
             for future in as_completed(futures):
@@ -447,7 +644,7 @@ def _run_condition(
         "arity_max": args.arity_max,
         "completion_format": args.completion_format,
     }
-    if condition == "icl":
+    if condition in ("icl",) or condition.startswith("hybrid_icl_"):
         config.update({
             "max_n_demos": args.max_n_demos,
             "min_n_demos": args.min_n_demos,
@@ -456,6 +653,14 @@ def _run_condition(
             "demo_ranked": args.demo_ranked,
             "demo_unique": args.demo_unique,
             "include_oracle": args.include_oracle,
+        })
+    if condition.startswith("hybrid_icl_"):
+        config.update({
+            "eval_mode": condition.removeprefix("hybrid_icl_"),
+            "fresh_predicates_per_layer": args.fresh_predicates_per_layer,
+            "fresh_rules_per_transition": args.fresh_rules_per_transition,
+            "p_fresh": args.p_fresh,
+            "pred_train_frac": args.pred_train_frac,
         })
 
     _write_metadata(
@@ -502,6 +707,32 @@ def main() -> None:
         min(args.workers, len(distances), os.cpu_count() or args.workers),
     )
 
+    # Build hybrid ICL bank if any hybrid conditions are requested.
+    hybrid_bank_payload = None
+    has_hybrid = any(c.startswith("hybrid_icl_") for c in conditions)
+    if has_hybrid:
+        from task.layer_fol.common import _build_tokenizer_for_fresh_icl
+
+        hybrid_bank = build_hybrid_icl_bank(
+            base_bank=bank,
+            fresh_predicates_per_layer=args.fresh_predicates_per_layer,
+            fresh_rules_per_transition=args.fresh_rules_per_transition,
+            pred_train_frac=args.pred_train_frac,
+            p_fresh=args.p_fresh,
+            predicate_name_len=args.fresh_predicate_name_len,
+            rng=np.random.default_rng(args.seed + 5000),
+        )
+        hybrid_bank_payload = hybrid_bank.to_dict()
+        # Save hybrid bank for reproducibility.
+        hybrid_path = args.out_dir / "hybrid_icl_bank.json"
+        save_hybrid_icl_bank(hybrid_path, hybrid_bank)
+        print(f"Hybrid ICL bank saved to {hybrid_path}")
+        # Use extended tokenizer for hybrid conditions.
+        tokenizer = _build_tokenizer_for_fresh_icl(
+            base_bank=bank,
+            predicate_name_len=args.fresh_predicate_name_len,
+        )
+
     for condition in conditions:
         print(f"\n{'='*60}")
         print(f"Generating condition: {condition}")
@@ -514,6 +745,7 @@ def main() -> None:
             bank_payload=bank_payload,
             tokenizer=tokenizer,
             max_workers=max_workers,
+            hybrid_bank_payload=hybrid_bank_payload,
         )
         total_records = sum(r.records for r in results.values())
         total_shards = sum(r.shards for r in results.values())
