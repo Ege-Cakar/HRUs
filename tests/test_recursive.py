@@ -5,7 +5,7 @@ import jax.numpy as jnp
 import pytest
 from flax import nnx
 
-from model.recursive import RecursiveArchConfig, RecursiveArchitecture
+from model.recursive import RecursiveArchConfig, RecursiveArchitecture, RecursiveOutput
 
 
 class TestRecursiveArchConfig:
@@ -231,6 +231,109 @@ class TestRecursiveFOLSmoke:
         early = sum(losses[:5]) / 5
         late = sum(losses[-5:]) / 5
         assert late < early, f"Loss did not decrease: {early:.4f} -> {late:.4f}"
+
+
+class TestACT:
+    """Tests for Adaptive Computation Time."""
+
+    def _make_act_config(self, T=3, core_block="attn", **kw):
+        defaults = dict(
+            n_vocab=50, n_seq=16, n_hidden=32, n_heads=4,
+            n_out=50, core_block=core_block, n_recurrences=T,
+            output_mode="full_sequence", pos_encoding="rope",
+            use_bf16=False, use_act=True, act_ponder_weight=0.01,
+        )
+        defaults.update(kw)
+        return RecursiveArchConfig(**defaults)
+
+    def test_act_forward(self):
+        config = self._make_act_config(T=3)
+        model = config.to_model(rngs=nnx.Rngs(42))
+        x = jnp.ones((2, 8), dtype=jnp.int32)
+        out = model(x)
+        assert out.shape == (2, 8, 50)
+
+    def test_act_return_aux(self):
+        config = self._make_act_config(T=3)
+        model = config.to_model(rngs=nnx.Rngs(42))
+        x = jnp.ones((2, 8), dtype=jnp.int32)
+        result = model(x, return_aux=True)
+
+        assert isinstance(result, RecursiveOutput)
+        assert result.logits.shape == (2, 8, 50)
+        assert len(result.per_iteration_logits) == 3
+        assert len(result.halt_probs) == 3
+        assert result.ponder_cost is not None
+        assert result.ponder_cost.shape == ()
+        assert result.n_iterations == 3
+
+    def test_act_halt_probs_valid(self):
+        config = self._make_act_config(T=3)
+        model = config.to_model(rngs=nnx.Rngs(42))
+        x = jnp.ones((2, 8), dtype=jnp.int32)
+        result = model(x, return_aux=True)
+
+        for hp in result.halt_probs:
+            assert hp.shape == (2, 8)
+            assert jnp.all(hp >= 0.0)
+            assert jnp.all(hp <= 1.0)
+
+    def test_act_ponder_cost_bounded(self):
+        """Ponder cost (expected iterations) should be in [1, T]."""
+        config = self._make_act_config(T=5)
+        model = config.to_model(rngs=nnx.Rngs(42))
+        x = jnp.ones((2, 8), dtype=jnp.int32)
+        result = model(x, return_aux=True)
+        assert float(result.ponder_cost) >= 1.0
+        assert float(result.ponder_cost) <= 5.0
+
+    def test_act_gradient_through_halt_gate(self):
+        """Gradients should flow through ACT output + ponder cost to halt gate."""
+        config = self._make_act_config(T=3)
+        model = config.to_model(rngs=nnx.Rngs(42))
+        x = jnp.ones((2, 8), dtype=jnp.int32)
+
+        def loss_fn(model):
+            result = model(x, return_aux=True)
+            task_loss = jnp.mean(
+                jax.vmap(jax.vmap(jax.nn.log_softmax))(result.logits)[:, :, 0]
+            )
+            return task_loss + config.act_ponder_weight * result.ponder_cost
+
+        loss, grads = nnx.value_and_grad(loss_fn)(model)
+        assert jnp.isfinite(loss)
+        halt_grads = jax.tree.leaves(nnx.state(grads.halt_gate))
+        assert any(jnp.any(g != 0) for g in halt_grads)
+
+    def test_act_hybrid(self):
+        config = self._make_act_config(T=2, core_block="hybrid")
+        model = config.to_model(rngs=nnx.Rngs(42))
+        x = jnp.ones((2, 8), dtype=jnp.int32)
+        result = model(x, return_aux=True)
+        assert result.logits.shape == (2, 8, 50)
+        assert result.ponder_cost is not None
+
+    def test_no_act_return_aux_still_works(self):
+        """return_aux without use_act gives per-iteration logits but no halt."""
+        config = RecursiveArchConfig(
+            n_vocab=50, n_seq=16, n_hidden=32, n_heads=4,
+            n_out=50, core_block="attn", n_recurrences=2,
+            output_mode="full_sequence", pos_encoding="rope",
+            use_bf16=False, use_act=False,
+        )
+        model = config.to_model(rngs=nnx.Rngs(42))
+        x = jnp.ones((2, 8), dtype=jnp.int32)
+        result = model(x, return_aux=True)
+
+        assert isinstance(result, RecursiveOutput)
+        assert len(result.per_iteration_logits) == 2
+        assert len(result.halt_probs) == 0
+        assert result.ponder_cost is None
+
+
+@pytest.mark.slow
+class TestRecursiveFOLSmokeHybrid:
+    """Smoke test: recursive hybrid models learn on FOL."""
 
     def test_recursive_hybrid_loss_decreases(self):
         from task.fol_task_factory import FOLTaskFactory, RuleBankConfig

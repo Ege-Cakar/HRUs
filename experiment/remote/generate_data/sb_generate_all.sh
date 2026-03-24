@@ -22,13 +22,11 @@
 
 set -euo pipefail
 
-# Resolve repo root relative to this script's location
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+REPO_ROOT="/n/home00/ecakar/HRUs"
 cd "${REPO_ROOT}"
 
 SEED=${SEED:-42}
-OUT_DIR=${OUT_DIR:-"data/fol_seed${SEED}"}
+OUT_DIR=${OUT_DIR:-"/n/home00/ecakar/scratch/fol_seed${SEED}"}
 MIN_D=${MIN_D:-1}
 MAX_D=${MAX_D:-16}
 EXAMPLES=${EXAMPLES:-50000}
