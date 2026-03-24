@@ -19,6 +19,11 @@
 
 set -euo pipefail
 
+# Resolve repo root relative to this script's location
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+cd "${REPO_ROOT}"
+
 SEED=${SEED:-42}
 OUT_DIR=${OUT_DIR:-"data/fol_seed${SEED}"}
 MIN_D=${MIN_D:-1}
@@ -34,7 +39,7 @@ MAX_N_DEMOS=${MAX_N_DEMOS:-16}
 DEMO_DIST=${DEMO_DIST:-"zipf_per_rule"}
 DEMO_ALPHA=${DEMO_ALPHA:-1.0}
 
-source ../../../.venv/bin/activate
+source "${REPO_ROOT}/.venv/bin/activate"
 
 echo "=== Generating hybrid ICL conditions ==="
 echo "Seed: ${SEED}"

@@ -22,13 +22,18 @@
 
 set -euo pipefail
 
+# Resolve repo root relative to this script's location
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+cd "${REPO_ROOT}"
+
 SEED=${SEED:-42}
 OUT_DIR=${OUT_DIR:-"data/fol_seed${SEED}"}
 MIN_D=${MIN_D:-1}
 MAX_D=${MAX_D:-16}
 EXAMPLES=${EXAMPLES:-50000}
 
-source ../../../.venv/bin/activate
+source "${REPO_ROOT}/.venv/bin/activate"
 
 echo "============================================================"
 echo "  FOL Dataset Generation — All Conditions"
