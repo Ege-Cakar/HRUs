@@ -339,7 +339,7 @@ class RecursiveArchConfig:
     # Block options
     pos_encoding: str = "rope"
     layer_norm: bool = True
-    use_swiglu: bool = False
+    use_swiglu: bool = True       # SwiGLU default (matches Ouro/Llama)
     use_bias: bool = True
     dropout_rate: float = 0.0
     output_mode: str = "full_sequence"

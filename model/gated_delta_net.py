@@ -1,15 +1,27 @@
 """
 Gated DeltaNet (GDN) linear attention block using Flax NNX.
 
-Implements the gated delta rule recurrence from Yang et al. (2024):
-    S_t = S_{t-1} + beta_t * (v_t - S_{t-1} @ k_t) @ k_t^T
+Implements the gated delta rule from Yang et al. (ICLR 2025):
+    S_t = S_{t-1} * (α_t * (I - β_t * k_t * k_t^T)) + β_t * v_t * k_t^T   (Eq. 10)
 
-where beta_t is a learned per-head gate controlling the update strength.
-This is a linear-complexity alternative to softmax attention that supports
-efficient sequential (scan-based) computation.
+where:
+    α_t ∈ (0,1) is a data-dependent decay/gating term (controls memory clearance)
+    β_t ∈ (0,1) is the delta write strength (controls update precision)
 
-The GDNBlock follows the same pre-norm residual interface as TransformerBlock:
-    x -> RMSNorm -> GDN_Attention -> residual -> RMSNorm -> MLP -> residual
+This combines Mamba2's gated decay with DeltaNet's delta rule for complementary
+memory management: α enables rapid memory erasure, β enables targeted updates.
+
+Block design follows the paper's Figure 1 (Section 3.4):
+    - q, k: Linear → short conv → SiLU → L2 norm
+    - v:    Linear → short conv → SiLU
+    - α, β: Linear (no conv, no activation) → sigmoid
+    - output: GroupNorm → output_gate(SiLU) * normalized_output → Linear
+
+The GDNBlock follows Llama's macro architecture with SwiGLU MLP layers,
+matching the Ouro/LoopLM transformer block design.
+
+Sequential implementation via jax.lax.scan. Chunkwise parallel (Section 3.3)
+can be added for GPU efficiency without changing the recurrence semantics.
 """
 
 import jax
@@ -17,12 +29,39 @@ import jax.numpy as jnp
 from flax import nnx
 
 
-class GatedDeltaNetAttention(nnx.Module):
-    """Gated DeltaNet linear attention.
+def _short_conv_1d(x: jnp.ndarray, weight: jnp.ndarray) -> jnp.ndarray:
+    """Causal 1D depthwise convolution with kernel size 4.
 
-    Uses the delta rule recurrence with a learned gate per head.
-    Sequential implementation via jax.lax.scan — correct and sufficient
-    for small/medium models. Chunkwise parallel can be added later.
+    Args:
+        x: (batch, seq, features)
+        weight: (features, kernel_size) convolution weights
+
+    Returns:
+        (batch, seq, features) — causally convolved
+    """
+    features, kernel_size = weight.shape
+    # Pad causally: (kernel_size - 1) on the left, 0 on the right
+    x_padded = jnp.pad(x, ((0, 0), (kernel_size - 1, 0), (0, 0)))
+    # Depthwise conv: manual sliding window via einsum for clarity
+    # Stack shifted versions: (batch, seq, features, kernel_size)
+    shifts = jnp.stack(
+        [x_padded[:, i:i + x.shape[1], :] for i in range(kernel_size)],
+        axis=-1,
+    )
+    # Elementwise multiply by weight and sum over kernel dim
+    return jnp.sum(shifts * weight[None, None, :, :], axis=-1)
+
+
+class GatedDeltaNetAttention(nnx.Module):
+    """Gated DeltaNet linear attention (Yang et al., ICLR 2025).
+
+    Recurrence: S_t = α_t * S_{t-1} * (I - β_t * k_t @ k_t^T) + β_t * v_t @ k_t^T
+    Output:     o_t = S_t @ q_t
+
+    q, k path: Linear → ShortConv(4) → SiLU → L2 norm
+    v path:    Linear → ShortConv(4) → SiLU
+    α, β:      Linear → sigmoid (per-head scalars)
+    output:    GroupNorm → gate(SiLU) * output → Linear
     """
 
     def __init__(
@@ -30,6 +69,7 @@ class GatedDeltaNetAttention(nnx.Module):
         n_hidden: int,
         n_heads: int,
         use_bias: bool = True,
+        conv_kernel_size: int = 4,
         dtype: jnp.dtype = jnp.float32,
         param_dtype: jnp.dtype = jnp.float32,
         *,
@@ -42,8 +82,9 @@ class GatedDeltaNetAttention(nnx.Module):
         self.n_hidden = n_hidden
         self.n_heads = n_heads
         self.head_dim = n_hidden // n_heads
+        self.conv_kernel_size = conv_kernel_size
 
-        # Q, K, V projections (separate for clarity; can fuse later)
+        # Q, K, V linear projections
         self.q_proj = nnx.Linear(
             n_hidden, n_hidden, use_bias=use_bias,
             dtype=dtype, param_dtype=param_dtype, rngs=rngs,
@@ -57,9 +98,36 @@ class GatedDeltaNetAttention(nnx.Module):
             dtype=dtype, param_dtype=param_dtype, rngs=rngs,
         )
 
-        # Per-head gate: projects to n_heads scalars
+        # Short convolution weights for q, k, v (depthwise, causal)
+        self.q_conv = nnx.Param(
+            jax.random.normal(rngs.params(), (n_hidden, conv_kernel_size)) * 0.02
+        )
+        self.k_conv = nnx.Param(
+            jax.random.normal(rngs.params(), (n_hidden, conv_kernel_size)) * 0.02
+        )
+        self.v_conv = nnx.Param(
+            jax.random.normal(rngs.params(), (n_hidden, conv_kernel_size)) * 0.02
+        )
+
+        # α (decay gate) and β (write strength): project to n_heads scalars each
+        self.alpha_proj = nnx.Linear(
+            n_hidden, n_heads, use_bias=True,
+            dtype=dtype, param_dtype=param_dtype, rngs=rngs,
+        )
         self.beta_proj = nnx.Linear(
             n_hidden, n_heads, use_bias=True,
+            dtype=dtype, param_dtype=param_dtype, rngs=rngs,
+        )
+
+        # Output gate: Linear → SiLU, applied elementwise to output
+        self.output_gate_proj = nnx.Linear(
+            n_hidden, n_hidden, use_bias=use_bias,
+            dtype=dtype, param_dtype=param_dtype, rngs=rngs,
+        )
+
+        # Output normalization (GroupNorm with groups = n_heads)
+        self.output_norm = nnx.GroupNorm(
+            num_groups=n_heads, num_features=n_hidden,
             dtype=dtype, param_dtype=param_dtype, rngs=rngs,
         )
 
@@ -82,65 +150,109 @@ class GatedDeltaNetAttention(nnx.Module):
         d = self.head_dim
         h = self.n_heads
 
-        # Project to q, k, v: (batch, seq, n_heads, head_dim)
-        q = self.q_proj(x).reshape(batch, seq, h, d)
-        k = self.k_proj(x).reshape(batch, seq, h, d)
-        v = self.v_proj(x).reshape(batch, seq, h, d)
+        # ── Q, K, V: Linear → ShortConv → SiLU ──────────────────────
+        q = self.q_proj(x)
+        q = _short_conv_1d(q, self.q_conv.value)
+        q = jax.nn.silu(q)
+        q = q.reshape(batch, seq, h, d)
+        # L2 normalize q and k per head
+        q = q / (jnp.linalg.norm(q, axis=-1, keepdims=True) + 1e-6)
 
-        # Normalize k for numerical stability (L2 norm per head)
+        k = self.k_proj(x)
+        k = _short_conv_1d(k, self.k_conv.value)
+        k = jax.nn.silu(k)
+        k = k.reshape(batch, seq, h, d)
         k = k / (jnp.linalg.norm(k, axis=-1, keepdims=True) + 1e-6)
 
-        # Per-head gate: (batch, seq, n_heads, 1)
-        beta = jax.nn.sigmoid(self.beta_proj(x))  # (batch, seq, n_heads)
-        beta = beta[..., None]  # (batch, seq, n_heads, 1)
+        v = self.v_proj(x)
+        v = _short_conv_1d(v, self.v_conv.value)
+        v = jax.nn.silu(v)
+        v = v.reshape(batch, seq, h, d)
+        # No L2 norm on v
 
-        # Transpose for scan: (seq, batch, heads, dim)
+        # ── α (decay) and β (write strength): Linear → sigmoid ──────
+        alpha = jax.nn.sigmoid(self.alpha_proj(x))  # (batch, seq, n_heads)
+        beta = jax.nn.sigmoid(self.beta_proj(x))    # (batch, seq, n_heads)
+
+        # ── Output gate: Linear → SiLU ──────────────────────────────
+        out_gate = jax.nn.silu(self.output_gate_proj(x))  # (batch, seq, n_hidden)
+
+        # ── Transpose for scan: (seq, batch, heads, dim) ────────────
         q = jnp.transpose(q, (1, 0, 2, 3))
         k = jnp.transpose(k, (1, 0, 2, 3))
         v = jnp.transpose(v, (1, 0, 2, 3))
-        beta = jnp.transpose(beta, (1, 0, 2, 3))
+        alpha = jnp.transpose(alpha, (1, 0, 2))      # (seq, batch, heads)
+        beta = jnp.transpose(beta, (1, 0, 2))         # (seq, batch, heads)
 
-        # Delta rule recurrence via scan
+        # ── Gated delta rule recurrence via scan ─────────────────────
         def _step(S, inputs):
-            """Single recurrence step.
+            """Gated delta rule (Eq. 10):
+            S_t = α_t * S_{t-1} * (I - β_t * k_t @ k_t^T) + β_t * v_t @ k_t^T
 
-            S: (batch, heads, head_dim, head_dim) — recurrent state matrix
-            inputs: (q_t, k_t, v_t, beta_t) each (batch, heads, dim) or (batch, heads, 1)
+            Equivalently:
+            S_t = α_t * (S_{t-1} - β_t * (S_{t-1} @ k_t) @ k_t^T) + β_t * v_t @ k_t^T
+
+            S:      (batch, heads, d_v, d_k) — recurrent state
+            q_t:    (batch, heads, d_k)
+            k_t:    (batch, heads, d_k)
+            v_t:    (batch, heads, d_v)
+            alpha_t: (batch, heads) — decay
+            beta_t:  (batch, heads) — write strength
             """
-            q_t, k_t, v_t, beta_t = inputs
+            q_t, k_t, v_t, alpha_t, beta_t = inputs
 
-            # Delta update: S = S + beta * (v - S @ k) @ k^T
-            Sk = jnp.einsum("bhde,bhe->bhd", S, k_t)  # (batch, heads, head_dim)
-            delta = v_t - Sk  # (batch, heads, head_dim)
-            # Outer product: delta @ k^T, scaled by beta
-            # beta_t is (batch, heads, 1), expand to (batch, heads, 1, 1) for broadcast
-            update = beta_t[..., None] * jnp.einsum("bhd,bhe->bhde", delta, k_t)
-            S = S + update
+            # Expand scalars for broadcasting: (batch, heads, 1, 1)
+            a = alpha_t[:, :, None, None]
+            b = beta_t[:, :, None, None]
 
-            # Output: o_t = S @ q_t
-            o_t = jnp.einsum("bhde,bhe->bhd", S, q_t)  # (batch, heads, head_dim)
+            # S_{t-1} @ k_t: (batch, heads, d_v)
+            Sk = jnp.einsum("bhde,bhe->bhd", S, k_t)
+
+            # delta = v_t - S_{t-1} @ k_t
+            delta = v_t - Sk
+
+            # Gated delta update:
+            # S_t = α * S_{t-1} + β * delta @ k^T
+            # = α * S_{t-1} + β * (v - S@k) @ k^T
+            # = α * S_{t-1} - α * β * (S@k) @ k^T + β * v @ k^T  [rearranged]
+            # But the paper's Eq. 10 is:
+            # S_t = S_{t-1} * α * (I - β * k @ k^T) + β * v @ k^T
+            # = α * S_{t-1} - α * β * S_{t-1} @ k @ k^T + β * v @ k^T
+            # Which equals: α * S_{t-1} + β * (v - α * S_{t-1} @ k) @ k^T
+            Sk_alpha = alpha_t[:, :, None] * Sk  # α * (S @ k)
+            delta_gated = v_t - Sk_alpha  # v - α * S @ k
+            update = b * jnp.einsum("bhd,bhe->bhde", delta_gated, k_t)
+            S = a * S + update
+
+            # Output: o_t = S_t @ q_t
+            o_t = jnp.einsum("bhde,bhe->bhd", S, q_t)
             return S, o_t
 
         # Initial state: zero matrix per head
         S0 = jnp.zeros((batch, h, d, d), dtype=x.dtype)
 
         # Run scan over sequence dimension
-        _, outputs = jax.lax.scan(_step, S0, (q, k, v, beta))
+        _, outputs = jax.lax.scan(_step, S0, (q, k, v, alpha, beta))
         # outputs: (seq, batch, heads, head_dim)
 
-        # Transpose back: (batch, seq, heads, head_dim)
+        # ── Transpose back: (batch, seq, heads * head_dim) ──────────
         outputs = jnp.transpose(outputs, (1, 0, 2, 3))
-        # Reshape to (batch, seq, n_hidden)
         outputs = outputs.reshape(batch, seq, self.n_hidden)
 
+        # ── Output: GroupNorm → gate * output → Linear ───────────────
+        outputs = self.output_norm(outputs)
+        outputs = out_gate * outputs
         return self.out_proj(outputs)
 
 
 class GDNBlock(nnx.Module):
-    """GDN + MLP block with pre-norm residual connections.
+    """GDN + SwiGLU MLP block with pre-norm residual connections.
 
-    Same interface as TransformerBlock (minus KV cache / causal mask args,
-    which are not applicable to linear attention).
+    Follows Llama/Ouro macro architecture:
+        x → RMSNorm → GDN → residual → RMSNorm → SwiGLU_MLP → residual
+
+    Same call interface as TransformerBlock for drop-in use in Architecture
+    and RecursiveArchitecture.
     """
 
     def __init__(
@@ -150,7 +262,7 @@ class GDNBlock(nnx.Module):
         n_mlp_hidden: int,
         use_bias: bool = True,
         layer_norm: bool = True,
-        use_swiglu: bool = False,
+        use_swiglu: bool = True,  # Default True to match Ouro
         dropout_rate: float = 0.0,
         dtype: jnp.dtype = jnp.float32,
         param_dtype: jnp.dtype = jnp.float32,
@@ -170,7 +282,7 @@ class GDNBlock(nnx.Module):
             rngs=rngs,
         )
 
-        # MLP (same structure as TransformerBlock)
+        # MLP: SwiGLU by default (matching Ouro/Llama)
         if use_swiglu:
             self.mlp_gate = nnx.Linear(
                 n_hidden, n_mlp_hidden, use_bias=use_bias,
@@ -194,7 +306,7 @@ class GDNBlock(nnx.Module):
                 dtype=dtype, param_dtype=param_dtype, rngs=rngs,
             )
 
-        # RMS norms
+        # RMS norms (pre-norm architecture)
         if layer_norm:
             self.ln1 = nnx.RMSNorm(
                 n_hidden, dtype=dtype, param_dtype=param_dtype, rngs=rngs,
@@ -220,8 +332,8 @@ class GDNBlock(nnx.Module):
         return_kv: bool = False,
     ) -> jnp.ndarray:
         """Forward pass. Accepts same kwargs as TransformerBlock for interface
-        compatibility, but ignores mask/cache args (linear attention is causal
-        by construction via the scan recurrence)."""
+        compatibility, but ignores mask/cache args (GDN is causal by construction
+        via the scan recurrence)."""
         # GDN attention with residual
         residual = x
         if self.layer_norm:
@@ -249,7 +361,6 @@ class GDNBlock(nnx.Module):
         x = x + residual
 
         if return_kv:
-            # Return dummy KV for interface compat; GDN has no KV cache
             dummy = jnp.zeros((0,), dtype=x.dtype)
             return x, dummy, dummy
         return x
