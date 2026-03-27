@@ -5,7 +5,15 @@ import jax.numpy as jnp
 import pytest
 from flax import nnx
 
-from model.recursive import RecursiveArchConfig, RecursiveArchitecture, RecursiveOutput
+from model.recursive import (
+    RecursiveArchConfig,
+    RecursiveArchitecture,
+    RecursiveOutput,
+    compute_exit_distribution,
+    compute_exit_entropy,
+    compute_act_stage1_loss,
+    compute_act_stage2_loss,
+)
 
 
 class TestRecursiveArchConfig:
@@ -233,15 +241,46 @@ class TestRecursiveFOLSmoke:
         assert late < early, f"Loss did not decrease: {early:.4f} -> {late:.4f}"
 
 
+class TestExitDistribution:
+    """Tests for the geometric exit distribution computation."""
+
+    def test_sums_to_one(self):
+        halt_probs = [jnp.full((2, 4), 0.3) for _ in range(5)]
+        exit_dist = compute_exit_distribution(halt_probs)
+        total = sum(exit_dist)
+        assert jnp.allclose(total, 1.0, atol=1e-6)
+
+    def test_high_halt_concentrates_early(self):
+        halt_probs = [jnp.full((1, 1), 0.9) for _ in range(3)]
+        exit_dist = compute_exit_distribution(halt_probs)
+        # Most mass should be on step 0
+        assert float(exit_dist[0].squeeze()) > 0.8
+
+    def test_low_halt_concentrates_late(self):
+        halt_probs = [jnp.full((1, 1), 0.01) for _ in range(3)]
+        exit_dist = compute_exit_distribution(halt_probs)
+        # Most mass should be on final step (remainder)
+        assert float(exit_dist[-1].squeeze()) > 0.9
+
+    def test_entropy_maximized_near_uniform(self):
+        """Near-uniform exit distribution should have high entropy."""
+        # With T=3 and carefully chosen halt probs, we can get near-uniform
+        halt_probs = [jnp.full((1, 1), 0.333) for _ in range(3)]
+        exit_dist = compute_exit_distribution(halt_probs)
+        entropy = compute_exit_entropy(exit_dist)
+        max_entropy = jnp.log(jnp.array(3.0))
+        assert float(entropy) > float(max_entropy) * 0.8
+
+
 class TestACT:
-    """Tests for Adaptive Computation Time."""
+    """Tests for Adaptive Computation Time (Ouro-style ELBO)."""
 
     def _make_act_config(self, T=3, core_block="attn", **kw):
         defaults = dict(
             n_vocab=50, n_seq=16, n_hidden=32, n_heads=4,
             n_out=50, core_block=core_block, n_recurrences=T,
             output_mode="full_sequence", pos_encoding="rope",
-            use_bf16=False, use_act=True, act_ponder_weight=0.01,
+            use_bf16=False, use_act=True, act_beta=0.1,
         )
         defaults.update(kw)
         return RecursiveArchConfig(**defaults)
@@ -263,11 +302,19 @@ class TestACT:
         assert result.logits.shape == (2, 8, 50)
         assert len(result.per_iteration_logits) == 3
         assert len(result.halt_probs) == 3
-        assert result.ponder_cost is not None
-        assert result.ponder_cost.shape == ()
+        assert len(result.exit_distribution) == 3
         assert result.n_iterations == 3
 
-    def test_act_halt_probs_valid(self):
+    def test_exit_distribution_sums_to_one(self):
+        config = self._make_act_config(T=4)
+        model = config.to_model(rngs=nnx.Rngs(42))
+        x = jax.random.randint(jax.random.PRNGKey(0), (2, 8), 1, 50)
+        result = model(x, return_aux=True)
+
+        total = sum(result.exit_distribution)
+        assert jnp.allclose(total, 1.0, atol=1e-5)
+
+    def test_halt_probs_valid(self):
         config = self._make_act_config(T=3)
         model = config.to_model(rngs=nnx.Rngs(42))
         x = jnp.ones((2, 8), dtype=jnp.int32)
@@ -278,32 +325,59 @@ class TestACT:
             assert jnp.all(hp >= 0.0)
             assert jnp.all(hp <= 1.0)
 
-    def test_act_ponder_cost_bounded(self):
-        """Ponder cost (expected iterations) should be in [1, T]."""
-        config = self._make_act_config(T=5)
-        model = config.to_model(rngs=nnx.Rngs(42))
-        x = jnp.ones((2, 8), dtype=jnp.int32)
-        result = model(x, return_aux=True)
-        assert float(result.ponder_cost) >= 1.0
-        assert float(result.ponder_cost) <= 5.0
-
-    def test_act_gradient_through_halt_gate(self):
-        """Gradients should flow through ACT output + ponder cost to halt gate."""
+    def test_stage1_loss_finite(self):
+        """Stage I ELBO loss should be finite and differentiable."""
         config = self._make_act_config(T=3)
         model = config.to_model(rngs=nnx.Rngs(42))
         x = jnp.ones((2, 8), dtype=jnp.int32)
+        labels = jnp.ones((2, 8), dtype=jnp.int32)
 
         def loss_fn(model):
             result = model(x, return_aux=True)
-            task_loss = jnp.mean(
-                jax.vmap(jax.vmap(jax.nn.log_softmax))(result.logits)[:, :, 0]
+            total_loss, _ = compute_act_stage1_loss(
+                result.per_iteration_logits, labels,
+                result.halt_probs, beta=config.act_beta,
             )
-            return task_loss + config.act_ponder_weight * result.ponder_cost
+            return total_loss
 
         loss, grads = nnx.value_and_grad(loss_fn)(model)
         assert jnp.isfinite(loss)
+        # Halt gate should receive gradients
         halt_grads = jax.tree.leaves(nnx.state(grads.halt_gate))
         assert any(jnp.any(g != 0) for g in halt_grads)
+
+    def test_stage1_entropy_term_matters(self):
+        """Higher beta should produce lower loss (more entropy bonus)."""
+        config = self._make_act_config(T=3)
+        model = config.to_model(rngs=nnx.Rngs(42))
+        x = jnp.ones((2, 8), dtype=jnp.int32)
+        labels = jnp.ones((2, 8), dtype=jnp.int32)
+        result = model(x, return_aux=True)
+
+        loss_low_beta, _ = compute_act_stage1_loss(
+            result.per_iteration_logits, labels,
+            result.halt_probs, beta=0.01,
+        )
+        loss_high_beta, _ = compute_act_stage1_loss(
+            result.per_iteration_logits, labels,
+            result.halt_probs, beta=1.0,
+        )
+        # Higher beta subtracts more entropy → lower total loss
+        assert float(loss_high_beta) < float(loss_low_beta)
+
+    def test_stage2_loss_finite(self):
+        """Stage II adaptive gate loss should be finite."""
+        config = self._make_act_config(T=3)
+        model = config.to_model(rngs=nnx.Rngs(42))
+        x = jnp.ones((2, 8), dtype=jnp.int32)
+        labels = jnp.ones((2, 8), dtype=jnp.int32)
+        result = model(x, return_aux=True)
+
+        loss, metrics = compute_act_stage2_loss(
+            result.per_iteration_logits, labels, result.halt_probs,
+        )
+        assert jnp.isfinite(loss)
+        assert metrics["n_steps"] == 2  # T=3 → steps 2,3 (0-indexed: 1,2)
 
     def test_act_hybrid(self):
         config = self._make_act_config(T=2, core_block="hybrid")
@@ -311,7 +385,7 @@ class TestACT:
         x = jnp.ones((2, 8), dtype=jnp.int32)
         result = model(x, return_aux=True)
         assert result.logits.shape == (2, 8, 50)
-        assert result.ponder_cost is not None
+        assert len(result.exit_distribution) == 2
 
     def test_no_act_return_aux_still_works(self):
         """return_aux without use_act gives per-iteration logits but no halt."""
@@ -328,7 +402,7 @@ class TestACT:
         assert isinstance(result, RecursiveOutput)
         assert len(result.per_iteration_logits) == 2
         assert len(result.halt_probs) == 0
-        assert result.ponder_cost is None
+        assert len(result.exit_distribution) == 0
 
 
 @pytest.mark.slow

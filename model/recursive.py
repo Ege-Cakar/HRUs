@@ -13,16 +13,31 @@ Input injection: at each loop iteration, the original prelude output is
 concatenated with the current hidden state and projected back to n_hidden.
 This prevents information decay across loop iterations (Geiping et al., 2025).
 
-ACT (Adaptive Computation Time):
-When use_act=True, a learned halt gate predicts p_halt per token per iteration.
-During training, the output is a weighted mixture of per-iteration outputs using
-a geometric halting distribution, with a ponder cost penalty. During eval, the
-model can early-exit when cumulative halt probability exceeds a threshold.
+ACT (Adaptive Computation Time), following Ouro/LoopLM (Zhu et al., 2025):
+When use_act=True, a learned exit gate λ_t(x) = σ(Linear(h^(t))) predicts
+per-token instantaneous exit probability at each iteration t.
 
-Training loss with ACT:
-    total_loss = task_loss(act_weighted_logits, y) + ponder_weight * ponder_cost
+Exit distribution (geometric with remainder):
+  p_φ(t|x) = λ_t * S_{t-1}   for t = 1, ..., T_max - 1
+  p_φ(T_max|x) = S_{T_max-1}  (remainder)
+  where S_t = Π_{j=1}^{t} (1 - λ_j)  is the survival probability.
 
-Use return_aux=True in __call__ to get per-iteration logits and ponder cost.
+Stage I training (ELBO with uniform prior):
+  L = Σ_t p_φ(t|x) * L^(t) - β * H(p_φ(·|x))
+
+  where L^(t) is the CE loss at iteration t and H is entropy.
+  The entropy term prevents collapse to always using T_max.
+
+Stage II training (adaptive gate fine-tuning, LM frozen):
+  Compute loss improvement I_i^(t) = max(0, L^(t-1) - L^(t)) per token i.
+  Ideal continuation label w_i^(t) = σ(k * (I_i^(t) - γ)).
+  Train gate via BCE between (1 - λ_i^(t)) and w_i^(t).
+
+Inference (CDF-based early exit):
+  Exit at first step where CDF(n|x) = 1 - S_n(x) >= threshold q.
+
+Use return_aux=True in __call__ to get per-iteration logits and exit distribution.
+Loss helpers: compute_act_stage1_loss(), compute_act_stage2_loss().
 """
 from dataclasses import dataclass, field
 
@@ -39,6 +54,198 @@ from model.transformer import (
     sinusoidal_pos_embedding,
 )
 
+
+# ---------------------------------------------------------------------------
+# Loss helpers (pure functions, called from training loop)
+# ---------------------------------------------------------------------------
+
+def compute_exit_distribution(
+    halt_probs: list[jnp.ndarray],
+) -> list[jnp.ndarray]:
+    """Compute the discrete exit distribution from per-step halt probabilities.
+
+    Args:
+        halt_probs: List of T arrays, each (batch, seq) with values in (0, 1).
+            halt_probs[t] = λ_t(x), the instantaneous exit probability at step t.
+
+    Returns:
+        List of T arrays (batch, seq): p_φ(t|x) for t = 1, ..., T.
+        Sums to 1 over t for each (batch, seq) position.
+    """
+    T = len(halt_probs)
+    running_survival = jnp.ones_like(halt_probs[0])  # S_0 = 1
+    exit_probs = []
+
+    for t in range(T - 1):
+        # p(exit at t) = λ_t * S_{t-1}
+        p_exit_t = halt_probs[t] * running_survival
+        exit_probs.append(p_exit_t)
+        # S_t = S_{t-1} * (1 - λ_t)
+        running_survival = running_survival * (1.0 - halt_probs[t])
+
+    # Remainder to last step: p(exit at T) = S_{T-1}
+    exit_probs.append(running_survival)
+    return exit_probs
+
+
+def compute_exit_entropy(exit_probs: list[jnp.ndarray], eps: float = 1e-8) -> jnp.ndarray:
+    """Entropy of the exit distribution H(p_φ(·|x)).
+
+    Args:
+        exit_probs: List of T arrays (batch, seq) from compute_exit_distribution.
+
+    Returns:
+        Scalar: mean entropy over batch and sequence positions.
+    """
+    entropy = jnp.zeros_like(exit_probs[0])
+    for p_t in exit_probs:
+        entropy = entropy - p_t * jnp.log(p_t + eps)
+    return jnp.mean(entropy)
+
+
+def compute_act_stage1_loss(
+    per_iteration_logits: list[jnp.ndarray],
+    labels: jnp.ndarray,
+    halt_probs: list[jnp.ndarray],
+    beta: float = 0.1,
+    loss_fn=None,
+    pad_token_id: int = 0,
+) -> tuple[jnp.ndarray, dict]:
+    """Stage I ELBO loss: expected task loss - β * entropy.
+
+    L = Σ_t p_φ(t|x) * L^(t) - β * H(p_φ(·|x))
+
+    Args:
+        per_iteration_logits: List of T arrays (batch, seq, vocab).
+        labels: (batch, seq) integer labels. Positions with pad_token_id are masked.
+        halt_probs: List of T arrays (batch, seq) — instantaneous exit probs.
+        beta: Entropy regularization coefficient.
+        loss_fn: Per-token loss function(logits, labels) -> (batch, seq).
+            Defaults to softmax CE with integer labels.
+        pad_token_id: Token ID to mask in loss computation.
+
+    Returns:
+        (total_loss, metrics_dict) where metrics_dict has 'expected_task_loss',
+        'entropy', 'per_iteration_losses'.
+    """
+    if loss_fn is None:
+        def loss_fn(logits, labels):
+            return jax.vmap(jax.vmap(
+                lambda l, y: -jax.nn.log_softmax(l)[y]
+            ))(logits, labels)
+
+    T = len(per_iteration_logits)
+    exit_probs = compute_exit_distribution(halt_probs)
+
+    # Compute per-iteration masked losses: L^(t) scalar
+    mask = (labels != pad_token_id).astype(jnp.float32)
+    mask_sum = jnp.maximum(jnp.sum(mask), 1.0)
+
+    per_iter_losses = []
+    for t in range(T):
+        token_losses = loss_fn(per_iteration_logits[t], labels)  # (batch, seq)
+        masked_loss = jnp.sum(token_losses * mask) / mask_sum
+        per_iter_losses.append(masked_loss)
+
+    # Expected task loss: Σ_t E[p_φ(t|x)] * L^(t)
+    # p_φ(t|x) is per-token, L^(t) is per-token, so we weight per-token
+    expected_task_loss = jnp.zeros(())
+    for t in range(T):
+        token_losses = loss_fn(per_iteration_logits[t], labels)  # (batch, seq)
+        # Weight each token's loss by its exit probability at this step
+        weighted = token_losses * exit_probs[t] * mask
+        expected_task_loss = expected_task_loss + jnp.sum(weighted) / mask_sum
+
+    # Entropy regularization
+    entropy = compute_exit_entropy(exit_probs)
+
+    total_loss = expected_task_loss - beta * entropy
+
+    metrics = {
+        "expected_task_loss": expected_task_loss,
+        "entropy": entropy,
+        "per_iteration_losses": jnp.stack(per_iter_losses),
+    }
+    return total_loss, metrics
+
+
+def compute_act_stage2_loss(
+    per_iteration_logits: list[jnp.ndarray],
+    labels: jnp.ndarray,
+    halt_probs: list[jnp.ndarray],
+    loss_fn=None,
+    pad_token_id: int = 0,
+    k: float = 50.0,
+    gamma: float = 0.005,
+) -> tuple[jnp.ndarray, dict]:
+    """Stage II adaptive gate loss (LM frozen, only gate trained).
+
+    For each token i and step t >= 2, compute:
+      I_i^(t) = max(0, L_i^(t-1) - L_i^(t))     (loss improvement)
+      w_i^(t) = σ(k * (I_i^(t) - γ))             (ideal continuation label)
+
+    Then BCE between gate's continuation probability (1 - λ_i^(t)) and w_i^(t).
+
+    Args:
+        per_iteration_logits: List of T arrays (batch, seq, vocab).
+            These should be DETACHED from the LM (stop gradient).
+        labels: (batch, seq) integer labels.
+        halt_probs: List of T arrays (batch, seq) — instantaneous exit probs.
+        loss_fn: Per-token loss function(logits, labels) -> (batch, seq).
+        pad_token_id: Token ID to mask.
+        k: Sigmoid slope for ideal label (default 50.0 from Ouro).
+        gamma: Improvement threshold (default 0.005 from Ouro).
+
+    Returns:
+        (adaptive_loss, metrics_dict)
+    """
+    if loss_fn is None:
+        def loss_fn(logits, labels):
+            return jax.vmap(jax.vmap(
+                lambda l, y: -jax.nn.log_softmax(l)[y]
+            ))(logits, labels)
+
+    T = len(per_iteration_logits)
+    mask = (labels != pad_token_id).astype(jnp.float32)
+    mask_sum = jnp.maximum(jnp.sum(mask), 1.0)
+
+    # Compute per-token losses at each step (detached from LM)
+    per_token_losses = []
+    for t in range(T):
+        logits_stopped = jax.lax.stop_gradient(per_iteration_logits[t])
+        per_token_losses.append(loss_fn(logits_stopped, labels))
+
+    # Adaptive BCE loss averaged over steps t=2..T
+    total_bce = jnp.zeros(())
+    n_steps = 0
+
+    for t in range(1, T):  # t >= 2 in 1-indexed = t >= 1 in 0-indexed
+        # Loss improvement
+        improvement = jnp.maximum(0.0, per_token_losses[t - 1] - per_token_losses[t])
+        # Ideal continuation label
+        w = jax.nn.sigmoid(k * (improvement - gamma))
+
+        # Gate's predicted continuation probability = 1 - λ_t
+        cont_prob = 1.0 - halt_probs[t]
+
+        # BCE: w * log(cont_prob) + (1-w) * log(λ_t)
+        eps = 1e-8
+        bce = -(w * jnp.log(cont_prob + eps) + (1.0 - w) * jnp.log(halt_probs[t] + eps))
+        total_bce = total_bce + jnp.sum(bce * mask) / mask_sum
+        n_steps += 1
+
+    adaptive_loss = total_bce / max(n_steps, 1)
+
+    metrics = {
+        "adaptive_loss": adaptive_loss,
+        "n_steps": n_steps,
+    }
+    return adaptive_loss, metrics
+
+
+# ---------------------------------------------------------------------------
+# Block builder
+# ---------------------------------------------------------------------------
 
 def _make_block(
     btype: str,
@@ -93,6 +300,10 @@ def _make_block(
         raise ValueError(f"Unknown block type: {btype!r}")
 
 
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+
 @dataclass
 class RecursiveArchConfig:
     """Config for recursive (depth-recurrent) architectures.
@@ -136,10 +347,10 @@ class RecursiveArchConfig:
     use_sow: bool = False
     use_bf16: bool = True
 
-    # ACT (Adaptive Computation Time)
-    use_act: bool = False             # Enable learned halting
-    act_ponder_weight: float = 0.01   # Lambda for ponder cost in total loss
-    act_halt_threshold: float = 0.5   # Cumulative halt threshold for early exit at inference
+    # ACT (Adaptive Computation Time) — following Ouro (Zhu et al., 2025)
+    use_act: bool = False             # Enable learned exit gate
+    act_beta: float = 0.1            # β for entropy regularization in Stage I
+    act_halt_threshold: float = 0.5   # CDF threshold q for early exit at inference
 
     @property
     def n_layers_unrolled(self) -> int:
@@ -155,26 +366,43 @@ class RecursiveArchConfig:
         return RecursiveArchitecture(self, rngs=rngs)
 
 
+# ---------------------------------------------------------------------------
+# Output container
+# ---------------------------------------------------------------------------
+
 @dataclass
 class RecursiveOutput:
     """Output container for recursive architecture with ACT.
 
     Attributes:
-        logits: Final output logits (ACT-weighted if use_act, else last iteration).
-        per_iteration_logits: Logits at each core iteration (for aux losses / ACT).
-        halt_probs: Per-iteration halt probabilities (batch, seq) if ACT enabled.
-        ponder_cost: Scalar mean ponder cost for ACT regularization.
+        logits: Final output logits. If use_act: last iteration's logits (use
+            per_iteration_logits + exit_distribution for the proper ACT loss).
+            If not use_act: logits from the final iteration.
+        per_iteration_logits: List of T arrays (batch, seq, vocab) — logits at
+            each core iteration, obtained by applying coda + output at each step.
+        halt_probs: List of T arrays (batch, seq) — instantaneous exit probability
+            λ_t(x) = σ(Linear(h^(t))) at each iteration. Only if use_act=True.
+        exit_distribution: List of T arrays (batch, seq) — the proper discrete
+            exit distribution p_φ(t|x) computed from halt_probs. Sums to 1.
+            Only if use_act=True.
         n_iterations: Number of core iterations executed.
     """
     logits: jnp.ndarray
     per_iteration_logits: list[jnp.ndarray] = field(default_factory=list)
     halt_probs: list[jnp.ndarray] = field(default_factory=list)
-    ponder_cost: jnp.ndarray | None = None
+    exit_distribution: list[jnp.ndarray] = field(default_factory=list)
     n_iterations: int = 0
 
 
+# ---------------------------------------------------------------------------
+# Halt gate
+# ---------------------------------------------------------------------------
+
 class HaltGate(nnx.Module):
-    """Per-token halting probability for ACT."""
+    """Per-token instantaneous exit probability for ACT.
+
+    λ_t(x) = σ(Linear_φ(h^(t))) ∈ (0, 1)
+    """
 
     def __init__(self, n_hidden: int, *, dtype, param_dtype, rngs: nnx.Rngs):
         self.linear = nnx.Linear(
@@ -183,9 +411,13 @@ class HaltGate(nnx.Module):
         )
 
     def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
-        """x: (batch, seq, n_hidden) -> (batch, seq) halt probabilities."""
+        """x: (batch, seq, n_hidden) -> (batch, seq) exit probabilities."""
         return jax.nn.sigmoid(self.linear(x).squeeze(-1))
 
+
+# ---------------------------------------------------------------------------
+# Model
+# ---------------------------------------------------------------------------
 
 class RecursiveArchitecture(nnx.Module):
     """Recursive architecture: Attn + [core] × T (weight-tied) + Attn.
@@ -351,47 +583,6 @@ class RecursiveArchitecture(nnx.Module):
             pad_token_id=self.config.pad_token_id,
         )
 
-    def _act_aggregate(
-        self,
-        per_iteration_logits: list[jnp.ndarray],
-        halt_probs: list[jnp.ndarray],
-    ) -> tuple[jnp.ndarray, jnp.ndarray]:
-        """Aggregate per-iteration outputs using geometric halting distribution.
-
-        p(exit at t) = halt_t * prod(1 - halt_k, k < t)
-        Remainder probability assigned to the final iteration.
-
-        Returns:
-            (weighted_logits, ponder_cost)
-        """
-        T = len(halt_probs)
-        running_prob = jnp.ones_like(halt_probs[0])  # (batch, seq)
-        exit_weights = []
-
-        for t in range(T - 1):
-            p_exit_t = running_prob * halt_probs[t]
-            exit_weights.append(p_exit_t)
-            running_prob = running_prob * (1.0 - halt_probs[t])
-
-        # Remainder to last iteration
-        exit_weights.append(running_prob)
-
-        # Weighted sum of logits
-        logits = jnp.zeros_like(per_iteration_logits[0])
-        for t in range(T):
-            w = exit_weights[t]
-            while w.ndim < logits.ndim:
-                w = w[..., None]
-            logits = logits + w * per_iteration_logits[t]
-
-        # Ponder cost: expected number of iterations
-        ponder_cost = jnp.zeros_like(halt_probs[0])
-        for t in range(T):
-            ponder_cost = ponder_cost + (t + 1) * exit_weights[t]
-        ponder_cost = jnp.mean(ponder_cost)
-
-        return logits, ponder_cost
-
     def __call__(
         self,
         x: jnp.ndarray,
@@ -408,7 +599,8 @@ class RecursiveArchitecture(nnx.Module):
             n_recurrences: Override loop count T. If None, uses config default.
                 Set higher at test time to extrapolate beyond training depth.
             return_aux: If True, return RecursiveOutput with per-iteration
-                logits, halt probs, and ponder cost. Required for ACT training.
+                logits, halt probs, and exit distribution. Required for ACT
+                training loss computation.
             cache: Not supported for recursive models (raises if provided).
             return_cache: Not supported for recursive models.
 
@@ -476,20 +668,21 @@ class RecursiveArchitecture(nnx.Module):
                     halt_probs.append(self.halt_gate(x))
 
         # ── Final output ─────────────────────────────────────────────
-        if config.use_act and self.halt_gate is not None and len(halt_probs) > 0:
-            # ACT: weighted mixture of per-iteration outputs
-            logits, ponder_cost = self._act_aggregate(per_iteration_logits, halt_probs)
-        else:
-            # Fixed depth: single pass through coda + output
-            logits = self._apply_coda_and_output(x, tokens)
-            ponder_cost = None
+        # Always use the last iteration's coda output as the returned logits.
+        # For ACT training, use per_iteration_logits + exit_distribution
+        # with compute_act_stage1_loss() to get the proper ELBO.
+        logits = self._apply_coda_and_output(x, tokens)
 
         if return_aux:
+            exit_dist = []
+            if halt_probs:
+                exit_dist = compute_exit_distribution(halt_probs)
+
             return RecursiveOutput(
                 logits=logits,
                 per_iteration_logits=per_iteration_logits,
                 halt_probs=halt_probs,
-                ponder_cost=ponder_cost,
+                exit_distribution=exit_dist,
                 n_iterations=T,
             )
         return logits
