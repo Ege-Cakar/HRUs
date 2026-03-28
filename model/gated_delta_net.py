@@ -29,27 +29,30 @@ import jax.numpy as jnp
 from flax import nnx
 
 
-def _short_conv_1d(x: jnp.ndarray, weight: jnp.ndarray) -> jnp.ndarray:
-    """Causal 1D depthwise convolution with kernel size 4.
+def _make_causal_depthwise_conv(
+    n_features: int,
+    kernel_size: int = 4,
+    *,
+    dtype,
+    param_dtype,
+    rngs: nnx.Rngs,
+) -> nnx.Conv:
+    """Create a causal depthwise 1D convolution.
 
-    Args:
-        x: (batch, seq, features)
-        weight: (features, kernel_size) convolution weights
-
-    Returns:
-        (batch, seq, features) — causally convolved
+    Uses left-padding so output at position t depends only on positions [t-k+1, ..., t].
+    feature_group_count=n_features makes it depthwise (each channel convolved independently).
     """
-    features, kernel_size = weight.shape
-    # Pad causally: (kernel_size - 1) on the left, 0 on the right
-    x_padded = jnp.pad(x, ((0, 0), (kernel_size - 1, 0), (0, 0)))
-    # Depthwise conv: manual sliding window via einsum for clarity
-    # Stack shifted versions: (batch, seq, features, kernel_size)
-    shifts = jnp.stack(
-        [x_padded[:, i:i + x.shape[1], :] for i in range(kernel_size)],
-        axis=-1,
+    return nnx.Conv(
+        in_features=n_features,
+        out_features=n_features,
+        kernel_size=(kernel_size,),
+        padding=((kernel_size - 1, 0),),  # causal: pad left only
+        feature_group_count=n_features,    # depthwise
+        use_bias=True,
+        dtype=dtype,
+        param_dtype=param_dtype,
+        rngs=rngs,
     )
-    # Elementwise multiply by weight and sum over kernel dim
-    return jnp.sum(shifts * weight[None, None, :, :], axis=-1)
 
 
 class GatedDeltaNetAttention(nnx.Module):
@@ -98,16 +101,14 @@ class GatedDeltaNetAttention(nnx.Module):
             dtype=dtype, param_dtype=param_dtype, rngs=rngs,
         )
 
-        # Short convolution weights for q, k, v (depthwise, causal)
-        self.q_conv = nnx.Param(
-            jax.random.normal(rngs.params(), (n_hidden, conv_kernel_size)) * 0.02
+        # Short causal depthwise convolutions for q, k, v (kernel=4, Section 3.4)
+        conv_kw = dict(
+            n_features=n_hidden, kernel_size=conv_kernel_size,
+            dtype=dtype, param_dtype=param_dtype, rngs=rngs,
         )
-        self.k_conv = nnx.Param(
-            jax.random.normal(rngs.params(), (n_hidden, conv_kernel_size)) * 0.02
-        )
-        self.v_conv = nnx.Param(
-            jax.random.normal(rngs.params(), (n_hidden, conv_kernel_size)) * 0.02
-        )
+        self.q_conv = _make_causal_depthwise_conv(**conv_kw)
+        self.k_conv = _make_causal_depthwise_conv(**conv_kw)
+        self.v_conv = _make_causal_depthwise_conv(**conv_kw)
 
         # α (decay gate) and β (write strength): project to n_heads scalars each
         self.alpha_proj = nnx.Linear(
@@ -151,22 +152,15 @@ class GatedDeltaNetAttention(nnx.Module):
         h = self.n_heads
 
         # ── Q, K, V: Linear → ShortConv → SiLU ──────────────────────
-        q = self.q_proj(x)
-        q = _short_conv_1d(q, self.q_conv.value)
-        q = jax.nn.silu(q)
+        q = jax.nn.silu(self.q_conv(self.q_proj(x)))
         q = q.reshape(batch, seq, h, d)
-        # L2 normalize q and k per head
-        q = q / (jnp.linalg.norm(q, axis=-1, keepdims=True) + 1e-6)
+        q = q / (jnp.linalg.norm(q, axis=-1, keepdims=True) + 1e-6)  # L2 norm
 
-        k = self.k_proj(x)
-        k = _short_conv_1d(k, self.k_conv.value)
-        k = jax.nn.silu(k)
+        k = jax.nn.silu(self.k_conv(self.k_proj(x)))
         k = k.reshape(batch, seq, h, d)
-        k = k / (jnp.linalg.norm(k, axis=-1, keepdims=True) + 1e-6)
+        k = k / (jnp.linalg.norm(k, axis=-1, keepdims=True) + 1e-6)  # L2 norm
 
-        v = self.v_proj(x)
-        v = _short_conv_1d(v, self.v_conv.value)
-        v = jax.nn.silu(v)
+        v = jax.nn.silu(self.v_conv(self.v_proj(x)))
         v = v.reshape(batch, seq, h, d)
         # No L2 norm on v
 
