@@ -99,6 +99,12 @@ def parse_loss_name(loss):
 
 
 def _compute_batch_loss(model, x, labels, loss_func):
+    # Model-aware loss: if loss_func accepts (model, x, labels), call it directly.
+    # This supports ACT's ELBO loss which needs model(x, return_aux=True).
+    # Convention: model-aware losses are tagged with _model_aware = True.
+    if getattr(loss_func, '_model_aware', False):
+        return loss_func(model, x, labels)
+
     logits = model(x)
     train_loss = loss_func(logits, labels)
 

@@ -32,6 +32,7 @@ from model.architecture import ArchConfig
 from model.recursive import RecursiveArchConfig
 from task.fol_task_factory import FOLTaskFactory, RuleBankConfig
 from train import train, Case, warmup_cosine_schedule, loss_and_acc
+from train_recursive import train_recursive, RecursiveTrainConfig
 from wandb_utils import WandbConfig
 
 # ── Task ─────────────────────────────────────────────────────────────
@@ -102,11 +103,16 @@ configs = {}
 for prefix, ConfigCls, depth_key, block_type in ARCH_DEFS:
     for k in K_VALUES:
         name = f"{prefix}_k{k}"
-        n_blocks = 4 * k + 2
+        is_recursive = ConfigCls is RecursiveArchConfig
+        extra_kw = {}
+        if is_recursive:
+            extra_kw["use_act"] = True
+            extra_kw["act_beta"] = 0.1
         cfg = ConfigCls(
             core_block=block_type,
             **{depth_key: k},
             **shared_model_kw,
+            **extra_kw,
         )
         configs[name] = cfg
 
@@ -156,6 +162,8 @@ for name, config in configs.items():
         api_key_path="key/wandb.txt",
     )
 
+    is_recursive = isinstance(config, RecursiveArchConfig)
+
     cases.append(Case(
         name=name,
         config=config,
@@ -172,7 +180,13 @@ for name, config in configs.items():
             seed=SEED,
             wandb_cfg=wandb_cfg,
         ),
-        info={"n_params": n_params, "k": k, "arch": arch_type},
+        info={
+            "n_params": n_params,
+            "k": k,
+            "arch": arch_type,
+            "is_recursive": is_recursive,
+            "wandb_cfg": wandb_cfg,
+        },
     ))
 
 print(f"\nTotal cases: {len(cases)} (4 architectures × {len(K_VALUES)} depths)")
@@ -183,7 +197,36 @@ for i, case in enumerate(cases):
     print(f"  [{i+1}/{len(cases)}] Training: {case.name}")
     print(f"  {case.info['n_params']:,} params, k={case.info['k']}")
     print(f"{'='*60}\n")
-    case.run()
+
+    if case.info["is_recursive"]:
+        # Recursive models: use Ouro-style ACT training loop
+        rec_train_cfg = RecursiveTrainConfig(
+            train_iters=TRAIN_ITERS,
+            test_every=TEST_EVERY,
+            test_iters=2,
+            lr=LR,
+            warmup_frac=0.05,
+            beta_start=0.1,
+            beta_end=0.05,
+            beta_transition_frac=0.5,
+            weight_decay=0.1,
+            grad_clip=1.0,
+            adam_b1=0.9,
+            adam_b2=0.95,
+            stage2_iters=int(TRAIN_ITERS * 0.1),  # 10% of training for gate tuning
+            stage2_lr=1e-4,
+            seed=SEED,
+        )
+        case.optimizer, case.hist = train_recursive(
+            case.config,
+            rec_train_cfg,
+            train_iter=case.train_task,
+            test_iter=case.test_task,
+            wandb_cfg=case.info["wandb_cfg"],
+        )
+    else:
+        # Non-recursive models: standard CE training
+        case.run()
 
     final_train = case.hist['train'][-1] if case.hist['train'] else {}
     final_test = case.hist['test'][-1] if case.hist['test'] else {}
